@@ -159,6 +159,55 @@ import TurboFieldfareRepackCore
         #expect(model.selectedModelID == AppModelInstallDescriptor.qwen36.id)
     }
 
+    /// Free space is shared, so a running download has to shrink what the other
+    /// model believes it can use. Without this, both models pass their own
+    /// check on a disk that fits only one, and the second fails deep into a
+    /// multi-gigabyte transfer instead of before it starts.
+    @MainActor
+    @Test func aRunningDownloadReservesSpaceAgainstTheOtherModel() async {
+        // Room for one model but not both.
+        let diskBytes = AppModelInstallDescriptor.default.requiredFreeBytes
+            + AppModelInstallDescriptor.qwen36.installedBytes / 2
+        func installer(_ descriptor: AppModelInstallDescriptor)
+            -> MockModelInstallerClient {
+            MockModelInstallerClient(
+                requirement: AppModelInstallRequirement(
+                    requiredBytes: descriptor.requiredFreeBytes,
+                    availableBytes: diskBytes),
+                descriptor: descriptor,
+                holdOpen: true)
+        }
+        let model = makeModel(
+            selectedDirectory: temporaryInstallPath("reserve-gemma"),
+            selectedInstaller: installer(.default),
+            otherDirectory: temporaryInstallPath("reserve-qwen"),
+            otherInstaller: installer(.qwen36))
+        let qwen = try! #require(model.installs.first { $0.descriptor == .qwen36 })
+
+        // On an idle disk each model fits on its own.
+        #expect(model.selectedInstall.canInstall)
+        #expect(qwen.canInstall)
+
+        qwen.install()
+        await Task.yield()
+        #expect(qwen.isInstalling)
+
+        // Qwen now owes its whole installed size, which is no longer free.
+        model.installModel()
+        #expect(!model.selectedInstall.isInstalling)
+        if case .insufficientSpace(let requirement) = model.installReadiness {
+            #expect(requirement.shortfallBytes > 0)
+        } else {
+            Issue.record("expected insufficientSpace, got \(model.installReadiness)")
+        }
+
+        // Cancelling the first download releases the reservation.
+        qwen.cancel()
+        try? await waitUntil { !qwen.isInstalling }
+        model.refreshInstallReadiness()
+        #expect(model.selectedInstall.canInstall)
+    }
+
     @MainActor
     @Test func loadedModelBlocksSelectionWhileGenerating() {
         let model = makeModel(

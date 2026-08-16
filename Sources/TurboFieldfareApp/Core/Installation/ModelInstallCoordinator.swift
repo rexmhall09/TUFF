@@ -28,6 +28,28 @@ public final class ModelInstallCoordinator: Identifiable {
     /// react (clear a stale load, select the freshly installed model).
     public var onInstalled: ((ModelInstallCoordinator) -> Void)?
 
+    /// Bytes that other in-flight installs still have to write.
+    ///
+    /// A coordinator cannot see its siblings, but free space is shared: without
+    /// this, two models each ask "is there room for me?", both get yes on a disk
+    /// that fits only one, and the loser fails deep into a multi-gigabyte
+    /// transfer. The owner supplies the running total.
+    public var reservedByOtherInstalls: () -> UInt64 = { 0 }
+
+    /// Bytes this install still has to write, for sizing another model's
+    /// free-space check while this one runs.
+    ///
+    /// During payload copy the installer reports exact totals; before that the
+    /// pessimistic estimate is the whole installed size.
+    public var outstandingBytes: UInt64 {
+        guard isInstalling else { return 0 }
+        if case .copyingPayload(let reused, let downloaded, let total) = state {
+            let written = reused + downloaded
+            return total > written ? total - written : 0
+        }
+        return descriptor.installedBytes
+    }
+
     public nonisolated var id: String { descriptor.id }
 
     private let client: any AppModelInstallerClient
@@ -166,8 +188,18 @@ public final class ModelInstallCoordinator: Identifiable {
         guard !isInstalled else { return }
         readiness = .checking
         do {
-            let requirement = try client.checkInstallRequirement(
+            let measured = try client.checkInstallRequirement(
                 outputDirectory: directoryURL)
+            // The installer measures the whole disk. Anything another running
+            // install still owes is already spoken for, so it is not available
+            // to this one.
+            let reserved = reservedByOtherInstalls()
+            let requirement = AppModelInstallRequirement(
+                probePath: measured.probePath,
+                requiredBytes: measured.requiredBytes,
+                availableBytes: measured.availableBytes > reserved
+                    ? measured.availableBytes - reserved
+                    : 0)
             readiness = requirement.canInstall
                 ? .ready(requirement)
                 : .insufficientSpace(requirement)

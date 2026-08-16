@@ -111,6 +111,14 @@ public final class AppModel {
             coordinator.onInstalled = { [weak self] finished in
                 self?.modelDidInstall(finished)
             }
+            // Concurrent downloads share one disk, so each model's free-space
+            // check has to net out what the others still owe.
+            coordinator.reservedByOtherInstalls = { [weak self, weak coordinator] in
+                guard let self, let coordinator else { return 0 }
+                return self.installs
+                    .filter { $0 !== coordinator }
+                    .reduce(0) { $0 + $1.outstandingBytes }
+            }
         }
     }
 
