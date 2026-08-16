@@ -67,6 +67,32 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         self == .qwen36 ? "qwen36.gturbo" : "gemma4.gturbo"
     }
 
+    /// Stable identity for catalog lookups and UI selection. The install
+    /// directory basename already distinguishes the shipped models and is what
+    /// separates their downloads on disk, so it is the natural key.
+    public var id: String { installDirectoryName }
+
+    /// The model family this descriptor installs.
+    public var family: ModelFamily {
+        self == .qwen36 ? .qwen36 : .gemma4
+    }
+
+    /// Every model the app can install, in the order the UI lists them.
+    public static let catalog: [AppModelInstallDescriptor] = [.default, .qwen36]
+
+    /// A short line describing what the model is good for, shown beside its
+    /// name in the picker.
+    public var summary: String {
+        switch family {
+        case .gemma4:
+            return "26B total, 3.9B active. The original TurboFieldfare target; "
+                + "smallest install and lowest resident footprint."
+        case .qwen36:
+            return "35B total, 3B active. Hybrid linear/full attention, so its "
+                + "KV cache stays small at long context; larger install."
+        }
+    }
+
     /// The descriptor the app products select at launch. Defaults to Gemma 4.
     /// `TURBO_FIELDFARE_MODEL=qwen36` in the environment wins; otherwise the
     /// persisted preference (`defaults write TurboFieldfare model qwen36`)

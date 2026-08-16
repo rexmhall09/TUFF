@@ -28,11 +28,13 @@ public final class AppModel {
     public private(set) var sentPromptBehavior: AppSentPromptBehavior = .keep
     public var diagnostics: AppDiagnostics?
     public var error: AppInferenceError?
-    public var installState: AppModelInstallState = .idle
-    public private(set) var installETAPresentation: DownloadETAPresentation = .hidden
-    public private(set) var installETAText: String?
-    public private(set) var installReadiness: AppModelInstallReadiness = .checking
-    public private(set) var installationStatus: AppModelInstallationStatus
+    /// One coordinator per catalog model. Each owns its own directory,
+    /// installer, and progress, so their downloads run independently of each
+    /// other and of whichever model is selected.
+    public private(set) var installs: [ModelInstallCoordinator]
+    /// `AppModelInstallDescriptor.id` of the model the app is focused on: the
+    /// one it will load, and the one the single-model properties below report.
+    public private(set) var selectedModelID: String
 
     public var loadState: AppModelLoadState = .notLoaded
     public private(set) var loadedRuntimeKey: AppLoadedRuntimeKey?
@@ -45,30 +47,28 @@ public final class AppModel {
     public private(set) var isCancellationPending: Bool = false
 
     private let client: any AppInferenceClient
-    private let installer: any AppModelInstallerClient
     private var runTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
-    private var installTask: Task<Void, Never>?
     private var unloadTask: Task<Void, Never>?
     private var loadGeneration: UInt64 = 0
     private var unloadGeneration: UInt64 = 0
-    private var installGeneration: UInt64 = 0
     private var pendingExplicitLoadRuntimeKey: AppLoadedRuntimeKey?
     private var activeRunRuntimeKey: AppLoadedRuntimeKey?
     private var hasHandledTerminalEvent = false
     private let memorySampler: AppMemorySampler
     private let settingsPersistenceEnabled: Bool
-    private let installETAClock: SuspendingClock
-    private let installETAOrigin: SuspendingClock.Instant
-    private var installETAEstimator = DownloadETAEstimator()
 
+    /// `otherInstalls` replaces the coordinators the catalog would build for
+    /// the models `installer` does not cover. Callers that want the shipped
+    /// catalog leave it nil; tests pass their own so no catalog model reaches
+    /// the network or a real install directory.
     public init(modelDirectory: URL? = nil,
                 client: any AppInferenceClient = RealInferenceClient(),
                 installer: any AppModelInstallerClient = RepackModelInstallerClient(descriptor: .selected),
+                otherInstalls: [ModelInstallCoordinator]? = nil,
                 memorySampler: AppMemorySampler = AppMemorySampler(),
                 settingsPersistenceEnabled: Bool = false) {
         let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
-        let installETAClock = SuspendingClock()
         let settings = settingsPersistenceEnabled
             ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
             : MacAppSettings()
@@ -85,14 +85,74 @@ public final class AppModel {
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.sentPromptBehavior = settings.sentPromptBehavior
-        self.installationStatus = AppModelInstallationProbe.status(at: directory)
         self.client = client
-        self.installer = installer
         self.memorySampler = memorySampler
         self.settingsPersistenceEnabled = settingsPersistenceEnabled
-        self.installETAClock = installETAClock
-        self.installETAOrigin = installETAClock.now
-        refreshInstallReadiness()
+
+        // The injected installer owns the passed-in directory and becomes the
+        // selected model; the rest of the catalog gets shipped coordinators at
+        // their own default locations. Catalog order drives the UI listing.
+        let selected = ModelInstallCoordinator(
+            descriptor: installer.descriptor,
+            directoryURL: directory,
+            client: installer)
+        self.selectedModelID = selected.id
+        if let otherInstalls {
+            self.installs = [selected] + otherInstalls.filter { $0.id != selected.id }
+        } else {
+            self.installs = AppModelInstallDescriptor.catalog.map { candidate in
+                candidate.id == selected.id ? selected : .shipped(candidate)
+            }
+            if !self.installs.contains(where: { $0.id == selected.id }) {
+                self.installs.insert(selected, at: 0)
+            }
+        }
+        for coordinator in self.installs {
+            coordinator.onInstalled = { [weak self] finished in
+                self?.modelDidInstall(finished)
+            }
+        }
+    }
+
+    // MARK: - Model catalog
+
+    /// The coordinator for the selected model. Every single-model property
+    /// below reports this one.
+    public var selectedInstall: ModelInstallCoordinator {
+        installs.first { $0.id == selectedModelID } ?? installs[0]
+    }
+
+    public var selectedDescriptor: AppModelInstallDescriptor {
+        selectedInstall.descriptor
+    }
+
+    /// Whether any model in the catalog is downloading right now — the
+    /// selected one or not.
+    public var isInstallingAnyModel: Bool { installs.contains { $0.isInstalling } }
+
+    public func canSelectModel(_ coordinator: ModelInstallCoordinator) -> Bool {
+        !isRunning && !loadState.isLoading && coordinator.id != selectedModelID
+    }
+
+    /// Focus a different model. A download already running for either model is
+    /// left alone — only the loaded runtime and the active directory change.
+    public func selectModel(_ coordinator: ModelInstallCoordinator) {
+        guard canSelectModel(coordinator) else { return }
+        selectedModelID = coordinator.id
+        applySelectedModelDirectory(coordinator.directoryURL)
+    }
+
+    /// A finished install selects its model when nothing else is loaded, so a
+    /// first-run download lands the user in the conversation view.
+    private func modelDidInstall(_ coordinator: ModelInstallCoordinator) {
+        guard coordinator.id == selectedModelID else {
+            if loadState == .notLoaded, !isRunning, !selectedInstall.isInstalled {
+                selectModel(coordinator)
+            }
+            return
+        }
+        modelPathText = coordinator.directoryURL.path
+        loadState = .notLoaded
     }
 
     public var isRunning: Bool { runState == .running }
@@ -121,11 +181,27 @@ public final class AppModel {
         isModelInstalled && !isRunning && loadState.isReady
     }
 
-    public var isModelInstalled: Bool { installationStatus == .complete }
+    // MARK: - Selected model's install (delegates to `selectedInstall`)
+
+    public var installState: AppModelInstallState { selectedInstall.state }
+
+    public var installReadiness: AppModelInstallReadiness { selectedInstall.readiness }
+
+    public var installationStatus: AppModelInstallationStatus {
+        selectedInstall.installationStatus
+    }
+
+    public var installETAPresentation: DownloadETAPresentation {
+        selectedInstall.etaPresentation
+    }
+
+    public var installETAText: String? { selectedInstall.etaText }
+
+    public var isModelInstalled: Bool { selectedInstall.isInstalled }
 
     public var requiresModelInstallation: Bool { !isModelInstalled }
 
-    public var installDescriptor: AppModelInstallDescriptor { installer.descriptor }
+    public var installDescriptor: AppModelInstallDescriptor { selectedDescriptor }
 
     public var installRequirement: AppModelInstallRequirement? {
         installReadiness.requirement
@@ -134,12 +210,10 @@ public final class AppModel {
     public var isInstallingModel: Bool { installState.isInstalling }
 
     public var canInstallModel: Bool {
-        guard case .ready = installReadiness else { return false }
-        return !isRunning && !loadState.isLoading && !isInstallingModel
-            && requiresModelInstallation
+        selectedInstall.canInstall && !isRunning && !loadState.isLoading
     }
 
-    public var canCancelInstall: Bool { installState.canCancel }
+    public var canCancelInstall: Bool { selectedInstall.canCancel }
 
     public var installDownloadedBytes: UInt64? {
         guard case .copyingPayload(let reused, let downloaded, let total) = installState else {
@@ -272,23 +346,27 @@ public final class AppModel {
         temperature != 0
     }
 
+    /// Point the selected model at a different directory. Any install running
+    /// against the old location is abandoned; other models are untouched.
     public func setModelURL(_ url: URL) {
         guard !isRunning else { return }
         let path = url.standardizedFileURL.path
         guard path != modelPathText else { return }
+        selectedInstall.setDirectory(url)
+        applySelectedModelDirectory(url)
+    }
 
+    /// Shared tail of selecting a model and repointing one: adopt the
+    /// directory's persisted settings and drop everything tied to the runtime
+    /// that was loaded from the previous one.
+    private func applySelectedModelDirectory(_ url: URL) {
+        let path = url.standardizedFileURL.path
         modelPathText = path
         applyPersistedSettings(
             forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
         loadGeneration &+= 1
         loadTask?.cancel()
         loadTask = nil
-        installGeneration &+= 1
-        installTask?.cancel()
-        installer.cancel()
-        installTask = nil
-        resetInstallETA()
-        installState = .idle
         pendingExplicitLoadRuntimeKey = nil
         activeRunRuntimeKey = nil
         loadedRuntimeKey = nil
@@ -296,8 +374,7 @@ public final class AppModel {
         diagnostics = nil
         error = nil
         phase = .idle
-        installationStatus = AppModelInstallationProbe.status(at: URL(fileURLWithPath: path))
-        refreshInstallReadiness()
+        selectedInstall.refresh()
 
         if let lifecycle = client as? AppModelLifecycleClient {
             unloadGeneration &+= 1
@@ -426,201 +503,40 @@ public final class AppModel {
     }
 
     public func installModel() {
-        guard !isRunning, !loadState.isLoading, !isInstallingModel,
-              requiresModelInstallation else {
-            return
-        }
-        refreshInstallReadiness()
-        guard canInstallModel else { return }
-        installTask?.cancel()
-        installer.cancel()
-        resetInstallETA()
-        let outputDirectory = URL(fileURLWithPath: modelPathText)
-        installGeneration &+= 1
-        let generation = installGeneration
-        installState = .checking
-        installTask = Task { [weak self, installer] in
-            do {
-                for try await event in installer.installDefaultModel(outputDirectory: outputDirectory) {
-                    guard let self else { return }
-                    self.applyInstallEvent(event, generation: generation)
-                }
-                self?.finishInstallStream(generation: generation)
-            } catch is CancellationError {
-                self?.finishInstallCancellation(generation: generation)
-            } catch {
-                self?.finishInstallFailure(error, generation: generation)
-            }
-        }
+        guard !isRunning, !loadState.isLoading else { return }
+        selectedInstall.install()
     }
 
     public func cancelInstall() {
-        guard canCancelInstall else { return }
-        installState = .cancelling
-        installer.cancel()
+        selectedInstall.cancel()
     }
 
-    public var hasPartialModelDownload: Bool {
-        guard let paths = try? RemoteInstallPaths(outputDirectory: modelPathText) else {
-            return false
-        }
-        return FileManager.default.fileExists(atPath: paths.partialDirectory)
-            || FileManager.default.fileExists(atPath: paths.checkpointFile)
-    }
+    public var hasPartialModelDownload: Bool { selectedInstall.hasPartialDownload }
 
     public var canDiscardModelDownload: Bool {
-        hasPartialModelDownload && !isInstallingModel && !isRunning
+        selectedInstall.canDiscard && !isRunning
     }
 
     public func discardModelDownload() {
-        guard canDiscardModelDownload else { return }
-        let outputDirectory = URL(fileURLWithPath: modelPathText)
-        installGeneration &+= 1
-        let generation = installGeneration
-        installState = .discarding
-        installTask = Task { [weak self, installer] in
-            do {
-                try await installer.discardPartialInstall(
-                    outputDirectory: outputDirectory)
-                guard let self, generation == self.installGeneration else { return }
-                self.installTask = nil
-                self.installState = .idle
-                self.refreshInstallReadiness()
-            } catch {
-                self?.finishInstallFailure(error, generation: generation)
-            }
-        }
+        guard !isRunning else { return }
+        selectedInstall.discard()
     }
 
+    /// Re-probe every catalog model, so a download that finished in another
+    /// model's coordinator and a model installed outside the app both show up.
     public func refreshInstallReadiness() {
-        refreshInstallReadiness(
-            at: URL(fileURLWithPath: modelPathText, isDirectory: true).standardizedFileURL)
+        for coordinator in installs { coordinator.refresh() }
     }
 
+    /// Adopt whatever path the user typed into the location field, then
+    /// re-probe. The field is authoritative here — this is the "Check Again"
+    /// action after pointing the app at an existing install.
     public func recheckModelAtCurrentLocation() {
         let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
             .standardizedFileURL
         modelPathText = directory.path
-        refreshInstallReadiness(at: directory)
-    }
-
-    private func refreshInstallReadiness(at outputDirectory: URL) {
-        // Accept whichever supported model is installed here; the runtime
-        // detects the family from the manifest at load. Only the post-install
-        // check below pins the result to the descriptor we downloaded.
-        installationStatus = AppModelInstallationProbe.status(at: outputDirectory)
-        guard !isModelInstalled else { return }
-        installReadiness = .checking
-        do {
-            let requirement = try installer.checkInstallRequirement(
-                outputDirectory: outputDirectory)
-            installReadiness = requirement.canInstall
-                ? .ready(requirement)
-                : .insufficientSpace(requirement)
-        } catch {
-            installReadiness = .failed("\(error)")
-        }
-    }
-
-    private func applyInstallEvent(_ event: AppModelInstallEvent, generation: UInt64) {
-        guard generation == installGeneration else { return }
-        switch event {
-        case .checking:
-            resetInstallETA()
-            installState = .checking
-        case .downloadingMetadata:
-            resetInstallETA()
-            installState = .downloadingMetadata
-        case .planning:
-            resetInstallETA()
-            installState = .planning
-        case .reservingOutput:
-            resetInstallETA()
-            installState = .reservingOutput
-        case .copyingPayload(let reused, let downloadedThisRun, let total):
-            installState = .copyingPayload(
-                reusedBytes: reused,
-                downloadedThisRunBytes: downloadedThisRun,
-                totalBytes: total)
-            updateInstallETA(
-                reusedBytes: reused,
-                downloadedThisRunBytes: downloadedThisRun,
-                totalBytes: total)
-        case .hashingOutput(let file):
-            resetInstallETA()
-            installState = .hashingOutput(file)
-        case .finalizing:
-            resetInstallETA()
-            installState = .finalizing
-        case .installed(let directory):
-            resetInstallETA()
-            let directory = directory.standardizedFileURL
-            installationStatus = AppModelInstallationProbe.status(
-                at: directory,
-                descriptor: installer.descriptor)
-            guard installationStatus == .complete else {
-                finishInstallFailure(
-                    RepackError.configurationInvalid(detail: "completed install did not pass metadata validation"),
-                    generation: generation)
-                return
-            }
-            installState = .installed(modelDirectory: directory)
-            installTask = nil
-            modelPathText = directory.path
-            loadState = .notLoaded
-        }
-    }
-
-    private func finishInstallStream(generation: UInt64) {
-        guard generation == installGeneration, installTask != nil else { return }
-        if installState == .cancelling {
-            finishInstallCancellation(generation: generation)
-        } else if !isModelInstalled {
-            finishInstallFailure(
-                RepackError.configurationInvalid(detail: "installer ended before completion"),
-                generation: generation)
-        }
-    }
-
-    private func finishInstallCancellation(generation: UInt64) {
-        guard generation == installGeneration else { return }
-        installTask = nil
-        installState = .cancelled
-        resetInstallETA()
+        selectedInstall.setDirectory(directory)
         refreshInstallReadiness()
-    }
-
-    private func updateInstallETA(
-        reusedBytes: UInt64,
-        downloadedThisRunBytes: UInt64,
-        totalBytes: UInt64
-    ) {
-        let observation = DownloadETAObservation(
-            reusedBytes: reusedBytes,
-            downloadedThisRunBytes: downloadedThisRunBytes,
-            totalBytes: totalBytes)
-        let timestamp = installETATimestamp
-        setInstallETAPresentation(
-            installETAEstimator.update(observation, timestamp: timestamp))
-    }
-
-    private var installETATimestamp: Double {
-        let components = installETAOrigin.duration(to: installETAClock.now).components
-        return Double(components.seconds)
-            + Double(components.attoseconds) / 1_000_000_000_000_000_000
-    }
-
-    private func resetInstallETA() {
-        installETAEstimator.reset()
-        installETAPresentation = .hidden
-        installETAText = nil
-    }
-
-    private func setInstallETAPresentation(
-        _ presentation: DownloadETAPresentation
-    ) {
-        installETAPresentation = presentation
-        installETAText = DownloadETAFormatter.string(for: presentation)
     }
 
     private func applyPersistedSettings(forModelDirectory modelDirectory: URL) {
@@ -659,26 +575,6 @@ public final class AppModel {
         try? MacAppSettingsFileStore.save(
             settings,
             forModelDirectory: modelDirectory)
-    }
-
-    private func finishInstallFailure(_ error: Error, generation: UInt64) {
-        guard generation == installGeneration else { return }
-        installTask = nil
-        resetInstallETA()
-        let hasSavedDownload = hasPartialModelDownload
-        installState = hasSavedDownload ? .recoverable("\(error)") : .failed("\(error)")
-        if let repackError = error as? RepackError,
-           case .diskSpaceInsufficient(let path, let required, let available) = repackError {
-            let requirement = AppModelInstallRequirement(probePath: path,
-                                                          requiredBytes: required,
-                                                          availableBytes: available)
-            installReadiness = .insufficientSpace(requirement)
-        } else {
-            refreshInstallReadiness()
-            if hasSavedDownload {
-                installState = .recoverable("\(error)")
-            }
-        }
     }
 
     func applyLoadState(_ state: AppModelLoadState) {

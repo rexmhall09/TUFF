@@ -8,6 +8,7 @@ struct InspectorView: View {
     var body: some View {
         Form {
             modelSection
+            catalogSection
             memorySection
             generationSection
             runtimeSection
@@ -68,6 +69,20 @@ struct InspectorView: View {
             }
         }
         .disabled(model.isRunning || model.isInstallingModel)
+    }
+
+    /// Not disabled while a download runs: switching models and starting a
+    /// second download are exactly the things this section exists to allow
+    /// mid-transfer. The individual controls guard themselves.
+    private var catalogSection: some View {
+        Section("Models") {
+            ModelCatalogView(model: model, compact: true)
+                .listRowInsets(EdgeInsets())
+            Text("Downloads are per model and keep running while you use "
+                 + "another one.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var memorySection: some View {

@@ -3,7 +3,17 @@ import Foundation
 import TurboFieldfare
 @testable import TurboFieldfareAppCore
 
-func makeCompleteModelInstall(_ tag: String) throws -> URL {
+/// A complete, probe-passing `.gturbo` directory.
+///
+/// The architecture written is always Gemma 4; `stampedAs` only changes the
+/// recorded source snapshot hash, which is what the probe compares against a
+/// descriptor. That is enough to stand in for another catalog model in tests
+/// about install plumbing, and the probe's own family detection is covered
+/// separately by `AppModelInstallationProbeTests`.
+func makeCompleteModelInstall(
+    _ tag: String,
+    stampedAs descriptor: AppModelInstallDescriptor = .default
+) throws -> URL {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("turbofieldfare-complete-\(tag)-\(UUID().uuidString).gturbo")
     let experts = directory.appendingPathComponent("packed_experts", isDirectory: true)
@@ -27,7 +37,7 @@ func makeCompleteModelInstall(_ tag: String) throws -> URL {
         "versionMinor": 0,
         "flags": ["streamingPresent": true],
         "modelID": "test/gemma-4-26b-a4b",
-        "sourceSnapshotHash": "sha256:" + AppModelInstallDescriptor.default.sourceIndexSHA256,
+        "sourceSnapshotHash": "sha256:" + descriptor.sourceIndexSHA256,
         "quant": [
             "embedding": quantSlot(4),
             "attention": quantSlot(4),
