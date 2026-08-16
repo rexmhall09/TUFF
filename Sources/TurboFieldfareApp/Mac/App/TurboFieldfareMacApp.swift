@@ -50,6 +50,10 @@ struct TurboFieldfareMacApp: App {
                 }
             }
             CommandMenu("Generation") {
+                Button("New Conversation") { model.clearOutput() }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .disabled(model.isRunning || !model.hasOutputTranscript)
+                Divider()
                 Button("Cancel Generation") { model.cancel() }
                     .keyboardShortcut(".", modifiers: .command)
                     .disabled(!model.canCancel)

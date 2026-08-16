@@ -99,6 +99,9 @@ import TurboFieldfareDecodeProtocol
                     let options = try appRuntimeOptions(request.runtimeOptions)
                     let generation = AppGenerationRequest(
                         modelDirectory: modelDirectory, prompt: request.prompt,
+                        history: request.history.map {
+                            AppChatTurn(prompt: $0.prompt, response: $0.response)
+                        },
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,

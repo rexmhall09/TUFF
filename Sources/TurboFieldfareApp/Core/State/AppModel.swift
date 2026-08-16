@@ -14,6 +14,9 @@ public final class AppModel {
     public var promptText: String = ""
     public private(set) var outputPromptText: String = ""
     public var outputText: String = ""
+    /// Completed exchanges, oldest first. The in-flight exchange lives in
+    /// `outputPromptText` / `outputText` and only joins this once it finishes.
+    public private(set) var conversation: [AppChatTurn] = []
     public var runState: RunState = .idle
     public var runtimeOptions = AppRuntimeOptions()
     public var maxNewTokensOverride: Int?
@@ -290,8 +293,11 @@ public final class AppModel {
     public var canCancel: Bool { isRunning && !isCancellationPending }
 
     public var hasOutputTranscript: Bool {
-        !outputPromptText.isEmpty || !outputText.isEmpty
+        !conversation.isEmpty || !outputPromptText.isEmpty || !outputText.isEmpty
     }
+
+    /// Completed turns the next prompt will carry as context.
+    public var conversationTurnCount: Int { conversation.count }
 
     public var outputResponsePlainText: String {
         generationTranscriptMailbox?.completeText ?? outputText
@@ -614,8 +620,11 @@ public final class AppModel {
         }
     }
 
+    /// Clear the transcript and start a fresh conversation. The next prompt
+    /// carries no history, so the model starts from nothing.
     public func clearOutput() {
         guard !isRunning else { return }
+        conversation = []
         outputPromptText = ""
         outputText = ""
         generationTranscriptMailbox?.reset()
@@ -685,6 +694,7 @@ public final class AppModel {
         let request = AppGenerationRequest(
             modelDirectory: URL(fileURLWithPath: modelPathText),
             prompt: promptText,
+            history: conversation,
             maxNewTokens: maxNewTokensOverride ?? maxContextTokens,
             maxContextTokens: maxContextTokens,
             temperature: Float(temperature),
@@ -730,6 +740,14 @@ public final class AppModel {
         hasHandledTerminalEvent = true
         materializeServiceTranscript()
         self.diagnostics = diagnostics
+        // Only a completed exchange becomes context. A cancelled or failed run
+        // leaves no turn behind, so the model never treats a truncated answer
+        // of its own as established.
+        let response = outputResponsePlainText
+        if !outputPromptText.isEmpty, !response.isEmpty {
+            conversation.append(
+                AppChatTurn(prompt: outputPromptText, response: response))
+        }
         finishTerminalRun()
     }
 

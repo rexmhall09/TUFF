@@ -20,6 +20,7 @@ public final class InstructionTranscriptDocumentController {
         }
     }
 
+    public private(set) var history: [TranscriptTurn] = []
     public private(set) var prompt = ""
     public private(set) var response = ""
     public private(set) var isFinalized = false
@@ -63,6 +64,7 @@ public final class InstructionTranscriptDocumentController {
     @discardableResult
     public func synchronize(
         storage: NSMutableAttributedString,
+        history: [TranscriptTurn] = [],
         prompt: String,
         response: String,
         isTerminal: Bool,
@@ -74,6 +76,7 @@ public final class InstructionTranscriptDocumentController {
             isTerminal: isTerminal,
             requested: showsPrefillPlaceholder)
         let needsRebuild = prompt != self.prompt
+            || history != self.history
             || !response.hasPrefix(self.response)
             || (isFinalized && !isTerminal)
             || displaysPrefillPlaceholder != self.showsPrefillPlaceholder
@@ -84,6 +87,7 @@ public final class InstructionTranscriptDocumentController {
                 && (!prompt.isEmpty || !response.isEmpty || displaysPrefillPlaceholder) {
             rebuild(
                 storage: storage,
+                history: history,
                 prompt: prompt,
                 response: response,
                 showsPrefillPlaceholder: displaysPrefillPlaceholder)
@@ -97,6 +101,7 @@ public final class InstructionTranscriptDocumentController {
             mutation = .appended
         }
 
+        self.history = history
         self.prompt = prompt
         self.response = response
         self.showsPrefillPlaceholder = displaysPrefillPlaceholder
@@ -133,11 +138,27 @@ public final class InstructionTranscriptDocumentController {
 
     private func rebuild(
         storage: NSMutableAttributedString,
+        history: [TranscriptTurn],
         prompt: String,
         response: String,
         showsPrefillPlaceholder: Bool
     ) {
         let document = NSMutableAttributedString()
+        // Completed turns first, so the live exchange stays at the bottom where
+        // the scroll-to-bottom behavior expects it.
+        for turn in history {
+            document.append(NSAttributedString(
+                string: "You\n", attributes: Self.userLabelAttributes()))
+            document.append(NSAttributedString(
+                string: turn.prompt, attributes: Self.promptAttributes()))
+            document.append(NSAttributedString(
+                string: "\n\n", attributes: Self.promptAttributes()))
+            document.append(NSAttributedString(
+                string: "Answer\n", attributes: Self.assistantLabelAttributes()))
+            document.append(renderer.render(turn.response).attributedString)
+            document.append(NSAttributedString(
+                string: "\n\n", attributes: Self.responseAttributes()))
+        }
         if !prompt.isEmpty {
             document.append(NSAttributedString(
                 string: "You\n",

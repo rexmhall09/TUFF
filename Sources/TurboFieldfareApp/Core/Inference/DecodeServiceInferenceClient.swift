@@ -80,7 +80,11 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     let generationID = UUID()
                     generationTranscriptMailbox.reset()
                     let command = DecodeGenerationRequest(
-                        prompt: request.prompt, maxNewTokens: request.maxNewTokens,
+                        prompt: request.prompt,
+                        history: request.history.map {
+                            DecodeChatTurn(prompt: $0.prompt, response: $0.response)
+                        },
+                        maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,
                         repetitionPenalty: request.repetitionPenalty,

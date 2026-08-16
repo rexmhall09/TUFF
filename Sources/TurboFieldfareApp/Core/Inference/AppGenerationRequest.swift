@@ -3,6 +3,9 @@ import Foundation
 public struct AppGenerationRequest: Equatable, Sendable {
     public var modelDirectory: URL
     public var prompt: String
+    /// Completed turns preceding `prompt`, oldest first. Empty is the
+    /// single-turn behavior this type had before.
+    public var history: [AppChatTurn]
     public var maxNewTokens: Int
     public var maxContextTokens: Int
     public var temperature: Float
@@ -13,6 +16,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
 
     public init(modelDirectory: URL,
                 prompt: String,
+                history: [AppChatTurn] = [],
                 maxNewTokens: Int = 4_096,
                 maxContextTokens: Int = 4096,
                 temperature: Float = 0.2,
@@ -22,6 +26,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 runtimeOptions: AppRuntimeOptions = AppRuntimeOptions()) {
         self.modelDirectory = modelDirectory
         self.prompt = prompt
+        self.history = history
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
         self.temperature = temperature

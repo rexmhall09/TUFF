@@ -253,6 +253,59 @@ actor RealInferenceSession {
         min(requested, max(0, maxContext - promptTokenCount))
     }
 
+    struct RenderedConversation {
+        let tokens: [Int32]
+        let trim: AppConversationTrim
+    }
+
+    /// Render the conversation to tokens, dropping oldest turns until it fits.
+    ///
+    /// A conversation grows without bound while the context window does not, so
+    /// something has to give. Dropping from the front keeps the newest exchanges
+    /// — the ones a follow-up question actually depends on — and keeps the app
+    /// usable instead of failing the moment history outgrows the window.
+    ///
+    /// The current prompt is never dropped: if it alone does not fit, that is a
+    /// real context overflow and is reported as one, exactly as before.
+    static func renderConversation(
+        request: AppGenerationRequest,
+        tokenizer: GFTokenizer,
+        maxContext: Int
+    ) throws -> RenderedConversation {
+        func encode(_ turns: ArraySlice<AppChatTurn>) throws -> [Int32] {
+            var messages: [GFTokenizer.Message] = []
+            messages.reserveCapacity(turns.count * 2 + 1)
+            for turn in turns {
+                messages.append(GFTokenizer.Message(role: .user, content: turn.prompt))
+                messages.append(
+                    GFTokenizer.Message(role: .assistant, content: turn.response))
+            }
+            messages.append(GFTokenizer.Message(role: .user, content: request.prompt))
+            return tokenizer.encode(
+                try tokenizer.applyChatTemplate(messages), addBOS: false)
+        }
+
+        var dropped = 0
+        while true {
+            let kept = request.history[dropped...]
+            let tokens = try encode(kept)
+            if tokens.count < maxContext {
+                return RenderedConversation(
+                    tokens: tokens,
+                    trim: AppConversationTrim(droppedTurns: dropped,
+                                              promptTokens: tokens.count))
+            }
+            guard dropped < request.history.count else {
+                // Nothing left to drop; the prompt itself overflows.
+                throw AppInferenceError.contextOverflow(
+                    prompt: tokens.count,
+                    maxNew: request.maxNewTokens,
+                    maxContext: maxContext)
+            }
+            dropped += 1
+        }
+    }
+
     func unload() {
         runner = nil
         scratch = nil
@@ -284,16 +337,13 @@ actor RealInferenceSession {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
 
-            let renderedPrompt = try tokenizer.applyChatTemplate([
-                GFTokenizer.Message(role: .user, content: request.prompt)
-            ])
-            let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
+            let rendered = try Self.renderConversation(
+                request: request,
+                tokenizer: tokenizer,
+                maxContext: runner.maxContext)
+            let promptIds = rendered.tokens
             progress.promptTokenCount = promptIds.count
-            guard promptIds.count < runner.maxContext else {
-                throw AppInferenceError.contextOverflow(prompt: promptIds.count,
-                                                        maxNew: request.maxNewTokens,
-                                                        maxContext: runner.maxContext)
-            }
+            progress.conversationTrim = rendered.trim
             memorySampler.resetPeak()
             _ = memorySampler.sample()
             let config = Self.generationConfig(
@@ -472,6 +522,7 @@ actor RealInferenceSession {
 private final class ProgressState: @unchecked Sendable {
     var generated = 0
     var promptTokenCount: Int?
+    var conversationTrim: AppConversationTrim?
     var prefillStart: Date?
     var decodeStart: Date?
     var firstTokenDate: Date?
