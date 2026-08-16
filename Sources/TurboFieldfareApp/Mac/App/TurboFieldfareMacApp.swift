@@ -33,7 +33,7 @@ struct TurboFieldfareMacApp: App {
     }
 
     var body: some Scene {
-        Window("TurboFieldfare", id: "main") {
+        Window("TUFF", id: "main") {
             RootView(model: model)
                 .frame(minWidth: 1040, minHeight: 560)
         }
@@ -42,7 +42,7 @@ struct TurboFieldfareMacApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appInfo) {
-                Button("About TurboFieldfare") {
+                Button("About TUFF") {
                     NSApp.orderFrontStandardAboutPanel(
                         options: AboutPanelPresentation.options(
                             infoDictionary: Bundle.main.infoDictionary,

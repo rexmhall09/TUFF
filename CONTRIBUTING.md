@@ -1,6 +1,6 @@
 # Contributing
 
-TurboFieldfare welcomes focused fixes, documentation improvements, and
+TUFF welcomes focused fixes, documentation improvements, and
 benchmark reports from Apple Silicon Macs.
 
 ## Before opening a change

@@ -6,13 +6,13 @@ Security fixes are applied to the latest version of the `main` branch. Older
 commits, forks, experimental branches, and modified model packages are not
 supported.
 
-TurboFieldfare is a research project. It is not intended for production,
+TUFF is a research project. It is not intended for production,
 multi-user, or security-critical deployments.
 
 ## Reporting a vulnerability
 
 Do not open a public issue for a suspected security vulnerability. Use
-[GitHub private vulnerability reporting](https://github.com/drumih/turbo-fieldfare/security/advisories/new)
+[GitHub private vulnerability reporting](https://github.com/rexmhall09/TUFF/security/advisories/new)
 instead.
 
 Include:

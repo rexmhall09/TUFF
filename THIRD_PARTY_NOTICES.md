@@ -1,7 +1,7 @@
 # Third-party software and model terms
 
-TurboFieldfare repository source is licensed under the
-[Apache License 2.0](LICENSE). That license applies to TurboFieldfare's own source
+TUFF repository source is licensed under the
+[Apache License 2.0](LICENSE). That license applies to TUFF's own source
 and documentation. It does not relicense model weights or third-party
 packages.
 
@@ -22,7 +22,7 @@ Google publishes Gemma 4 under the
 [Apache License 2.0](https://ai.google.dev/gemma/apache_2).
 
 Downloaded weights remain a separate work governed by their source terms. Do
-not redistribute weights as part of TurboFieldfare releases.
+not redistribute weights as part of TUFF releases.
 
 ## Swift package graph
 

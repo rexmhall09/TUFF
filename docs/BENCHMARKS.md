@@ -1,11 +1,11 @@
 # Benchmarks
 
-This page records TurboFieldfare measurements on an 8 GB M2 MacBook Air and a
+This page records TUFF measurements on an 8 GB M2 MacBook Air and a
 24 GB M5 Pro. Each number belongs to the workload shown. Prompt length,
 generated length, cache state, and hardware all change throughput, so ranges
 across workloads are not run-to-run variation.
 
-Each table states its workload and decoding settings. TurboFieldfare uses the
+Each table states its workload and decoding settings. TUFF uses the
 model installed by the [command-line instructions](../README.md#command-line-interface).
 Decode rate excludes model installation, model loading, and prompt prefill.
 
@@ -13,10 +13,10 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 
 | Host and runtime | Decode rate | Reported memory |
 | --- | ---: | ---: |
-| 8 GB M2, TurboFieldfare | 5.10-6.30 tok/s | ~1.9-2.1 GB footprint |
-| 24 GB M5 Pro, TurboFieldfare | 31-35 tok/s | ~2.1 GB footprint |
+| 8 GB M2, TUFF | 5.10-6.30 tok/s | ~1.9-2.1 GB footprint |
+| 24 GB M5 Pro, TUFF | 31-35 tok/s | ~2.1 GB footprint |
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
-| M5, TurboFieldfare, Qwen 3.6 35B-A3B | 18.8-23.1 tok/s | ~1.45 GB footprint |
+| M5, TUFF, Qwen 3.6 35B-A3B | 18.8-23.1 tok/s | ~1.45 GB footprint |
 
 ## M2 measured decode
 
@@ -130,12 +130,12 @@ Treat this as throughput context, not a complete engine comparison:
 - The engines ran in separate blocks rather than a balanced, interleaved order.
 - Their first-token clocks started at different points, so TTFT is not comparable.
 - Generated IDs matched for the shortest prompt but diverged for the two longer prompts.
-- TurboFieldfare recorded a 1.89-2.09 GiB physical footprint. MLX reported
+- TUFF recorded a 1.89-2.09 GiB physical footprint. MLX reported
   14.66-15.31 GB of peak GPU allocation and 8.27-9.79 GB of peak process RSS.
   Those counters measure different things and should not be compared as a
   direct memory ratio.
 
-The MLX process required the larger host and is not an 8 GB TurboFieldfare
+The MLX process required the larger host and is not an 8 GB TUFF
 deployment path.
 
 ## Reproduce and contribute a result

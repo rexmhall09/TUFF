@@ -20,7 +20,7 @@ require "uri"
 
 ROOT = File.expand_path("..", __dir__)
 SOURCE = File.join(ROOT, "Sources/TurboFieldfareApp/MacPresentation/AboutPanelPresentation.swift")
-RELEASES_URL = "https://api.github.com/repos/drumih/turbo-fieldfare/releases?per_page=100"
+RELEASES_URL = "https://api.github.com/repos/rexmhall09/TUFF/releases?per_page=100"
 
 def compiled_version
   source = File.read(SOURCE)
@@ -36,7 +36,7 @@ def published_versions
   uri = URI(RELEASES_URL)
   request = Net::HTTP::Get.new(uri)
   request["Accept"] = "application/vnd.github+json"
-  request["User-Agent"] = "turbofieldfare-version-check"
+  request["User-Agent"] = "tuff-version-check"
   token = ENV["GITHUB_TOKEN"] || ENV["GH_TOKEN"]
   request["Authorization"] = "Bearer #{token}" if token && !token.empty?
 

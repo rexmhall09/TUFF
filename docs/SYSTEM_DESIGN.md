@@ -1,6 +1,6 @@
 # System design
 
-TurboFieldfare is a Swift and Metal runtime for Gemma 4 26B-A4B on Apple
+TUFF is a Swift and Metal runtime for Gemma 4 26B-A4B on Apple
 Silicon. The text-only installation is about 14.3 GB, but the target machine
 has 8 GB of memory. The runtime keeps the common weights and working state
 available to Metal. It stores routed experts in per-layer files and reads only
@@ -129,11 +129,11 @@ records which manifest, directory, and files were verified.
 files and resident index used by the installer, verifier, and runtime. This
 keeps parsing and validation consistent across all three.
 
-The model path itself may be a symlink. TurboFieldfare resolves it once when
+The model path itself may be a symlink. TUFF resolves it once when
 the model opens, then rejects any symlinks inside the model directory. Changing
 the original symlink later cannot switch files under a running model.
 
-By default, TurboFieldfare hashes `manifest.json`, `model_weights.bin`, and
+By default, TUFF hashes `manifest.json`, `model_weights.bin`, and
 `packed_experts/layout.json` at load, then hashes each routed-expert layer file
 on first use. The trusted-receipt policy is an explicit alternative. It still
 hashes the same three common files. For large layer files, it checks the
@@ -261,7 +261,7 @@ The production profile handles up to 128 prompt tokens at a time. Execution
 stays layer-major: it moves each bounded group of rows through the transformer
 one layer at a time, without holding expert activations for the full prompt.
 
-For each chunk and layer, TurboFieldfare:
+For each chunk and layer, TUFF:
 
 - runs projection GEMM/QMM paths where the row count can amortize setup;
 - applies causal sliding-window or full attention and writes K/V rows;
@@ -357,7 +357,7 @@ logits path, temperature `0` selects the argmax after any repetition penalty.
 
 ## Metal execution
 
-TurboFieldfare compiles its Metal source at runtime. Decode uses custom affine
+TUFF compiles its Metal source at runtime. Decode uses custom affine
 INT4 and INT8 GEMV kernels that consume the checkpoint's packed values, BF16
 scales, and BF16 biases directly. MPP prefill dequantizes one bounded weight
 tile into FP16 threadgroup memory and passes FP16 tensors to `matmul2d`. The
@@ -439,7 +439,7 @@ references lead to the supporting code and tests.
 
 The runtime supports text-only generation from two pinned instruction
 checkpoints, Gemma 4 26B-A4B and Qwen 3.6 35B-A3B. Both source models support
-image input; TurboFieldfare omits both vision towers.
+image input; TUFF omits both vision towers.
 
 Qwen 3.6 is selected from `manifest.json -> arch.family`. It is a hybrid of 30
 gated-DeltaNet linear-attention layers and 10 gated full-attention layers, with
@@ -463,7 +463,7 @@ warm model, serializes generation, and retains one verified conversational KV
 prefix by default. It retains only that prefix. See the
 [local server guide](OPENAI_SERVER.md).
 
-TurboFieldfare is a research system. The Mac app exposes a small set of typed
+TUFF is a research system. The Mac app exposes a small set of typed
 runtime controls. The production path uses FP16 KV, exact split-K/V
 attention, a 16-slot LFU expert cache, chunked prefill, staged affine MPP
 prefill, and batched routed MoE prefill. File-read advice (`RDADVISE`) is off by
@@ -473,6 +473,6 @@ default.
 
 - [Local OpenAI-compatible server](OPENAI_SERVER.md)
 - [Benchmarks](BENCHMARKS.md)
-- [The experiments that shaped TurboFieldfare](OPTIMIZATION_JOURNEY.md)
+- [The experiments that shaped TUFF](OPTIMIZATION_JOURNEY.md)
 - [Complete experiment inventory](experiments/EXPERIMENT_INVENTORY.md)
 - [Implementation references](IMPLEMENTATION_REFERENCES.md)

@@ -3,10 +3,10 @@ import TurboFieldfareRepackCore
 
 private let usage = """
 Usage:
-  TurboFieldfareRepack [--model <gemma4|qwen36>] --output <model.gturbo> [--overwrite] [--resume] [--repo-id <owner/repo>] [--revision <ref>]
-  TurboFieldfareRepack --discard-partial --output <model.gturbo>
-  TurboFieldfareRepack --verify-install --input-gturbo <model.gturbo>
-  TurboFieldfareRepack --help
+  TUFFRepack [--model <gemma4|qwen36>] --output <model.gturbo> [--overwrite] [--resume] [--repo-id <owner/repo>] [--revision <ref>]
+  TUFFRepack --discard-partial --output <model.gturbo>
+  TUFFRepack --verify-install --input-gturbo <model.gturbo>
+  TUFFRepack --help
 
 The installer streams the selected checkpoint (default: the supported Gemma 4
 checkpoint) from Hugging Face and repackages it without materializing the

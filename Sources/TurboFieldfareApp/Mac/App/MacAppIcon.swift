@@ -5,7 +5,7 @@ import AppKit
 enum MacAppIcon {
     static func load() -> NSImage? {
         guard let url = Bundle.module.url(
-            forResource: "turbofieldfare-app-icon",
+            forResource: "tuff-app-icon",
             withExtension: "png"
         ) else { return nil }
         return NSImage(contentsOf: url)

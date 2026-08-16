@@ -1,4 +1,4 @@
-# TurboFieldfare
+# TUFF
 
 Swift and Metal inference for Gemma 4 26B-A4B on Apple Silicon.
 
@@ -16,11 +16,11 @@ Mac app.
 `Tests/` contains focused public tests; `docs/` contains design, benchmark, and experiment notes.
 
 ```bash
-swift run -c release TurboFieldfareRepack --output scratch/gemma4.gturbo
-swift run -c release TurboFieldfareRepack --output scratch/gemma4.gturbo --resume
+swift run -c release TUFFRepack --output scratch/gemma4.gturbo
+swift run -c release TUFFRepack --output scratch/gemma4.gturbo --resume
 swift build -c release
-.build/release/TurboFieldfareMac
-swift run -c release TurboFieldfareCLI \
+.build/release/TUFF
+swift run -c release TUFFCLI \
   --model scratch/gemma4.gturbo \
   --prompt "The capital of France is" \
   --max-new 64
@@ -42,7 +42,7 @@ the server is needed, and stop only a server you launched.
 
 ## Test rules
 
-Before a model run, require macOS 15+, Swift 6.2+, enough disk, acceptable `memory_pressure -Q`, a completed `scratch/gemma4.gturbo`, and no process from `pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
+Before a model run, require macOS 15+, Swift 6.2+, enough disk, acceptable `memory_pressure -Q`, a completed `scratch/gemma4.gturbo`, and no process from `pgrep -fl 'TUFFServer|TUFF|TUFFDecodeService|TUFFCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
 
 Run package tests through `Scripts/test.sh`. Run only one app, CLI, or model-using test at a time.
 
@@ -60,5 +60,5 @@ and RDADVISE. The defaults are temperature `0.2`, Top-K `64`, and Top-P `0.95`.
 Responses can use the context space left after formatting the prompt, and FP16
 is the runtime KV format. The HUD shows generation rate, token count, and
 decode-service memory; Last run also shows time to first token and I/O. Build
-the app with its sibling `TurboFieldfareDecodeService`; it never loads a second
+the app with its sibling `TUFFDecodeService`; it never loads a second
 in-process model. See [README](README.md) and [Runtime controls](docs/RUNTIME_CONTROLS.md).

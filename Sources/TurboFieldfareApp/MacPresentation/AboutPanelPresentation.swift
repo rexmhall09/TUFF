@@ -12,7 +12,7 @@ public struct AboutPanelContent: Equatable, Sendable {
 }
 
 public enum AboutPanelPresentation {
-    public static let applicationName = "TurboFieldfare"
+    public static let applicationName = "TUFF"
 
     // Most users build from a clone, where there is no Info.plist to read a
     // version from, so this constant is what they see. Scripts/check_app_version.rb
@@ -20,11 +20,11 @@ public enum AboutPanelPresentation {
     public static let fallbackShortVersion = "0.4.3"
 
     private static let licenseURL = URL(
-        string: "https://github.com/drumih/turbo-fieldfare/blob/main/LICENSE")!
+        string: "https://github.com/rexmhall09/TUFF/blob/main/LICENSE")!
 
-    public static let repositoryURL = URL(string: "https://github.com/drumih/turbo-fieldfare")!
+    public static let repositoryURL = URL(string: "https://github.com/rexmhall09/TUFF")!
 
-    public static let repositoryLinkText = "github.com/drumih/turbo-fieldfare"
+    public static let repositoryLinkText = "github.com/rexmhall09/TUFF"
 
     private static let licenseName = "Apache License 2.0"
 
@@ -62,7 +62,7 @@ public enum AboutPanelPresentation {
         paragraph.alignment = .center
         // "Apache License 2.0" is a link, and letting it wrap mid-phrase reads as
         // a broken line, so the break is explicit.
-        let licenseLead = "TurboFieldfare is licensed under the"
+        let licenseLead = "TUFF is licensed under the"
         let text = """
             \(repositoryLinkText)
             \(licenseLead)

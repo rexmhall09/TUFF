@@ -1,6 +1,6 @@
 # Implementation references
 
-TurboFieldfare builds on work by other developers and researchers. These are
+TUFF builds on work by other developers and researchers. These are
 the sources that materially shaped its Gemma 4 implementation, Metal kernels,
 out-of-core runtime, and experiments under the 8 GB memory constraint.
 
@@ -17,7 +17,7 @@ included for broader design context rather than a line-level claim.
   [Gemma 4 math](https://github.com/huggingface/transformers/blob/a8609bed2ad1593e7d756006525a10053d4d5bc6/src/transformers/models/gemma4/modular_gemma4.py),
   [configuration](https://github.com/huggingface/transformers/blob/a8609bed2ad1593e7d756006525a10053d4d5bc6/src/transformers/models/gemma4/configuration_gemma4.py),
   and [RoPE utilities](https://github.com/huggingface/transformers/blob/a8609bed2ad1593e7d756006525a10053d4d5bc6/src/transformers/modeling_rope_utils.py).
-  TurboFieldfare used them to verify normalization, K/V derivation, routing,
+  TUFF used them to verify normalization, K/V derivation, routing,
   MoE combination, layer scaling, and final logits.
 - [MLX-LM Gemma 4](https://github.com/ml-explore/mlx-lm/blob/15b522f593b7ca5fbc0cac6f7572d40859d2d8fe/mlx_lm/models/gemma4_text.py)
   and [MLX-VLM Gemma 4](https://github.com/Blaizzy/mlx-vlm/blob/84f43753380355c0455a2bafb291d4b7cbcf81d1/mlx_vlm/models/gemma4/language.py)
@@ -30,7 +30,7 @@ included for broader design context rather than a line-level claim.
   sidecars. The repacker preserves its group-64 MLX affine values rather than
   requantizing them.
 - [Hugging Face swift-transformers](https://github.com/huggingface/swift-transformers)
-  is the direct tokenizer dependency. TurboFieldfare adds bounded streaming
+  is the direct tokenizer dependency. TUFF adds bounded streaming
   detokenization around it.
 
 ## Metal and kernels
@@ -83,7 +83,7 @@ included for broader design context rather than a line-level claim.
   [online normalizer calculation](https://arxiv.org/abs/1805.02867), and
   [Flash-Decoding](https://crfm.stanford.edu/2023/10/12/flashdecoding.html)
   supplied the tiled-attention and associative online-softmax principles behind
-  TurboFieldfare's split-KV kernels.
+  TUFF's split-KV kernels.
 - Pinned [vLLM attention operators](https://github.com/vllm-project/vllm/tree/530852f9591a822ff4065908778a58fa015f0e69/vllm/v1/attention/ops)
   and [vLLM Metal kernels v2](https://github.com/vllm-project/vllm-metal/tree/11f1b453b74c60d113d67f9a5e7fda41500fd5b5/vllm_metal/metal/kernels_v2)
   were implementation references for transformed and quantized KV caches,

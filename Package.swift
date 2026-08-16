@@ -9,11 +9,11 @@ let package = Package(
     ],
     products: [
         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
-        .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
-        .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
-        .executable(name: "TurboFieldfareMac", targets: ["TurboFieldfareMac"]),
-        .executable(name: "TurboFieldfareDecodeService", targets: ["TurboFieldfareDecodeService"]),
-        .executable(name: "TurboFieldfareServer", targets: ["TurboFieldfareServer"]),
+        .executable(name: "TUFFRepack", targets: ["TurboFieldfareRepack"]),
+        .executable(name: "TUFFCLI", targets: ["TurboFieldfareCLI"]),
+        .executable(name: "TUFF", targets: ["TurboFieldfareMac"]),
+        .executable(name: "TUFFDecodeService", targets: ["TurboFieldfareDecodeService"]),
+        .executable(name: "TUFFServer", targets: ["TurboFieldfareServer"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -99,7 +99,7 @@ let package = Package(
             dependencies: ["TurboFieldfareAppCore", "TurboFieldfareMacPresentation"],
             path: "Sources/TurboFieldfareApp/Mac",
             resources: [
-                .copy("Resources/turbofieldfare-app-icon.png"),
+                .copy("Resources/tuff-app-icon.png"),
             ]
         ),
         .target(

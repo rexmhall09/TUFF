@@ -164,7 +164,7 @@ until the rate stabilizes, and the steady-state value reported.
 ## Measuring
 
 ```bash
-TURBO_FIELDFARE_PHASES=1 .build/release/TurboFieldfareCLI \
+TURBO_FIELDFARE_PHASES=1 .build/release/TUFFCLI \
   --model scratch/qwen36.gturbo \
   --prompt "Write a detailed essay about the history of computing." \
   --max-new 128 --temperature 0

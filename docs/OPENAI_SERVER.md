@@ -1,30 +1,30 @@
 # Local OpenAI-compatible server
 
-`TurboFieldfareServer` exposes a local Chat Completions API for one Gemma
+`TUFFServer` exposes a local Chat Completions API for one Gemma
 model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
 through a proxy or tunnel.
 
 ## Start the server
 
-First, install the model with the Mac app or `TurboFieldfareRepack`. Then check
-that no other TurboFieldfare model process is running:
+First, install the model with the Mac app or `TUFFRepack`. Then check
+that no other TUFF model process is running:
 
 ```bash
-pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
+pgrep -fl 'TUFFServer|TUFF|TUFFDecodeService|TUFFCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'
 ```
 
 If the command prints a match, do not start the server.
 
 ```bash
-swift build -c release --product TurboFieldfareServer
-.build/release/TurboFieldfareServer \
+swift build -c release --product TUFFServer
+.build/release/TUFFServer \
   --model scratch/gemma4.gturbo \
   --port 8080 \
   --max-context 16384
 ```
 
 The server loads the model before opening the port. Wait for
-`TurboFieldfareServer ready`, then keep the process running while clients use
+`TUFFServer ready`, then keep the process running while clients use
 it.
 
 Check the server from another terminal:
@@ -53,7 +53,7 @@ The server accepts the same runtime flags as the CLI, with the same values and
 defaults. See [Runtime controls](RUNTIME_CONTROLS.md) for what each one does.
 
 ```bash
-.build/release/TurboFieldfareServer \
+.build/release/TUFFServer \
   --model scratch/gemma4.gturbo \
   --expert-cache-slots 32 \
   --expert-cache-policy lru \
@@ -98,7 +98,7 @@ OpenCode:
   "provider": {
     "turbofieldfare": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "TurboFieldfare",
+      "name": "TUFF",
       "options": {
         "baseURL": "http://127.0.0.1:8080/v1",
         "apiKey": "local"

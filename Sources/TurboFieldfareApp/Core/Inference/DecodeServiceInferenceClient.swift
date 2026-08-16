@@ -432,6 +432,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     private static func defaultServiceURL() -> URL {
         return Bundle.main.executableURL!
             .deletingLastPathComponent()
-            .appendingPathComponent("TurboFieldfareDecodeService")
+            // Matches the executable product name in Package.swift; the
+            // service binary is built next to the app binary.
+            .appendingPathComponent("TUFFDecodeService")
     }
 }

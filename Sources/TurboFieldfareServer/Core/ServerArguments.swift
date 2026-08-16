@@ -18,7 +18,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let rdadvisePolicy: RDAdvicePolicyMode
 
     public static let usage = """
-    usage: TurboFieldfareServer --model <completed .gturbo directory> [options]
+    usage: TUFFServer --model <completed .gturbo directory> [options]
 
       --model <dir>              Required model directory.
       --port <1...65535>         Loopback port (default 8080).

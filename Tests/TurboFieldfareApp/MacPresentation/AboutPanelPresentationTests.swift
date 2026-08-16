@@ -8,7 +8,7 @@ import Testing
         let content = AboutPanelPresentation.content(
             infoDictionary: ["CFBundleShortVersionString": "0.4.2"])
         #expect(content.shortVersion == "0.4.2")
-        #expect(content.applicationName == "TurboFieldfare")
+        #expect(content.applicationName == "TUFF")
     }
 
     @Test func cloneBuildFallsBackToTheCompiledVersion() {
@@ -41,7 +41,7 @@ import Testing
         let options = AboutPanelPresentation.options(
             infoDictionary: ["CFBundleShortVersionString": "0.4.2"],
             icon: nil)
-        #expect(options[.applicationName] as? String == "TurboFieldfare")
+        #expect(options[.applicationName] as? String == "TUFF")
         #expect(options[.applicationVersion] as? String == "0.4.2")
         #expect(options[.applicationIcon] == nil)
         #expect(options[.credits] != nil)
