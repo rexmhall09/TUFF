@@ -32,6 +32,7 @@ enum GTurboJSON {
                                       expertStride: UInt64,
                                       bitWidths: QuantBitWidths) throws -> Data {
         let arch = plan.arch
+        let isGemma = arch.family == .gemma4
         let bitWidthsByQuantSlot = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -60,7 +61,22 @@ enum GTurboJSON {
             tieWordEmbeddings: arch.tieWordEmbeddings,
             attentionKEqV: arch.attentionKEqV,
             hiddenActivation: arch.hiddenActivation,
-            fullAttentionLayerMask: arch.fullAttentionLayerMask.map(Int.init))
+            fullAttentionLayerMask: arch.fullAttentionLayerMask.map(Int.init),
+            // Gemma 4 omits every family extension field, so its manifests stay
+            // byte-identical to the pre-family format.
+            family: isGemma ? nil : arch.family.rawValue,
+            attnOutputGate: isGemma ? nil : arch.attnOutputGate,
+            attentionScale: isGemma ? nil : arch.attentionScale,
+            embeddingScaledBySqrtHidden: isGemma ? nil : arch.embeddingScaledBySqrtHidden,
+            routerScaled: isGemma ? nil : arch.routerScaled,
+            ffnSandwichNorms: isGemma ? nil : arch.ffnSandwichNorms,
+            sharedExpertGated: isGemma ? nil : arch.sharedExpertGated,
+            ropeNeoxSubdim: isGemma ? nil : arch.ropeNeoxSubdim,
+            linearNumKHeads: isGemma ? nil : arch.linearNumKHeads,
+            linearNumVHeads: isGemma ? nil : arch.linearNumVHeads,
+            linearKeyHeadDim: isGemma ? nil : arch.linearKeyHeadDim,
+            linearValueHeadDim: isGemma ? nil : arch.linearValueHeadDim,
+            linearConvKernelSize: isGemma ? nil : arch.linearConvKernelSize)
         func slot(_ name: String) throws -> GTurboManifestQuantSlotV1 {
             guard let weightBits = bitWidthsByQuantSlot[name] else {
                 throw RepackError.configurationInvalid(

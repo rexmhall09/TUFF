@@ -32,7 +32,10 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     }
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
-        guard !failed else { throw GemmaToolCallParserError.malformed }
+        guard !failed else { throw ToolCallParserError.malformed }
+        if tokenizer.dialect == .chatml {
+            return try consumeChatML(tokenID: tokenID, delta: delta)
+        }
 
         // A non-empty delta on a control token is text the detokenizer held
         // back from BEFORE the token (a skipped special contributes nothing of
@@ -63,7 +66,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
                 failed = true
-                throw GemmaToolCallParserError.malformed
+                throw ToolCallParserError.malformed
             }
             toolTokens = []
             return events
@@ -71,7 +74,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenID == tokenizer.toolCallEndID {
             guard let tokens = toolTokens else {
                 failed = true
-                throw GemmaToolCallParserError.malformed
+                throw ToolCallParserError.malformed
             }
             toolTokens = nil
             let text = tokenizer.decode(tokens, skipSpecialTokens: false)
@@ -88,7 +91,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         if tokenID == tokenizer.toolResponseID || tokenID == tokenizer.toolResponseEndID {
             guard emittedCalls > 0, toolTokens == nil else {
                 failed = true
-                throw GemmaToolCallParserError.malformed
+                throw ToolCallParserError.malformed
             }
             return events
         }
@@ -96,7 +99,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             tokens.append(tokenID)
             guard tokens.count * MemoryLayout<Int32>.size <= GemmaToolCallParser.maximumBytes else {
                 failed = true
-                throw GemmaToolCallParserError.oversized
+                throw ToolCallParserError.oversized
             }
             toolTokens = tokens
             return []
@@ -135,9 +138,59 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
     }
 
+    /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
+    /// `<tool_call>`…`</tool_call>` buffer tokens for the Qwen parser. Everything
+    /// else streams as visible content.
+    private func consumeChatML(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        if tokenID == tokenizer.toolCallStartID {
+            guard toolTokens == nil else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            toolTokens = []
+            return []
+        }
+        if tokenID == tokenizer.toolCallEndID {
+            guard let tokens = toolTokens else {
+                failed = true
+                throw ToolCallParserError.malformed
+            }
+            toolTokens = nil
+            let text = tokenizer.decode(tokens, skipSpecialTokens: false)
+            do {
+                let call = try QwenToolCallParser().parse(
+                    text, allowedTools: allowedTools, id: idGenerator())
+                emittedCalls += 1
+                return [.toolCall(call)]
+            } catch {
+                failed = true
+                throw error
+            }
+        }
+        if var tokens = toolTokens {
+            tokens.append(tokenID)
+            guard tokens.count * MemoryLayout<Int32>.size <= QwenToolCallParser.maximumBytes else {
+                failed = true
+                throw ToolCallParserError.oversized
+            }
+            toolTokens = tokens
+            return []
+        }
+        if tokenID == tokenizer.thinkStartID {
+            channel = .thought
+            return []
+        }
+        if tokenID == tokenizer.thinkEndID {
+            channel = .visible
+            return []
+        }
+        guard channel != .thought else { return [] }
+        return delta.isEmpty ? [] : [.content(delta)]
+    }
+
     public func finish() throws {
         guard !failed, toolTokens == nil else {
-            throw GemmaToolCallParserError.malformed
+            throw ToolCallParserError.malformed
         }
     }
 

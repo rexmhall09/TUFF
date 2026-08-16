@@ -21,7 +21,17 @@ struct DecoderConfigTests {
 
     @Test("Pinned Gemma decoder sequence passes")
     func pinnedSequencePasses() throws {
-        try GFTokenizer.verifyDecoderConfiguration(Self.data(decoder: Self.pinned))
+        let decoding = try GFTokenizer.verifyDecoderConfiguration(
+            Self.data(decoder: Self.pinned))
+        #expect(decoding == .gemmaByteFallback)
+    }
+
+    @Test("A bare ByteLevel decoder resolves to the ByteLevel pipeline")
+    func byteLevelResolves() throws {
+        let decoding = try GFTokenizer.verifyDecoderConfiguration(Self.data(decoder: [
+            "type": "ByteLevel", "add_prefix_space": false, "use_regex": false,
+        ]))
+        #expect(decoding == .byteLevel)
     }
 
     @Test("A non-Sequence decoder is rejected")

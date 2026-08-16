@@ -39,16 +39,20 @@ import Tokenizers
 struct GFDetokenizer {
     let tokenizer: any Tokenizer
     let skipSpecialTokens: Bool
+    private let decoding: TokenDecoding
     private let specialTokenIDs: Set<Int32>
     private let barrierTokenIDs: Set<Int32>
-    /// In-flight byte-fallback run.
+    /// In-flight byte-fallback run (Gemma).
     private var run = ByteFallbackRun()
+    /// In-flight UTF-8 assembly (ByteLevel).
+    private var byteLevelRun = ByteLevelRun()
 
     init(tokenizer: GFTokenizer,
          skipSpecialTokens: Bool = true,
          barrierTokenIDs: Set<Int32> = []) {
         self.tokenizer = tokenizer.tokenizer
         self.skipSpecialTokens = skipSpecialTokens
+        self.decoding = tokenizer.decoding
         self.specialTokenIDs = tokenizer.specialTokenIDs
         self.barrierTokenIDs = barrierTokenIDs
     }
@@ -62,15 +66,38 @@ struct GFDetokenizer {
         // An unknown ID contributes nothing and leaves the run open, matching
         // the library, whose decode compactMap-drops unresolvable IDs.
         guard let token = tokenizer.convertIdToToken(Int(id)) else { return "" }
-        if skipSpecialTokens, specialTokenIDs.contains(id) {
-            return barrierTokenIDs.contains(id) ? run.commit() : ""
+        switch decoding {
+        case .gemmaByteFallback:
+            if skipSpecialTokens, specialTokenIDs.contains(id) {
+                return barrierTokenIDs.contains(id) ? run.commit() : ""
+            }
+            if let byte = GemmaDecoding.byteValue(token) { return run.push(byte) }
+            return run.commit() + GemmaDecoding.fragment(token)
+        case .byteLevel:
+            if skipSpecialTokens, specialTokenIDs.contains(id) {
+                return barrierTokenIDs.contains(id) ? byteLevelRun.commit() : ""
+            }
+            var text = ""
+            for scalar in token.unicodeScalars {
+                // A scalar outside the mapping belongs to an added token stored
+                // literally rather than byte-encoded; emit it as itself, after
+                // closing any codepoint the byte stream left open.
+                guard let byte = ByteLevelDecoding.byteValue(scalar) else {
+                    text += byteLevelRun.commit()
+                    text.unicodeScalars.append(scalar)
+                    continue
+                }
+                text += byteLevelRun.push(byte)
+            }
+            return text
         }
-        if let byte = GemmaDecoding.byteValue(token) { return run.push(byte) }
-        return run.commit() + GemmaDecoding.fragment(token)
     }
 
     /// Remainder held back at a stop boundary.
     mutating func flush() -> String {
-        run.commit()
+        switch decoding {
+        case .gemmaByteFallback: return run.commit()
+        case .byteLevel: return byteLevelRun.commit()
+        }
     }
 }

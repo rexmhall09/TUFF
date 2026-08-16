@@ -44,6 +44,10 @@ each request and do not require a reload. Each CLI invocation loads a new model
 process, so its selected runtime settings apply immediately. The server fixes
 its runtime settings at startup, so changing one means restarting the process.
 
+Setting `TURBO_FIELDFARE_PHASES=1` makes the CLI print the decode phase split
+(`cb1`, expert I/O await, `cb2`, and GPU waits) after the timing footer. It is a
+diagnostic and does not change behavior.
+
 ## Run an experiment
 
 1. Start from 4K context, 16 expert-cache slots, prefill on, and RDADVISE off.
