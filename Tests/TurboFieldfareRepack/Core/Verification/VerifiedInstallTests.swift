@@ -5,6 +5,19 @@ import Testing
 @testable import TurboFieldfareRepackCore
 
 @Suite struct VerifiedInstallTests {
+
+    /// layout.json scales with layers x experts, so every metadata cap has to
+    /// clear the largest supported model. A 16 MiB bound shipped that rejected
+    /// Qwen 3.6 at the very end of a 19.5 GB install, after the whole transfer
+    /// had succeeded — the sort of failure that reads as a download error.
+    @Test func metadataCapsFitTheLargestSupportedModel() {
+        // Measured from a completed Qwen 3.6 35B-A3B install: 40 layers,
+        // 256 experts per layer.
+        let observedQwenLayoutBytes: UInt64 = 22_493_846
+        #expect(VerifiedInstallTool.layoutMaxBytes > observedQwenLayoutBytes)
+        #expect(VerifiedInstallTool.metadataMaxBytes >= VerifiedInstallTool.layoutMaxBytes)
+    }
+
     @Test func acceptsRootSymlinkAndBindsAlias() throws {
         let root = try makeInstall()
         let alias = temporaryURL("verified-install-link.gturbo")

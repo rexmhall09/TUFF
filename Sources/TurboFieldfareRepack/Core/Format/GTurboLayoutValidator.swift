@@ -5,7 +5,11 @@ enum GTurboLayoutValidator {
     static func validate(path: String,
                                 plan: RepackPlan,
                                 audit: RepackAudit? = nil) throws {
-        let data = try Posix.readBoundedData(path, maximumBytes: 16 * 1024 * 1024)
+        // The shared cap rather than a literal: layout.json scales with layers
+        // x experts, so a second copy of this bound silently caps a larger
+        // model at the older value (Qwen 3.6's is ~22 MB).
+        let data = try Posix.readBoundedData(
+            path, maximumBytes: VerifiedInstallTool.layoutMaxBytes)
         let layout: GTurboPackedExpertsLayoutV1
         do { layout = try GTurboPackedExpertsLayoutCodec.decode(data) }
         catch {
