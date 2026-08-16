@@ -12,6 +12,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         var loadedDirectory: URL?
         var launchLabel: String?
         var socketPath: String?
+        var directProcess: Process?
     }
 
     private let connection = Mutex(Connection())
@@ -173,6 +174,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             try? input.close()
         }
         if let label = state.launchLabel { Self.removeLaunchJob(label: label) }
+        state.directProcess?.terminate()
         if let socketPath = state.socketPath { unlink(socketPath) }
     }
 
@@ -191,6 +193,60 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         let identifier = "\(getuid()).\(getpid()).\(UUID().uuidString.lowercased())"
         let label = "com.turbofieldfare.decode.\(identifier)"
         let socketPath = "/private/tmp/turbofieldfare-decode-\(identifier).sock"
+
+        // A kickstart failure is diagnostic, not fatal: the socket is
+        // authoritative, and the direct-spawn fallback below may still work.
+        // Carry the detail so the final error can name what actually failed.
+        var kickstartError: String?
+        if let bootstrapped = try? bootstrapViaLaunchd(label: label, socketPath: socketPath) {
+            kickstartError = bootstrapped
+            if let handles = try? connectSocketWithRetry(socketPath: socketPath, attempts: 100) {
+                connection.withLock {
+                    $0.input = handles.input
+                    $0.responses = handles.responses
+                    $0.launchLabel = label
+                    $0.socketPath = socketPath
+                }
+                return handles
+            }
+        }
+
+        // Some sessions (e.g. terminal multiplexers that spawn the app
+        // outside a normal Aqua-attached process) have launchd accept the
+        // "gui/<uid>" bootstrap but never actually spawn the RunAtLoad job.
+        // Cancel that registration and fall back to a plain child process on
+        // the same socket path so the app still works there.
+        Self.removeLaunchJob(label: label)
+        let process: Process
+        do {
+            process = try launchDirectProcess(socketPath: socketPath, label: label)
+        } catch {
+            throw AppInferenceError.modelLoadFailed(
+                "decode service could not be started: \(error)")
+        }
+        do {
+            let handles = try connectSocketWithRetry(socketPath: socketPath, attempts: 200)
+            connection.withLock {
+                $0.input = handles.input
+                $0.responses = handles.responses
+                $0.directProcess = process
+                $0.socketPath = socketPath
+            }
+            return handles
+        } catch {
+            process.terminate()
+            throw AppInferenceError.modelLoadFailed(
+                Self.socketFailureMessage(
+                    socketError: String(describing: error),
+                    kickstartError: kickstartError))
+        }
+    }
+
+    /// Register and demand the launchd job. Returns the `launchctl kickstart`
+    /// failure detail, if any — bootstrap succeeding while kickstart fails is a
+    /// diagnostic, not a fatal error, because the socket is authoritative.
+    @discardableResult
+    private func bootstrapViaLaunchd(label: String, socketPath: String) throws -> String? {
         let propertyListURL = URL(
             fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("\(label).plist")
@@ -229,7 +285,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             throw AppInferenceError.modelLoadFailed(message)
         }
 
-        // Demand the job without restarting a RunAtLoad winner; the socket is authoritative.
+        // Demand the job without restarting a RunAtLoad winner; the socket is
+        // authoritative. Returns the failure detail rather than throwing.
         var kickstartError: String?
         do {
             let starter = Process()
@@ -250,29 +307,33 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         } catch {
             kickstartError = String(describing: error)
         }
+        return kickstartError
+    }
 
+    private func launchDirectProcess(socketPath: String, label: String) throws -> Process {
+        let process = Process()
+        process.executableURL = serviceURL
+        process.arguments = ["--socket", socketPath, "--launch-label", label]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        return process
+    }
+
+    private func connectSocketWithRetry(socketPath: String, attempts: Int) throws
+        -> (input: FileHandle, responses: DecodeServiceResponseRouter) {
         var lastError: Error?
-        for _ in 0..<200 {
+        for _ in 0..<attempts {
             do {
                 let handles = try DecodeUnixSocket.connect(path: socketPath)
                 let responses = DecodeServiceResponseRouter(output: handles.output)
-                connection.withLock {
-                    $0.input = handles.input
-                    $0.responses = responses
-                    $0.launchLabel = label
-                    $0.socketPath = socketPath
-                }
                 return (handles.input, responses)
             } catch {
                 lastError = error
                 usleep(10_000)
             }
         }
-        Self.removeLaunchJob(label: label)
-        throw AppInferenceError.modelLoadFailed(
-            Self.socketFailureMessage(
-                socketError: lastError.map(String.init(describing:)),
-                kickstartError: kickstartError))
+        throw lastError ?? AppInferenceError.modelLoadFailed("unknown error")
     }
 
     static func kickstartArguments(uid: uid_t, label: String) -> [String] {
