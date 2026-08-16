@@ -296,8 +296,8 @@ extension RemotePayloadCopyTests {
         let cdnRedirect = try policy.request(
             response: sourceResponse,
             proposedRequest: cdnRequest)
-        #expect(cdnRedirect?.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
-        #expect(cdnRedirect?.value(forHTTPHeaderField: "Range") == "bytes=0-3")
+        #expect(cdnRedirect.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
+        #expect(cdnRedirect.value(forHTTPHeaderField: "Range") == "bytes=0-3")
 
         let unknownResponse = HTTPURLResponse(
             url: cdnRequest.url!,
@@ -310,7 +310,7 @@ extension RemotePayloadCopyTests {
         let unknownRedirect = try policy.request(
             response: unknownResponse,
             proposedRequest: unknownRequest)
-        #expect(unknownRedirect?.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(unknownRedirect.value(forHTTPHeaderField: "Authorization") == nil)
     }
 
     @Test func redirectPolicyStripsAuthAfterAllowedCDNThenUnknownHost() throws {
@@ -343,7 +343,7 @@ extension RemotePayloadCopyTests {
         let result = try policy.request(
             response: cdnResponse,
             proposedRequest: unknownRequest)
-        #expect(result?.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(result.value(forHTTPHeaderField: "Authorization") == nil)
     }
 
     @Test func redirectPolicyRejectsNonHTTPSAndExcessHops() throws {
