@@ -242,6 +242,19 @@ struct ServerPromptCacheTests {
             tools: tools)
 
         #expect(bridge.first == tokenizer.toolResponseID)
+        #expect(bridge.filter { $0 == tokenizer.toolResponseID }.count == 1)
+        #expect(!bridge.contains(tokenizer.toolCallStartID))
+
+        // A diverged cached history cannot anchor by position and still refuses.
+        let diverged = [GFTokenizer.Message(role: .user, content: "list the other tree")]
+            + cachedMessages.dropFirst()
+        #expect(throws: (any Error).self) {
+            try tokenizer.encodeToolResultContinuation(
+                cachedMessages: diverged,
+                assistant: repeated,
+                incomingMessages: cachedMessages + [repeated, repeatedResult],
+                tools: tools)
+        }
     }
 
     /// The logged reason must name the condition that actually failed.
