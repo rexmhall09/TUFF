@@ -71,7 +71,7 @@ struct RepackCLITests {
     private func run(_ arguments: [String]) throws
         -> (status: Int32, stdout: String, stderr: String) {
         let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(".build/debug/TurboFieldfareRepack")
+            .appendingPathComponent(".build/debug/TUFFRepack")
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
