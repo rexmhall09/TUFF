@@ -695,6 +695,27 @@ public struct GFTokenizer: @unchecked Sendable {
         guard dialect == .gemma else {
             throw GFTokenizerError.unsupportedForDialect("tool-result KV continuation")
         }
+        // Positional disambiguation is safe only when both renders share the
+        // exact leading conversation. Otherwise the same token offset can name
+        // an unrelated, byte-identical call in the incoming history.
+        guard incomingMessages.count > cachedMessages.count,
+              incomingMessages.prefix(cachedMessages.count)
+                .elementsEqual(cachedMessages) else {
+            throw GFTokenizerError.invalidChatTemplate(
+                "incoming tool-result history does not extend the cached conversation")
+        }
+        let incomingAssistant = incomingMessages[cachedMessages.count]
+        guard incomingAssistant.role == .assistant,
+              assistant.role == .assistant,
+              !assistant.toolCalls.isEmpty,
+              incomingAssistant.toolCalls == assistant.toolCalls,
+              incomingAssistant.toolCallID == assistant.toolCallID,
+              incomingAssistant.name == assistant.name,
+              (incomingAssistant.content ?? "").isEmpty,
+              (assistant.content ?? "").isEmpty else {
+            throw GFTokenizerError.invalidChatTemplate(
+                "incoming tool-result history does not contain the cached assistant call")
+        }
         let prefix = try encodeToolChat(
             messages: cachedMessages + [assistant],
             tools: tools)
