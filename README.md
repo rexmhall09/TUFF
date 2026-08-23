@@ -68,11 +68,26 @@ of tracking a fork rather than hard-forking.
 
 ## Try it
 
+Download `TUFF-v1.0.0-macos-arm64.zip` from the
+[v1.0.0 release](https://github.com/rexmhall09/TUFF/releases/tag/v1.0.0),
+unzip it, and move `TUFF.app` to Applications. This first release's executables
+are ad-hoc signed, but the app is not Apple-notarized. On first launch,
+Control-click the app and choose **Open**; if macOS still blocks it, use
+**Open Anyway** in Privacy & Security settings.
+
+Or build the app from source:
+
 ```bash
 git clone https://github.com/rexmhall09/TUFF.git
 cd TUFF
 swift build -c release
 .build/release/TUFF
+```
+
+Maintainers can reproduce the release archive and checksum with:
+
+```bash
+Scripts/package_app.sh 1.0.0
 ```
 
 On the first run, Swift Package Manager downloads and builds the Swift packages
