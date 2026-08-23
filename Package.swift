@@ -128,7 +128,10 @@ let package = Package(
                 .product(name: "Hub", package: "swift-transformers"),
             ],
             path: "Tests/TurboFieldfare/Core",
-            resources: [.copy("Tokenization/Fixtures")]
+            resources: [
+                .copy("Tokenization/Fixtures"),
+                .copy("Runtime/Vision/Fixtures/images"),
+            ]
         ),
         .testTarget(
             name: "TurboFieldfareRepackTests",

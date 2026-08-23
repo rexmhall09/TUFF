@@ -3,6 +3,13 @@ import Foundation
 import TurboFieldfare
 import TurboFieldfareServerCore
 
+// Every request line goes to stderr, which is unbuffered, while the ready line
+// below goes to stdout, which is fully buffered when it is not a terminal. A
+// server started with its output redirected therefore showed an empty log for
+// its whole life and printed "ready" only as it exited - exactly inverted from
+// what an operator needs. Line buffering puts the line where it is useful.
+setvbuf(stdout, nil, _IOLBF, 0)
+
 let arguments: ServerArguments
 let runtimeConfiguration: RuntimeConfiguration
 do {
@@ -24,6 +31,10 @@ do {
     let backend = try await ServerModelSession.load(
         modelDirectory: modelURL,
         maxContext: arguments.maxContext,
+        visionPackURL: arguments.visionPack.map {
+            URL(fileURLWithPath: $0).standardizedFileURL
+        },
+        visionResidencyPolicy: arguments.visionResidency,
         promptCacheMode: arguments.promptCacheMode,
         runtimeConfiguration: runtimeConfiguration)
     let modelID = arguments.modelIDOverride ?? backend.defaultModelID
@@ -31,9 +42,10 @@ do {
         modelID: modelID,
         queueLimit: arguments.queueLimit,
         backend: backend,
-        chatDialect: backend.chatDialect)
+        chatDialect: backend.chatDialect,
+        visionCapability: backend.visionCapability)
     _ = try await server.start(port: arguments.port)
-    print("TUFFServer ready at http://127.0.0.1:\(arguments.port) model=\(modelID) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue)")
+    print("TUFFServer ready at http://127.0.0.1:\(arguments.port) model=\(modelID) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue) vision=\(backend.visionCapability) vision_residency=\(arguments.visionResidency.rawValue)")
 
     _ = await signals.wait()
     try await server.shutdown()

@@ -10,6 +10,7 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
     case unsupportedDecoder(actual: String)
     case invalidTokenID(token: String, id: Int)
     case unsupportedForDialect(String)
+    case specialTokenMismatch(token: String, expected: Int32, resolved: Int32)
 
     public var description: String {
         switch self {
@@ -26,6 +27,9 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
             return "tokenizer declares out-of-range ID \(id) for token \(token)"
         case .unsupportedForDialect(let operation):
             return "operation is not supported for this tokenizer's chat dialect: \(operation)"
+        case .specialTokenMismatch(let token, let expected, let resolved):
+            return "tokenizer resolves \(token) to \(resolved), but the runtime "
+                + "expects \(expected); the tokenizer does not match this build"
         }
     }
 }
@@ -304,6 +308,20 @@ public struct GFTokenizer: @unchecked Sendable {
         let toolResponseEnd = try Self.requireTokenID(tokenizer, "<tool_response|>")
         let channelStart = try Self.requireTokenID(tokenizer, "<|channel>")
         let channelEnd = try Self.requireTokenID(tokenizer, "<channel|>")
+        // Multimodal prompt layout uses compile-time marker IDs, so verify this
+        // Gemma tokenizer resolves the same vocabulary positions before any
+        // image prompt can be constructed.
+        for (token, expected) in [
+            ("<|image>", MultimodalPromptRenderer.beginImageTokenID),
+            ("<|image|>", MultimodalPromptRenderer.imageTokenID),
+            ("<image|>", MultimodalPromptRenderer.endImageTokenID),
+        ] {
+            let resolved = try Self.requireTokenID(tokenizer, token)
+            guard resolved == expected else {
+                throw GFTokenizerError.specialTokenMismatch(
+                    token: token, expected: expected, resolved: resolved)
+            }
+        }
         return ResolvedSpecialTokens(
             bosID: bosID,
             bosPrefixID: bosID,
@@ -569,6 +587,99 @@ public struct GFTokenizer: @unchecked Sendable {
                     + Self.chatMLGenerationSuffix,
                 addBOS: false)
         }
+    }
+
+    /// A user turn carrying images, encoded as a continuation onto an existing
+    /// KV prefix. Mirrors `encodeTextContinuation` exactly and then expands each
+    /// image marker the way `MultimodalPromptRenderer` does, so the result is
+    /// the same tokens a full render of that turn would produce. Token counts
+    /// come from image geometry, so no image has to be encoded to build this.
+    /// `openingConversation` builds the turn as the *first* turn of a
+    /// conversation instead of a continuation: the chat template's opening,
+    /// including `<bos>`, rather than a continuation's leading end-of-turn.
+    /// Without it a fresh conversation's first image turn started with a
+    /// dangling end-of-turn and no BOS, which this model is sensitive to.
+    public func encodeMultimodalUserContinuation(
+        textAndImages: [MultimodalContinuationPart],
+        imageTokenCounts: [Int],
+        openingConversation: Bool = false
+    ) throws -> MultimodalContinuationTokens {
+        var text = ""
+        var expected = 0
+        for part in textAndImages {
+            switch part {
+            case .text(let value):
+                guard !value.contains(MultimodalPromptRenderer.placeholder) else {
+                    throw MultimodalPromptRendererError.reservedImageMarker
+                }
+                text += value
+            case .image:
+                text += MultimodalPromptRenderer.placeholder
+                expected += 1
+            }
+        }
+        guard expected == imageTokenCounts.count, expected > 0 else {
+            throw MultimodalPromptRendererError.placeholderMismatch
+        }
+        guard text.components(
+            separatedBy: MultimodalPromptRenderer.placeholder).count - 1 == expected else {
+            throw MultimodalPromptRendererError.reservedImageMarker
+        }
+        let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let template: [Int32]
+        if openingConversation {
+            // The same rendering the text path uses for an empty KV, so the
+            // first turn of a conversation is identical whether or not it
+            // carries an image.
+            template = encode(
+                try applyChatTemplate([Message(role: .user, content: content)]),
+                addBOS: false)
+        } else {
+            template = [endOfTurnID] + encode(
+                "\n\(Self.turnOpen)user\n\(content)\(Self.turnClose)\n"
+                    + "\(Self.turnOpen)model\n<|channel>thought\n<channel|>",
+                addBOS: false)
+        }
+        // Count the placeholders the tokenizer actually produced before indexing
+        // anything by them. The per-part marker check above cannot see a marker
+        // split across two text parts, which concatenation would reassemble into
+        // a real image token and leave more placeholders than counts.
+        let placeholders = template.reduce(into: 0) {
+            if $1 == MultimodalPromptRenderer.imageTokenID { $0 += 1 }
+        }
+        guard placeholders == imageTokenCounts.count else {
+            throw MultimodalPromptRendererError.placeholderMismatch
+        }
+
+        var effective: [Int32] = []
+        var embedding: [Int32] = []
+        var ranges: [Range<Int>] = []
+        var index = 0
+        for token in template {
+            guard token == MultimodalPromptRenderer.imageTokenID else {
+                effective.append(token)
+                embedding.append(token)
+                continue
+            }
+            let count = imageTokenCounts[index]
+            effective.append(MultimodalPromptRenderer.beginImageTokenID)
+            embedding.append(MultimodalPromptRenderer.beginImageTokenID)
+            let lower = effective.count
+            effective.append(contentsOf: repeatElement(
+                MultimodalPromptRenderer.imageTokenID, count: count))
+            embedding.append(contentsOf: repeatElement(Int32(0), count: count))
+            ranges.append(lower..<effective.count)
+            effective.append(MultimodalPromptRenderer.endImageTokenID)
+            embedding.append(MultimodalPromptRenderer.endImageTokenID)
+            index += 1
+        }
+        guard index == imageTokenCounts.count else {
+            throw MultimodalPromptRendererError.placeholderMismatch
+        }
+        return MultimodalContinuationTokens(
+            effectiveTokenIDs: effective,
+            embeddingTokenIDs: embedding,
+            imageTokenRanges: ranges)
     }
 
     public func encodeToolResultContinuation(

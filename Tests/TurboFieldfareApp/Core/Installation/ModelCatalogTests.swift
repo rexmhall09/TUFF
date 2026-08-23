@@ -138,6 +138,26 @@ import TurboFieldfareRepackCore
     }
 
     @MainActor
+    @Test func selectingQwenKeepsGemmaVisionUnavailable() {
+        let model = makeModel(
+            selectedDirectory: temporaryInstallPath("vision-gemma"),
+            selectedInstaller: MockModelInstallerClient(descriptor: .default),
+            otherDirectory: temporaryInstallPath("vision-qwen"),
+            otherInstaller: MockModelInstallerClient(descriptor: .qwen36))
+        let qwen = try! #require(model.installs.first { $0.descriptor == .qwen36 })
+
+        model.selectModel(qwen)
+
+        #expect(!model.isImageInputAvailable)
+        #expect(!model.canInstallVisionPack)
+        if case .failed(let reason) = model.visionInstallReadiness {
+            #expect(reason.contains("only for Gemma 4"))
+        } else {
+            Issue.record("expected Qwen vision readiness to be unavailable")
+        }
+    }
+
+    @MainActor
     @Test func selectingAModelDoesNotDisturbAnyDownload() async {
         let selected = MockModelInstallerClient(descriptor: .default, holdOpen: true)
         let other = MockModelInstallerClient(descriptor: .qwen36, holdOpen: true)

@@ -18,14 +18,20 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     private let connection = Mutex(Connection())
     private let serviceURL: URL
     private let inferenceMemory = Mutex<UInt64?>(nil)
+    private let inferenceTowerMemory = Mutex<UInt64?>(nil)
     public let generationTranscriptMailbox = GenerationTranscriptMailbox()
 
     public var currentInferenceMemoryBytes: UInt64? {
         inferenceMemory.withLock { $0 }
     }
 
+    public var currentInferenceTowerBytes: UInt64? {
+        inferenceTowerMemory.withLock { $0 }
+    }
+
     public init(serviceURL: URL? = nil) {
         self.serviceURL = serviceURL ?? Self.defaultServiceURL()
+        DecodeUnixSocket.ignoreSIGPIPEProcessWide()
     }
 
     public func ensureLoaded(modelDirectory: URL, maxContextTokens: Int,
@@ -53,6 +59,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                 "decode service returned \(event.kind.rawValue) for a load request")
         }
         inferenceMemory.withLock { $0 = event.currentMemoryBytes }
+        inferenceTowerMemory.withLock { $0 = event.visionTowerMappedBytes }
         connection.withLock { $0.loadedDirectory = modelDirectory.standardizedFileURL }
         onState(.ready(modelDirectory: modelDirectory, loadSeconds: 0))
     }
@@ -66,6 +73,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
               event.kind == .unloaded else { return }
         connection.withLock { $0.loadedDirectory = nil }
         inferenceMemory.withLock { $0 = nil }
+        inferenceTowerMemory.withLock { $0 = nil }
     }
 
     public func generate(_ request: AppGenerationRequest)
@@ -84,9 +92,19 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         history: request.history.map {
                             DecodeChatTurn(prompt: $0.prompt, response: $0.response)
                         },
+                        imageAttachments: request.imageAttachments.map {
+                            DecodeImageAttachment(
+                                id: $0.id,
+                                path: $0.fileURL.path,
+                                displayName: $0.displayName,
+                                 encodedBytes: $0.encodedBytes,
+                                 sha256: $0.sha256)
+                        },
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
                         temperature: request.temperature,
+                        topK: request.topK,
+                        topP: request.topP,
                         repetitionPenalty: request.repetitionPenalty,
                         runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
                         generationID: generationID)
@@ -98,9 +116,23 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     var hasYieldedVisibleText = false
                     while true {
                         let event = try await handles.responses.next(matching: generationID)
-                        inferenceMemory.withLock { $0 = event.currentMemoryBytes }
+                        // Only when the event carries a figure: an event
+                        // without one says nothing about memory, and clearing
+                        // the last reading made the display flicker to empty.
+                        if let bytes = event.currentMemoryBytes {
+                            inferenceMemory.withLock { $0 = bytes }
+                        }
+                        if let tower = event.visionTowerMappedBytes {
+                            inferenceTowerMemory.withLock { $0 = tower }
+                        }
                         guard event.generationID == generationID else { continue }
 
+                        if event.kind == .memory {
+                            // The stored reading is not observed by the UI, so
+                            // yield an event that causes it to redraw.
+                            continuation.yield(.memorySample)
+                            continue
+                        }
                         if event.kind == .prefill || event.kind == .snapshot {
                             guard event.sequence == expectedSequence else {
                                 throw AppInferenceError.unknown(
@@ -290,7 +322,10 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         }
 
         // Demand the job without restarting a RunAtLoad winner; the socket is
-        // authoritative. Returns the failure detail rather than throwing.
+        // authoritative. `bootstrap` alone does not always leave the job
+        // running, and the failure then looked like a socket timeout with no
+        // indication that launchd was the cause. Returns the failure detail
+        // rather than throwing so the direct-process fallback can still run.
         var kickstartError: String?
         do {
             let starter = Process()
@@ -340,10 +375,16 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         throw lastError ?? AppInferenceError.modelLoadFailed("unknown error")
     }
 
+    /// `kickstart` demands the job; it deliberately omits `-k`, which would
+    /// restart a job that a RunAtLoad bootstrap already won. The socket is what
+    /// decides readiness, so restarting a healthy service would only lose it.
     static func kickstartArguments(uid: uid_t, label: String) -> [String] {
         ["kickstart", "gui/\(uid)/\(label)"]
     }
 
+    /// The socket timeout stays the primary diagnostic, because that is what the
+    /// caller actually observed; a launchctl failure is appended when there was
+    /// one, since it usually explains the timeout.
     static func socketFailureMessage(socketError: String?, kickstartError: String?)
         -> String {
         let kickstartDetail = kickstartError.map {
@@ -377,6 +418,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             decodeSeconds: event.decodeSeconds,
             tokensPerSecond: event.tokensPerSecond,
             peakMemoryBytes: event.peakMemoryBytes,
+            visionTowerMappedBytes: event.visionTowerMappedBytes,
             runtimeOptions: options,
             prefill: prefillDiagnostics(event.prefill, options: options),
             runner: event.runner.map(runnerDiagnostics))
@@ -420,7 +462,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             prefillEnabled: options.prefillEnabled,
             prefillChunkTokens: options.prefillChunkTokens,
             rdadvisePolicy: options.rdadvisePolicy.rawValue,
-            modelVerification: options.modelVerification.rawValue)
+            modelVerification: options.modelVerification.rawValue,
+            visionResidencyPolicy: options.visionResidencyPolicy.rawValue)
     }
 
     private static func removeLaunchJob(label: String) {

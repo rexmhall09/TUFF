@@ -245,6 +245,11 @@ public final class ModelInstallCoordinator: Identifiable {
         case .finalizing:
             resetETA()
             state = .finalizing
+        case .readyToActivate:
+            finishFailure(
+                RepackError.configurationInvalid(
+                    detail: "text installer returned a vision-only activation event"),
+                generation: generation)
         case .installed(let url):
             resetETA()
             let directory = url.standardizedFileURL

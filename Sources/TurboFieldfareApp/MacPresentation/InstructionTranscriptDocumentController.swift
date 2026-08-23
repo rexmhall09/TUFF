@@ -22,6 +22,7 @@ public final class InstructionTranscriptDocumentController {
 
     public private(set) var history: [TranscriptTurn] = []
     public private(set) var prompt = ""
+    public private(set) var promptPrefixIdentifier = ""
     public private(set) var response = ""
     public private(set) var isFinalized = false
     public private(set) var showsPrefillPlaceholder = false
@@ -68,7 +69,9 @@ public final class InstructionTranscriptDocumentController {
         prompt: String,
         response: String,
         isTerminal: Bool,
-        showsPrefillPlaceholder: Bool = false
+        showsPrefillPlaceholder: Bool = false,
+        promptPrefix: NSAttributedString = NSAttributedString(),
+        promptPrefixIdentifier: String = ""
     ) -> UpdateResult {
         let responseChanged = response != self.response
         let displaysPrefillPlaceholder = Self.shouldRunPrefillAnimation(
@@ -77,6 +80,7 @@ public final class InstructionTranscriptDocumentController {
             requested: showsPrefillPlaceholder)
         let needsRebuild = prompt != self.prompt
             || history != self.history
+            || promptPrefixIdentifier != self.promptPrefixIdentifier
             || !response.hasPrefix(self.response)
             || (isFinalized && !isTerminal)
             || displaysPrefillPlaceholder != self.showsPrefillPlaceholder
@@ -84,11 +88,13 @@ public final class InstructionTranscriptDocumentController {
         var mutation: Mutation = .none
         if needsRebuild
             || storage.length == 0
-                && (!prompt.isEmpty || !response.isEmpty || displaysPrefillPlaceholder) {
+                && (!prompt.isEmpty || promptPrefix.length > 0
+                    || !response.isEmpty || displaysPrefillPlaceholder) {
             rebuild(
                 storage: storage,
                 history: history,
                 prompt: prompt,
+                promptPrefix: promptPrefix,
                 response: response,
                 showsPrefillPlaceholder: displaysPrefillPlaceholder)
             mutation = .rebuilt
@@ -103,6 +109,7 @@ public final class InstructionTranscriptDocumentController {
 
         self.history = history
         self.prompt = prompt
+        self.promptPrefixIdentifier = promptPrefixIdentifier
         self.response = response
         self.showsPrefillPlaceholder = displaysPrefillPlaceholder
 
@@ -140,6 +147,7 @@ public final class InstructionTranscriptDocumentController {
         storage: NSMutableAttributedString,
         history: [TranscriptTurn],
         prompt: String,
+        promptPrefix: NSAttributedString,
         response: String,
         showsPrefillPlaceholder: Bool
     ) {
@@ -159,13 +167,23 @@ public final class InstructionTranscriptDocumentController {
             document.append(NSAttributedString(
                 string: "\n\n", attributes: Self.responseAttributes()))
         }
-        if !prompt.isEmpty {
+        if !prompt.isEmpty || promptPrefix.length > 0 {
             document.append(NSAttributedString(
                 string: "You\n",
                 attributes: Self.userLabelAttributes()))
-            document.append(NSAttributedString(
-                string: prompt,
-                attributes: Self.promptAttributes()))
+            if promptPrefix.length > 0 {
+                document.append(promptPrefix)
+                if !prompt.isEmpty {
+                    document.append(NSAttributedString(
+                        string: "\n\n",
+                        attributes: Self.promptAttributes()))
+                }
+            }
+            if !prompt.isEmpty {
+                document.append(NSAttributedString(
+                    string: prompt,
+                    attributes: Self.promptAttributes()))
+            }
             document.append(NSAttributedString(
                 string: "\n\n",
                 attributes: Self.promptAttributes()))

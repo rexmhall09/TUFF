@@ -91,7 +91,7 @@ Qwen 3.6). Once it is ready, choose **Load Model**, type your prompt, and press
 | Models          | Gemma 4 26B-A4B IT (26B total, ~3.88B active per token) and Qwen 3.6 35B-A3B (35B total, ~3B active per token)           |
 | Weights         | MLX affine 4-bit, group 64; 8-bit router; 4-bit shared and routed experts                                                |
 | Memory          | ~2 GB of weights and 4K KV cache for Gemma 4; ~1.45 GB for Qwen 3.6                                                      |
-| Storage         | About 14.3 GB installed for Gemma 4; about 19.6 GB for Qwen 3.6                                                          |
+| Storage         | About 14.3 GB for Gemma 4 text plus ~1.1 GB for its optional image pack; about 19.6 GB for Qwen 3.6                      |
 | Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                                            |
 | Platform        | macOS 15+, Metal 3.2+, Swift 6.2                                                                                          |
 | M2 measured decode | [5.1-6.3 tok/s](docs/BENCHMARKS.md#m2-measured-decode) on an 8 GB M2 MacBook Air |
@@ -145,11 +145,22 @@ Generation defaults to temperature `0.2`, Top-K `64`, and Top-P `0.95`. Set
 temperature to `0` for deterministic greedy output. The model can still repeat
 itself or give incorrect answers, so check important results.
 
-TUFF is text-only. The app and CLI support user and model messages
-plus optional system guidance; they do not expose or execute tools. The
-loopback server accepts function-tool declarations and returns
-model-produced tool calls for the client to authorize and execute. Images,
-audio, and video are not supported.
+The app and CLI support user and model messages plus optional system guidance;
+they do not expose or execute tools. The loopback server accepts function-tool
+declarations and returns model-produced tool calls for the client to authorize
+and execute. Audio and video are not supported.
+
+### Images
+
+Images are supported through a vision tower, which installs as a companion
+pack beside a Gemma 4 text model. Install it once and the app, CLI, and server
+accept images with Gemma 4. Qwen 3.6 remains text-only. Without the pack they
+tell you image support is unavailable, and the text runtime is untouched. The
+image tower requires an M2 or newer Apple Silicon Mac; text-only inference
+remains available on M1.
+
+[System design](docs/SYSTEM_DESIGN.md#images) covers how the tower runs and
+what it costs on an 8 GB machine.
 
 ### Mac app
 
@@ -248,6 +259,40 @@ swift run -c release TUFFRepack \
   --input-gturbo scratch/gemma4.gturbo
 ```
 
+#### Install image support
+
+The companion pack installs beside the text model:
+
+```bash
+swift run -c release TurboFieldfareRepack \
+  --vision-output scratch/gemma4.vision.gturbo \
+  --text-model scratch/gemma4.gturbo
+```
+
+The pack adds about 1.1 GB. Verify it with `--verify-vision-install`, remove an
+installed one with `--remove-vision-install`, and drop a cancelled download with
+`--discard-partial --vision-output <dir>`. A cancelled transfer can also be
+continued with `--resume`. The Mac app installs the same pack from its
+**Image Support** section.
+
+#### Send an image
+
+```bash
+swift run -c release TurboFieldfareCLI \
+  --model scratch/gemma4.gturbo \
+  --chat-prompt "What is in this picture?" \
+  --image photo.jpg
+```
+
+`--image` is repeatable and requires `--chat-prompt`; it cannot be combined
+with `--prompt` or `--messages-file`. Without the companion pack the run stops
+and says image support is unavailable.
+
+A multi-turn conversation carries its images inside the messages file instead,
+as `image_file` parts in any user message; `--image` covers the single-turn
+case only. Either route needs at least 16 expert-cache slots, because an image
+prompt always prefills chunked.
+
 #### Instruction chat
 
 Put chat messages in a JSON array and pass it with `--messages-file`:
@@ -344,7 +389,7 @@ correctness invariants.
 TUFF currently includes:
 
 - Remote streaming repack into the `.gturbo` model format
-- Instruction-tuned Gemma 4 26B-A4B with verified text-only chat formatting
+- Instruction-tuned Gemma 4 26B-A4B with verified chat formatting
 - 4-bit MLX affine embedding, attention, shared-expert, and routed-expert
   weights, with an 8-bit router
 - Custom Metal kernels for quantized GEMV, attention, MoE, normalization,
@@ -357,9 +402,14 @@ TUFF currently includes:
 - A Swift library, streaming installer, command-line interface, loopback
   OpenAI-compatible server, and native SwiftUI/AppKit Mac app with a one-shot
   local decode service
+- Optional image input from a separately installed companion pack: the vision
+  tower runs on bounded scratch, image rows attend in both directions inside
+  the sliding-window layers, and routed experts are released while the tower
+  runs
 
-Current scope is text-only inference from the pinned Gemma 4 26B-A4B
-instruction checkpoint on Apple Silicon Macs with at least 8 GB of RAM.
+Current scope is text input from the pinned Gemma 4 26B-A4B instruction
+checkpoint on Apple Silicon Macs with at least 8 GB of RAM, plus image input
+on M2 or newer Macs. Audio and video are out of scope.
 
 ### Qwen 3.6 35B-A3B
 
