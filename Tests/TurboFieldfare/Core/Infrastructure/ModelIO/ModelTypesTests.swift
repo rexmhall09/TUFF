@@ -32,4 +32,30 @@ import Foundation
         let e3 = ModelError.checksumMismatch(file: "model_weights.bin")
         #expect(e3.description.contains("model_weights.bin"))
     }
+
+    @Test func gptOss20BProfileMatchesPinnedCheckpoint() {
+        let config = ArchConfig.gptOss_20B
+        #expect(config.family == .gptOss)
+        #expect(config.variant == .gptOss_20B)
+        #expect(config.hiddenSize == 2_880)
+        #expect(config.numLayers == 24)
+        #expect(config.numHeads == 64)
+        #expect(config.numKVHeads == 8)
+        #expect(config.headDim == 64)
+        #expect(config.numExperts == 32)
+        #expect(config.topKExperts == 4)
+        #expect(config.slidingWindow == 128)
+        #expect(config.fullAttentionLayerMask == (0..<24).map {
+            $0.isMultiple(of: 2) ? 0 : 1
+        })
+        #expect(config.attentionSinks)
+        #expect(config.attentionScale == 0.125)
+        #expect(config.swigluLimit == 7)
+        #expect(config.yarnRope == YaRNRopeConfig(
+            originalContextLength: 4_096,
+            scalingFactor: 32,
+            betaFast: 32,
+            betaSlow: 1))
+        #expect(config.decodeInt4GEMVShapes.isEmpty)
+    }
 }

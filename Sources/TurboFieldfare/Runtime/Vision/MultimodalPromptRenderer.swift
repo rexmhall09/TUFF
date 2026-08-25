@@ -78,7 +78,12 @@ public enum MultimodalPromptRenderer {
             rendererAddsBoundaryTokens: false)
 
         public static func forFamily(_ family: ModelFamily) -> FamilyPolicy {
-            family == .qwen36 ? .qwen36 : .gemma4
+            switch family {
+            case .gemma4: return .gemma4
+            case .qwen36: return .qwen36
+            case .gptOss:
+                preconditionFailure("GPT-OSS does not accept image input")
+            }
         }
     }
 

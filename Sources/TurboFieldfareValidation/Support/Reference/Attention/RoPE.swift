@@ -107,4 +107,57 @@ public enum RopeRef {
         }
         return out
     }
+
+    /// GPT-OSS YaRN reference, following the independent Torch formulation:
+    /// build the full inverse-frequency table, blend NTK-by-parts, then apply
+    /// the concentration-scaled NeoX rotation.
+    public static func applyYaRNNeox(
+        input: [Float],
+        numTokens: Int,
+        numHeads: Int,
+        headDim: Int,
+        position: Int,
+        theta: Float,
+        originalContextLength: Int,
+        scalingFactor: Float,
+        betaFast: Float,
+        betaSlow: Float
+    ) -> [Float] {
+        precondition(input.count == numTokens * numHeads * headDim)
+        precondition(headDim.isMultiple(of: 2))
+        let halfDim = headDim / 2
+        let logTheta = Foundation.log(theta)
+        let low = Float(halfDim)
+            * Foundation.log(Float(originalContextLength) / (betaFast * 2 * .pi))
+            / logTheta
+        let high = Float(halfDim)
+            * Foundation.log(Float(originalContextLength) / (betaSlow * 2 * .pi))
+            / logTheta
+        let concentration = 0.1 * Foundation.log(scalingFactor) + 1
+        var inverseFrequencies = [Float](repeating: 0, count: halfDim)
+        for pair in 0..<halfDim {
+            let frequency = Foundation.pow(theta, Float(2 * pair) / Float(headDim))
+            let ramp = max(0, min(1, (Float(pair) - low) / (high - low)))
+            let extrapolation = 1 / frequency
+            let interpolation = 1 / (scalingFactor * frequency)
+            inverseFrequencies[pair] = extrapolation * (1 - ramp) + interpolation * ramp
+        }
+
+        var output = input
+        for token in 0..<numTokens {
+            for head in 0..<numHeads {
+                let base = (token * numHeads + head) * headDim
+                for pair in 0..<halfDim {
+                    let angle = Float(position + token) * inverseFrequencies[pair]
+                    let cosine = Foundation.cos(angle) * concentration
+                    let sine = Foundation.sin(angle) * concentration
+                    let lower = base + pair
+                    let upper = base + halfDim + pair
+                    output[lower] = input[lower] * cosine - input[upper] * sine
+                    output[upper] = input[lower] * sine + input[upper] * cosine
+                }
+            }
+        }
+        return output
+    }
 }

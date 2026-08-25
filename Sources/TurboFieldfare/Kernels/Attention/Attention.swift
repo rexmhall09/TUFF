@@ -44,9 +44,9 @@ final class Attention {
     static let threadsPerGroup: Int = 256
 
     /// Project ceilings for the split-KV partial scratch. `kAttnMaxHeadDim` in
-    /// attention.metal is 512; the model has 16 Q heads; `maxChunks` bounds the
-    /// split factor (and therefore the scratch size: 16·64·512 FP32 ≈ 2 MB).
-    static let maxQHeads = 16
+    /// attention.metal is 512; GPT-OSS has 64 Q heads; `maxChunks` bounds the
+    /// split factor (and therefore the largest scratch: 64·64·512 FP32 ≈ 8 MB).
+    static let maxQHeads = 64
     static let maxHeadDim = 512
     static let maxChunks = 64
     /// Full attention uses 16 base chunks by default.
@@ -173,6 +173,8 @@ final class Attention {
                           seqLen: UInt32,
                           window: UInt32,
                           scale: Float? = nil,
+                          sinks: MTLBuffer? = nil,
+                          sinksOffset: Int = 0,
                           ringCapacity: UInt32 = 0) {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
@@ -187,6 +189,8 @@ final class Attention {
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: kvStart, scale: sc,
                     preferGQASWA: true,
+                    sinks: sinks,
+                    sinksOffset: sinksOffset,
                     ringCapacity: ringCapacity)
     }
 
@@ -202,7 +206,9 @@ final class Attention {
                            numQHeads: UInt32,
                            numKVHeads: UInt32,
                            seqLen: UInt32,
-                           scale: Float? = nil) {
+                           scale: Float? = nil,
+                           sinks: MTLBuffer? = nil,
+                           sinksOffset: Int = 0) {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -216,7 +222,9 @@ final class Attention {
                     v: v, vOffset: vOffset, out: out, outOffset: outOffset,
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: 0, scale: sc,
-                    preferGQASWA: false)
+                    preferGQASWA: false,
+                    sinks: sinks,
+                    sinksOffset: sinksOffset)
     }
 
 
@@ -233,6 +241,8 @@ final class Attention {
                              headDim: UInt32, numQHeads: UInt32, numKVHeads: UInt32,
                              seqLen: UInt32, kvStart: UInt32, scale: Float,
                              preferGQASWA: Bool,
+                             sinks: MTLBuffer? = nil,
+                             sinksOffset: Int = 0,
                              ringCapacity: UInt32 = 0) {
         precondition(Int(numQHeads) <= Self.maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
@@ -292,6 +302,13 @@ final class Attention {
         var hd2 = headDim, nc2 = UInt32(nChunks)
         p2.setBytes(&hd2, length: MemoryLayout<UInt32>.size, index: 4)
         p2.setBytes(&nc2, length: MemoryLayout<UInt32>.size, index: 5)
+        // Bind valid storage even when disabled so Metal validation never sees
+        // an unbound pointer. The kernel reads it only when `hasSinks == 1`.
+        p2.setBuffer(sinks ?? mPartial,
+                     offset: sinks == nil ? 0 : sinksOffset,
+                     index: 6)
+        var hasSinks: UInt32 = sinks == nil ? 0 : 1
+        p2.setBytes(&hasSinks, length: MemoryLayout<UInt32>.size, index: 7)
         let combineTGWidth = min(Self.threadsPerGroup,
                                  Int(combinePSO.maxTotalThreadsPerThreadgroup))
         p2.dispatchThreadgroups(MTLSize(width: Int(numQHeads), height: 1, depth: 1),

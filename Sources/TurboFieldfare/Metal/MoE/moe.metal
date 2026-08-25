@@ -70,6 +70,68 @@ static inline float moe_hidden_activation(float x) {
     return gelu_pytorch_tanh(x);
 }
 
+// GPT-OSS caps only the positive side of the gate, clamps the linear branch
+// symmetrically, and offsets that branch by one before multiplication.
+kernel void gptoss_capped_swiglu(
+    device const half* gate [[buffer(0)]],
+    device const half* linear [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    constant float& limit [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) return;
+    const float g = min(float(gate[gid]), limit);
+    const float l = clamp(float(linear[gid]), -limit, limit);
+    const float silu = g / (1.0f + exp(-1.702f * g));
+    output[gid] = half(silu * (l + 1.0f));
+}
+
+// GPT-OSS router selection: stable top-4 followed by a softmax over only the
+// selected logits. Ties prefer the lower expert index, matching the CPU and
+// official reference implementations.
+kernel void gptoss_router_top4(
+    device const float* logits [[buffer(0)]],
+    device uint* output_indices [[buffer(1)]],
+    device half* output_weights [[buffer(2)]],
+    constant uint& num_experts [[buffer(3)]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (tid != 0u) return;
+    uint top_indices[4] = { 0u, 0u, 0u, 0u };
+    float top_scores[4] = { -INFINITY, -INFINITY, -INFINITY, -INFINITY };
+    for (uint expert = 0; expert < num_experts; ++expert) {
+        const float score = logits[expert];
+        uint position = 4u;
+        for (uint slot = 0; slot < 4u; ++slot) {
+            if (score > top_scores[slot]
+                || (score == top_scores[slot] && expert < top_indices[slot])) {
+                position = slot;
+                break;
+            }
+        }
+        if (position == 4u) continue;
+        for (uint slot = 3u; slot > position; --slot) {
+            top_indices[slot] = top_indices[slot - 1u];
+            top_scores[slot] = top_scores[slot - 1u];
+        }
+        top_indices[position] = expert;
+        top_scores[position] = score;
+    }
+
+    const float maximum = top_scores[0];
+    float exponentials[4];
+    float denominator = 0.0f;
+    for (uint slot = 0; slot < 4u; ++slot) {
+        exponentials[slot] = exp(top_scores[slot] - maximum);
+        denominator += exponentials[slot];
+    }
+    for (uint slot = 0; slot < 4u; ++slot) {
+        output_indices[slot] = top_indices[slot];
+        output_weights[slot] = half(exponentials[slot] / denominator);
+    }
+}
+
 struct ExpertOffsets {
     uint gate_W_off;
     uint gate_s_off;

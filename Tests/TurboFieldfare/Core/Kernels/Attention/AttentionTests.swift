@@ -116,6 +116,8 @@ import TurboFieldfareValidationSupport
         mode: Mode,
         shareKV: Bool = false,
         seed: UInt64,
+        scale: Float? = nil,
+        sinks: [Float]? = nil,
         tolerance: Float = Tolerance.fp16ChainedReduction
     ) throws {
         var rng = SeedTree(seed).key(
@@ -137,11 +139,20 @@ import TurboFieldfareValidationSupport
 
         let ctx = try MetalContext()
         let kernel = try Attention(context: ctx)
+        let sinkBits = sinks?.map(Quantization.bf16Bits)
 
         guard let qBuf = Fp16Buffer.make(ctx.device, halves: qFp16),
               let kBuf = Fp16Buffer.make(ctx.device, halves: kFp16),
               let outBuf = Fp16Buffer.make(ctx.device, count: qCount) else {
             Issue.record("Failed to allocate buffers"); return
+        }
+        let sinkBuffer: MTLBuffer? = sinkBits.flatMap {
+            ctx.device.makeBuffer(bytes: $0,
+                                  length: $0.count * MemoryLayout<UInt16>.stride,
+                                  options: .storageModeShared)
+        }
+        if sinks != nil && sinkBuffer == nil {
+            Issue.record("Failed to allocate attention sinks"); return
         }
         let vBuf: MTLBuffer
         if shareKV {
@@ -164,14 +175,18 @@ import TurboFieldfareValidationSupport
                              numQHeads: UInt32(numQHeads),
                              numKVHeads: UInt32(numKVHeads),
                              seqLen: UInt32(seqLen),
-                             window: UInt32(window))
+                             window: UInt32(window),
+                             scale: scale,
+                             sinks: sinkBuffer)
         case .full:
             kernel.encodeFull(commandBuffer: cmd,
                               q: qBuf, k: kBuf, v: vBuf, out: outBuf,
                               headDim: UInt32(headDim),
                               numQHeads: UInt32(numQHeads),
                               numKVHeads: UInt32(numKVHeads),
-                              seqLen: UInt32(seqLen))
+                              seqLen: UInt32(seqLen),
+                              scale: scale,
+                              sinks: sinkBuffer)
         }
         cmd.commit()
         cmd.waitUntilCompleted()
@@ -186,7 +201,9 @@ import TurboFieldfareValidationSupport
         let ref = AttentionRef.apply(
             q: qRef, k: kRef, v: vRef,
             headDim: headDim, numQHeads: numQHeads,
-            numKVHeads: numKVHeads, seqLen: seqLen, window: window
+            numKVHeads: numKVHeads, seqLen: seqLen, window: window,
+            scale: scale,
+            sinks: sinkBits?.map(Quantization.bf16ToFloat)
         )
         let actual = Fp16Buffer.read(outBuf, count: qCount)
 
@@ -368,6 +385,30 @@ import TurboFieldfareValidationSupport
     @Test func attentionFull_realShape() throws {
         try Self.runAndCompare(headDim: 512, numQHeads: 16, numKVHeads: 2,
                                seqLen: 128, mode: .full, seed: 0x175)
+    }
+
+    @Test func gptOssAttentionSinksMatchReferenceAtProductionHeadShape() throws {
+        let sinks = (0..<64).map { index in
+            Float(index % 9) * 0.125 - 0.5
+        }
+        try Self.runAndCompare(
+            headDim: 64,
+            numQHeads: 64,
+            numKVHeads: 8,
+            seqLen: 131,
+            mode: .full,
+            seed: 0x0_055,
+            scale: 0.125,
+            sinks: sinks)
+        try Self.runAndCompare(
+            headDim: 64,
+            numQHeads: 64,
+            numKVHeads: 8,
+            seqLen: 193,
+            mode: .swa(window: 128),
+            seed: 0x0_056,
+            scale: 0.125,
+            sinks: sinks)
     }
 
 

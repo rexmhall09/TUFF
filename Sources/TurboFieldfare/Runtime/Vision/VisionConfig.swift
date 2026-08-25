@@ -65,6 +65,21 @@ public struct VisionConfig: Sendable, Equatable {
             attentionScale = 1 / sqrt(Float(headDimension))
             minimumPixels = 65_536
             maximumPixels = 16_777_216
+        case .gptOss:
+            // GPT-OSS v2 checkpoints are text-only. Keep this initializer
+            // fail-closed if a caller tries to construct a vision runtime.
+            temporalPatchSize = 0
+            patchDimension = 0
+            maximumPatches = 0
+            poolingKernel = 0
+            textHiddenSize = 0
+            positionEmbeddingSize = 0
+            positionGridSide = 0
+            ropeTheta = 0
+            attentionScale = 0
+            minimumPixels = 0
+            maximumPixels = 0
+            preconditionFailure("GPT-OSS has no vision companion")
         }
     }
 }

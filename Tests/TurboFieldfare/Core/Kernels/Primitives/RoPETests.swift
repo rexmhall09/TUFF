@@ -101,6 +101,55 @@ import TurboFieldfareValidationSupport
         }
     }
 
+    @Test("GPT-OSS YaRN matches reference", arguments: [
+        (Int(0), UInt64(0x0A01)),
+        (Int(4_095), UInt64(0x0A02)),
+        (Int(32_768), UInt64(0x0A03)),
+        (Int(131_071), UInt64(0x0A04)),
+    ])
+    func gptOssYaRNMatchesReference(position: Int, seed: UInt64) throws {
+        let tokens = 2
+        let heads = 8
+        let headDim = 64
+        let count = tokens * heads * headDim
+        let input = Self.randomInputs(count: count, seed: seed, label: "gpt-oss-yarn")
+        let context = try MetalContext()
+        let kernel = try RoPE(context: context)
+        let buffer = try #require(Fp16Buffer.make(context.device, values: input))
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+
+        kernel.encodeYaRNNeox(
+            commandBuffer: commandBuffer,
+            data: buffer,
+            position: UInt32(position),
+            headDim: UInt32(headDim),
+            numHeads: UInt32(heads),
+            numTokens: UInt32(tokens),
+            theta: 150_000,
+            originalContextLength: 4_096,
+            scalingFactor: 32,
+            betaFast: 32,
+            betaSlow: 1)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try checkCommandBufferError(commandBuffer.error)
+
+        let actual = Fp16Buffer.read(buffer, count: count)
+        let reference = RopeRef.applyYaRNNeox(
+            input: input.map { Float(Float16($0)) },
+            numTokens: tokens,
+            numHeads: heads,
+            headDim: headDim,
+            position: position,
+            theta: 150_000,
+            originalContextLength: 4_096,
+            scalingFactor: 32,
+            betaFast: 32,
+            betaSlow: 1)
+        let error = RelError.compute(actual: actual, reference: reference)
+        #expect(error < Tolerance.fp16Reduction, "position=\(position) rel=\(error)")
+    }
+
     private static func randomInputs(count: Int,
                                      seed: UInt64,
                                      label: String) -> [Float] {

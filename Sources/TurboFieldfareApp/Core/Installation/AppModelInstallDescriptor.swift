@@ -147,7 +147,12 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public static func visionCompanion(
         for family: ModelFamily
     ) -> AppModelInstallDescriptor {
-        family == .qwen36 ? .qwen36VisionCompanion : .visionCompanion
+        switch family {
+        case .gemma4: return .visionCompanion
+        case .qwen36: return .qwen36VisionCompanion
+        case .gptOss:
+            preconditionFailure("GPT-OSS does not have a vision companion")
+        }
     }
 
     private var catalogDescriptor: TUFFModelDescriptor? {

@@ -8,17 +8,20 @@ import Metal
 public enum ModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
+    case gptOss = "gpt-oss"
 }
 
 public enum ModelVariant: String, Sendable, Equatable {
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
+    case gptOss_20B = "gpt-oss-20b"
 
     static func legacyDefault(for family: ModelFamily) -> ModelVariant {
         switch family {
         case .gemma4: return .gemma4_26B_A4B
         case .qwen36: return .qwen36_35B_A3B
+        case .gptOss: return .gptOss_20B
         }
     }
 }
@@ -26,6 +29,26 @@ public enum ModelVariant: String, Sendable, Equatable {
 public enum FeedForwardKind: String, Sendable, Equatable {
     case dense
     case mixtureOfExperts = "moe"
+}
+
+/// YaRN RoPE scaling parameters used by GPT-OSS. Frequencies inside the
+/// original context are blended between extrapolation and interpolation;
+/// positions beyond it keep the same continuous frequency schedule.
+public struct YaRNRopeConfig: Sendable, Equatable {
+    public let originalContextLength: Int
+    public let scalingFactor: Double
+    public let betaFast: Double
+    public let betaSlow: Double
+
+    public init(originalContextLength: Int,
+                scalingFactor: Double,
+                betaFast: Double,
+                betaSlow: Double) {
+        self.originalContextLength = originalContextLength
+        self.scalingFactor = scalingFactor
+        self.betaFast = betaFast
+        self.betaSlow = betaSlow
+    }
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -123,6 +146,13 @@ public struct ArchConfig: Sendable, Equatable {
     /// sub-dim): rotation confined to the first `rotaryDim` elements, pairing
     /// (i, rotaryDim/2 + i), frequency divisor = rotaryDim.
     public let ropeNeoxSubdim: Bool
+    /// Each query head has a learned scalar softmax logit whose value vector
+    /// is zero. GPT-OSS uses this as an attention sink.
+    public let attentionSinks: Bool
+    /// Optional YaRN frequency scaling. Nil means unscaled RoPE.
+    public let yarnRope: YaRNRopeConfig?
+    /// Upper clamp used by GPT-OSS capped SwiGLU. Zero means ordinary SwiGLU.
+    public let swigluLimit: Double
     /// Gated-DeltaNet dimensions for layers with mask value 2.
     public let linearAttention: LinearAttentionConfig
 
@@ -161,6 +191,9 @@ public struct ArchConfig: Sendable, Equatable {
         ffnSandwichNorms: Bool = true,
         sharedExpertGated: Bool = false,
         ropeNeoxSubdim: Bool = false,
+        attentionSinks: Bool = false,
+        yarnRope: YaRNRopeConfig? = nil,
+        swigluLimit: Double = 0,
         linearAttention: LinearAttentionConfig = .none
     ) {
         self.hiddenSize = hiddenSize
@@ -197,6 +230,9 @@ public struct ArchConfig: Sendable, Equatable {
         self.ffnSandwichNorms = ffnSandwichNorms
         self.sharedExpertGated = sharedExpertGated
         self.ropeNeoxSubdim = ropeNeoxSubdim
+        self.attentionSinks = attentionSinks
+        self.yarnRope = yarnRope
+        self.swigluLimit = swigluLimit
         self.linearAttention = linearAttention
     }
 
@@ -323,6 +359,51 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Canonical GPT-OSS 20B profile from the pinned OpenAI checkpoint. The
+    /// model alternates 128-token sliding and full attention, routes each
+    /// token through four of 32 experts, and stores routed matrices as MXFP4.
+    public static let gptOss_20B = ArchConfig(
+        hiddenSize: 2_880,
+        intermediateSize: 2_880,
+        moeIntermediateSize: 2_880,
+        numHeads: 64,
+        numKVHeads: 8,
+        numFullKVHeads: 8,
+        headDim: 64,
+        fullHeadDim: 64,
+        vocabSize: 201_088,
+        slidingWindow: 128,
+        finalLogitSoftcap: 0,
+        ropeTheta: 150_000,
+        fullRopeTheta: 150_000,
+        partialRotaryFactor: 1,
+        numLayers: 24,
+        numExperts: 32,
+        topKExperts: 4,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.gptOss20BLayerMask(),
+        hiddenActivation: "swiglu_capped",
+        family: .gptOss,
+        variant: .gptOss_20B,
+        attentionScale: 0.125,
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true,
+        attentionSinks: true,
+        yarnRope: YaRNRopeConfig(
+            originalContextLength: 4_096,
+            scalingFactor: 32,
+            betaFast: 32,
+            betaSlow: 1),
+        swigluLimit: 7)
+
+    private static func gptOss20BLayerMask() -> [UInt8] {
+        (0..<24).map { $0.isMultiple(of: 2) ? 0 : 1 }
+    }
+
     /// Variant registry used by both v1.1 manifests and the legacy-family
     /// resolver. Family alone is intentionally not a registry key because
     /// multiple checkpoints can share prompt behavior without sharing shapes.
@@ -330,12 +411,14 @@ public struct ArchConfig: Sendable, Equatable {
         .gemma4_E4B: .gemma4_E4B,
         .gemma4_26B_A4B: .gemma4_26B_A4B,
         .qwen36_35B_A3B: .qwen36_35B_A3B,
+        .gptOss_20B: .gptOss_20B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
     /// pipeline specialization. Constant-folding the loop bounds measurably
     /// raises achieved bandwidth on the narrower projections.
     public var decodeInt4GEMVShapes: [(m: Int, n: Int)] {
+        if family == .gptOss { return [] }
         var shapes: [(m: Int, n: Int)] = []
         if attnOutputGate {
             shapes.append((m: 2 * numHeads * fullHeadDim, n: hiddenSize))

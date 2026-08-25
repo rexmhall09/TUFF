@@ -3,6 +3,21 @@ import Foundation
 import TurboFieldfareValidationSupport
 
 @Suite struct AttentionReferenceTests {
+    @Test func learnedSinkContributesOnlySoftmaxMass() {
+        let output = AttentionRef.apply(
+            q: [1, 0],
+            k: [1, 0],
+            v: [4, -2],
+            headDim: 2,
+            numQHeads: 1,
+            numKVHeads: 1,
+            seqLen: 1,
+            scale: 1,
+            sinks: [1])
+        #expect(abs(output[0] - 2) < 0.000_001)
+        #expect(abs(output[1] + 1) < 0.000_001)
+    }
+
     /// Independent reference: scalar per-element accumulation, no vDSP.
     /// Same math, no Accelerate.
     private static func scalarRef(

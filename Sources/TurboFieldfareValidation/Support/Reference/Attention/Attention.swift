@@ -20,13 +20,15 @@ public enum AttentionRef {
         numKVHeads: Int,
         seqLen: Int,
         window: Int? = nil,
-        scale: Float? = nil
+        scale: Float? = nil,
+        sinks: [Float]? = nil
     ) -> [Float] {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads")
         precondition(q.count == numQHeads * headDim)
         precondition(k.count == seqLen * numKVHeads * headDim)
         precondition(v.count == seqLen * numKVHeads * headDim)
+        precondition(sinks == nil || sinks?.count == numQHeads)
 
         let groupSize = numQHeads / numKVHeads
         let scale = scale ?? (1.0 / Float(headDim).squareRoot())
@@ -64,7 +66,7 @@ public enum AttentionRef {
             }
 
             // Softmax (numerically stable).
-            var mx = scores[0]
+            var mx = max(scores[0], sinks?[qh] ?? -.infinity)
             for s in scores { if s > mx { mx = s } }
             var negMax = -mx
             scores.withUnsafeMutableBufferPointer { ps in
@@ -76,6 +78,7 @@ public enum AttentionRef {
             scores.withUnsafeBufferPointer { ps in
                 vDSP_sve(ps.baseAddress!, 1, &sum, vDSP_Length(ps.count))
             }
+            if let sink = sinks?[qh] { sum += exp(sink - mx) }
             var invSum = 1.0 / sum
             scores.withUnsafeMutableBufferPointer { ps in
                 vDSP_vsmul(ps.baseAddress!, 1, &invSum,

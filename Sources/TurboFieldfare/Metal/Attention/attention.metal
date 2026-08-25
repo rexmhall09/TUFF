@@ -347,6 +347,8 @@ void attention_decode_combine(
     device       half*  out          [[buffer(3)]],    // [num_q_heads * head_dim]
     constant     uint&  head_dim     [[buffer(4)]],
     constant     uint&  num_chunks   [[buffer(5)]],
+    device const bfloat* sinks       [[buffer(6)]],    // optional [num_q_heads]
+    constant     uint&  has_sinks    [[buffer(7)]],
     uint tg_id           [[threadgroup_position_in_grid]],
     uint lid             [[thread_position_in_threadgroup]],
     uint lsize           [[threads_per_threadgroup]]
@@ -362,8 +364,12 @@ void attention_decode_combine(
     // max and denominator rather than pay a threadgroup reduction + barriers.
     float m_glob = -INFINITY;
     for (uint c = 0; c < NC; ++c) { m_glob = max(m_glob, m_row[c]); }
+    if (has_sinks != 0u) { m_glob = max(m_glob, float(sinks[q_head])); }
     float D = 0.0f;
     for (uint c = 0; c < NC; ++c) { D += d_row[c] * attn_softmax_exp(m_row[c] - m_glob); }
+    // A sink is one extra attention logit with an implicit all-zero value.
+    // It contributes probability mass to the denominator, never the output.
+    if (has_sinks != 0u) { D += attn_softmax_exp(float(sinks[q_head]) - m_glob); }
     const float inv_d = (D > 0.0f) ? (1.0f / D) : 0.0f;
 
     device half* out_row = out + uint(q_head) * HD;

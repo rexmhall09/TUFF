@@ -5,6 +5,7 @@ final class RoPE {
     private let defaultNeox: MTLComputePipelineState
     private let proportionalNeox: MTLComputePipelineState
     private let neoxSubdim: MTLComputePipelineState
+    private let yarnNeox: MTLComputePipelineState
     private let defaultNeoxSWAQ: MTLComputePipelineState
     private let defaultNeoxSWAK: MTLComputePipelineState
     private let proportionalNeoxFullQ: MTLComputePipelineState
@@ -14,6 +15,7 @@ final class RoPE {
         self.defaultNeox = try context.pipeline("rope_default_neox")
         self.proportionalNeox = try context.pipeline("rope_proportional_neox")
         self.neoxSubdim = try context.pipeline("rope_neox_subdim")
+        self.yarnNeox = try context.pipeline("rope_yarn_neox")
         self.defaultNeoxSWAQ = try Self.specializedPipeline(
             context, "rope_default_neox", headDim: 256, numHeads: 16)
         self.defaultNeoxSWAK = try Self.specializedPipeline(
@@ -24,6 +26,50 @@ final class RoPE {
         self.proportionalNeoxFullK = try Self.specializedPipeline(
             context, "rope_proportional_neox",
             headDim: 512, numHeads: 2, rotatedPairs: 64)
+    }
+
+    /// GPT-OSS YaRN RoPE. `position` is the first token position; each depth
+    /// slice advances it by one. Pairing follows the checkpoint's NeoX
+    /// convention `(i, headDim / 2 + i)`.
+    func encodeYaRNNeox(commandBuffer: MTLCommandBuffer,
+                        data: MTLBuffer,
+                        dataOffset: Int = 0,
+                        position: UInt32,
+                        headDim: UInt32,
+                        numHeads: UInt32,
+                        numTokens: UInt32 = 1,
+                        theta: Float,
+                        originalContextLength: UInt32,
+                        scalingFactor: Float,
+                        betaFast: Float,
+                        betaSlow: Float) {
+        precondition(headDim.isMultiple(of: 2), "head_dim must be even")
+        precondition(scalingFactor >= 1, "YaRN scaling factor must be >= 1")
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(yarnNeox)
+        encoder.setBuffer(data, offset: dataOffset, index: 0)
+        var positionValue = position
+        var headDimValue = headDim
+        var numHeadsValue = numHeads
+        var thetaValue = theta
+        var initialValue = originalContextLength
+        var factorValue = scalingFactor
+        var betaFastValue = betaFast
+        var betaSlowValue = betaSlow
+        encoder.setBytes(&positionValue, length: MemoryLayout<UInt32>.size, index: 1)
+        encoder.setBytes(&headDimValue, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&numHeadsValue, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&thetaValue, length: MemoryLayout<Float>.size, index: 4)
+        encoder.setBytes(&initialValue, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&factorValue, length: MemoryLayout<Float>.size, index: 6)
+        encoder.setBytes(&betaFastValue, length: MemoryLayout<Float>.size, index: 7)
+        encoder.setBytes(&betaSlowValue, length: MemoryLayout<Float>.size, index: 8)
+        dispatch(encoder: encoder,
+                 pipeline: yarnNeox,
+                 pairs: Int(headDim) / 2,
+                 heads: Int(numHeads),
+                 tokens: Int(numTokens))
+        encoder.endEncoding()
     }
 
     /// Qwen-style partial RoPE: rotation confined to the first `rotaryDim`
