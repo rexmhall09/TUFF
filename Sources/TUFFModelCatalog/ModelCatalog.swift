@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
     case gemma4_26B_A4B = "gemma4-26b-a4b"
@@ -65,6 +66,143 @@ public struct TUFFModelHardwareRequirements: Codable, Equatable, Sendable {
     }
 }
 
+public struct TUFFKVCacheProfile: Codable, Equatable, Sendable {
+    public let fullAttentionBytesPerToken: UInt64
+    public let slidingAttentionBytesPerToken: UInt64
+    public let slidingWindowCapacityTokens: Int
+
+    public init(fullAttentionBytesPerToken: UInt64,
+                slidingAttentionBytesPerToken: UInt64 = 0,
+                slidingWindowCapacityTokens: Int = 0) {
+        self.fullAttentionBytesPerToken = fullAttentionBytesPerToken
+        self.slidingAttentionBytesPerToken = slidingAttentionBytesPerToken
+        self.slidingWindowCapacityTokens = slidingWindowCapacityTokens
+    }
+
+    public func estimatedBytes(contextTokens: Int) -> UInt64 {
+        guard contextTokens > 0 else { return 0 }
+        let full = fullAttentionBytesPerToken.multipliedReportingOverflow(
+            by: UInt64(contextTokens))
+        let slidingRows = min(contextTokens, max(0, slidingWindowCapacityTokens))
+        let sliding = slidingAttentionBytesPerToken.multipliedReportingOverflow(
+            by: UInt64(slidingRows))
+        guard !full.overflow, !sliding.overflow else { return .max }
+        let total = full.partialValue.addingReportingOverflow(sliding.partialValue)
+        return total.overflow ? .max : total.partialValue
+    }
+}
+
+public struct TUFFModelMemoryProfile: Codable, Equatable, Sendable {
+    public let qualifiedDefaultWorkingSetBytes: UInt64
+    public let defaultContextTokens: Int
+    public let defaultExpertCacheSlots: Int
+    public let expertCacheBytesPerSlot: UInt64
+    public let kvCache: TUFFKVCacheProfile
+
+    public init(qualifiedDefaultWorkingSetBytes: UInt64,
+                defaultContextTokens: Int = 8_192,
+                defaultExpertCacheSlots: Int = 16,
+                expertCacheBytesPerSlot: UInt64,
+                kvCache: TUFFKVCacheProfile) {
+        self.qualifiedDefaultWorkingSetBytes = qualifiedDefaultWorkingSetBytes
+        self.defaultContextTokens = defaultContextTokens
+        self.defaultExpertCacheSlots = defaultExpertCacheSlots
+        self.expertCacheBytesPerSlot = expertCacheBytesPerSlot
+        self.kvCache = kvCache
+    }
+
+    public func estimatedWorkingSetBytes(contextTokens: Int,
+                                         expertCacheSlots: Int) -> UInt64 {
+        let defaultKV = kvCache.estimatedBytes(contextTokens: defaultContextTokens)
+        let requestedKV = kvCache.estimatedBytes(contextTokens: contextTokens)
+        let defaultSlots = expertCacheBytesPerSlot.multipliedReportingOverflow(
+            by: UInt64(max(0, defaultExpertCacheSlots)))
+        let requestedSlots = expertCacheBytesPerSlot.multipliedReportingOverflow(
+            by: UInt64(max(0, expertCacheSlots)))
+        guard defaultKV != .max, requestedKV != .max,
+              !defaultSlots.overflow, !requestedSlots.overflow else { return .max }
+
+        let removableKV = min(defaultKV, qualifiedDefaultWorkingSetBytes)
+        let afterKV = qualifiedDefaultWorkingSetBytes - removableKV
+        let removableSlots = min(defaultSlots.partialValue, afterKV)
+        var estimate = afterKV - removableSlots
+        for value in [requestedKV, requestedSlots.partialValue] {
+            let addition = estimate.addingReportingOverflow(value)
+            guard !addition.overflow else { return .max }
+            estimate = addition.partialValue
+        }
+        return estimate
+    }
+}
+
+public struct TUFFDeviceCapabilities: Codable, Equatable, Sendable {
+    public let unifiedMemoryBytes: UInt64
+    public let macOSMajorVersion: Int
+    public let appleSiliconGeneration: Int
+
+    public init(unifiedMemoryBytes: UInt64,
+                macOSMajorVersion: Int,
+                appleSiliconGeneration: Int) {
+        self.unifiedMemoryBytes = unifiedMemoryBytes
+        self.macOSMajorVersion = macOSMajorVersion
+        self.appleSiliconGeneration = appleSiliconGeneration
+    }
+
+    public static func current() -> TUFFDeviceCapabilities {
+        let memory = sysctlUInt64(named: "hw.memsize") ?? ProcessInfo.processInfo.physicalMemory
+        let generation = sysctlString(named: "machdep.cpu.brand_string")
+            .flatMap(appleSiliconGeneration(brandString:)) ?? 1
+        return TUFFDeviceCapabilities(
+            unifiedMemoryBytes: memory,
+            macOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion,
+            appleSiliconGeneration: generation)
+    }
+
+    static func appleSiliconGeneration(brandString: String) -> Int? {
+        let normalized = brandString.lowercased()
+        guard let marker = normalized.range(of: "apple m") else { return nil }
+        let suffix = normalized[marker.upperBound...]
+        let digits = suffix.prefix { $0.isNumber }
+        guard !digits.isEmpty else { return nil }
+        return Int(digits)
+    }
+
+    private static func sysctlUInt64(named name: String) -> UInt64? {
+        var value: UInt64 = 0
+        var size = MemoryLayout<UInt64>.size
+        guard sysctlbyname(name, &value, &size, nil, 0) == 0,
+              size == MemoryLayout<UInt64>.size else { return nil }
+        return value
+    }
+
+    private static func sysctlString(named name: String) -> String? {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 1 else { return nil }
+        var bytes = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &bytes, &size, nil, 0) == 0 else { return nil }
+        return String(
+            decoding: bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+            as: UTF8.self)
+    }
+}
+
+public enum TUFFCompatibilityIssue: Codable, Equatable, Sendable {
+    case insufficientUnifiedMemory(requiredBytes: UInt64, actualBytes: UInt64)
+    case unsupportedMacOS(requiredMajorVersion: Int, actualMajorVersion: Int)
+    case unsupportedAppleSilicon(requiredGeneration: Int, actualGeneration: Int)
+    case contextExceedsSafeMemory(estimatedBytes: UInt64, budgetBytes: UInt64)
+}
+
+public struct TUFFModelCompatibility: Codable, Equatable, Sendable {
+    public let issues: [TUFFCompatibilityIssue]
+
+    public init(issues: [TUFFCompatibilityIssue]) {
+        self.issues = issues
+    }
+
+    public var isCompatible: Bool { issues.isEmpty }
+}
+
 public struct TUFFModelRuntimeDefaults: Codable, Equatable, Sendable {
     public let contextTokens: Int
     public let expertCacheSlots: Int
@@ -116,6 +254,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
     public let installDirectoryName: String
     public let source: TUFFModelSource
     public let hardware: TUFFModelHardwareRequirements
+    public let memory: TUFFModelMemoryProfile
     public let runtimeDefaults: TUFFModelRuntimeDefaults
     public let capabilities: Set<TUFFModelCapability>
     public let reasoningControl: TUFFReasoningControl?
@@ -131,6 +270,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
                 installDirectoryName: String,
                 source: TUFFModelSource,
                 hardware: TUFFModelHardwareRequirements,
+                memory: TUFFModelMemoryProfile,
                 runtimeDefaults: TUFFModelRuntimeDefaults = TUFFModelRuntimeDefaults(),
                 capabilities: Set<TUFFModelCapability>,
                 reasoningControl: TUFFReasoningControl?,
@@ -145,10 +285,50 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         self.installDirectoryName = installDirectoryName
         self.source = source
         self.hardware = hardware
+        self.memory = memory
         self.runtimeDefaults = runtimeDefaults
         self.capabilities = capabilities
         self.reasoningControl = reasoningControl
         self.addons = addons
+    }
+
+    public func compatibility(
+        with device: TUFFDeviceCapabilities,
+        contextTokens: Int? = nil,
+        expertCacheSlots: Int? = nil
+    ) -> TUFFModelCompatibility {
+        var issues: [TUFFCompatibilityIssue] = []
+        if device.unifiedMemoryBytes < hardware.minimumUnifiedMemoryBytes {
+            issues.append(.insufficientUnifiedMemory(
+                requiredBytes: hardware.minimumUnifiedMemoryBytes,
+                actualBytes: device.unifiedMemoryBytes))
+        }
+        if device.macOSMajorVersion < hardware.minimumMacOSMajorVersion {
+            issues.append(.unsupportedMacOS(
+                requiredMajorVersion: hardware.minimumMacOSMajorVersion,
+                actualMajorVersion: device.macOSMajorVersion))
+        }
+        if device.appleSiliconGeneration < hardware.minimumAppleSiliconGeneration {
+            issues.append(.unsupportedAppleSilicon(
+                requiredGeneration: hardware.minimumAppleSiliconGeneration,
+                actualGeneration: device.appleSiliconGeneration))
+        }
+
+        if let contextTokens {
+            let estimate = memory.estimatedWorkingSetBytes(
+                contextTokens: contextTokens,
+                expertCacheSlots: expertCacheSlots ?? runtimeDefaults.expertCacheSlots)
+            let twentyPercent = device.unifiedMemoryBytes / 5
+            let reserve = max(2 * TUFFModelCatalog.oneGiB, twentyPercent)
+            let budget = device.unifiedMemoryBytes > reserve
+                ? device.unifiedMemoryBytes - reserve : 0
+            if estimate > budget {
+                issues.append(.contextExceedsSafeMemory(
+                    estimatedBytes: estimate,
+                    budgetBytes: budget))
+            }
+        }
+        return TUFFModelCompatibility(issues: issues)
     }
 }
 
@@ -187,6 +367,13 @@ public enum TUFFModelCatalog {
         installDirectoryName: "gemma4.gturbo",
         source: gemmaSource,
         hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 2_254_857_830,
+            expertCacheBytesPerSlot: 100_663_296,
+            kvCache: TUFFKVCacheProfile(
+                fullAttentionBytesPerToken: 20_480,
+                slidingAttentionBytesPerToken: 204_800,
+                slidingWindowCapacityTokens: 1_304)),
         capabilities: [.textGeneration, .imageInput, .reasoning],
         reasoningControl: .toggle,
         addons: [TUFFModelAddonDescriptor(
@@ -216,6 +403,10 @@ public enum TUFFModelCatalog {
         installDirectoryName: "qwen36.gturbo",
         source: qwenSource,
         hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 1_610_612_736,
+            expertCacheBytesPerSlot: 75_497_472,
+            kvCache: TUFFKVCacheProfile(fullAttentionBytesPerToken: 20_480)),
         capabilities: [.textGeneration, .imageInput, .reasoning],
         reasoningControl: .toggleWithPreservation,
         addons: [TUFFModelAddonDescriptor(
