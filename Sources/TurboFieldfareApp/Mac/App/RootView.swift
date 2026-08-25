@@ -301,9 +301,9 @@ private struct ModelsWorkspaceView: View {
                 WorkspaceTitle(
                     title: "Models",
                     subtitle: "Download and manage the models that run on this Mac.")
-                ModelCatalogView(model: model)
+                ModelLibraryColumnsView(model: model)
             }
-            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: 1_180, alignment: .leading)
             .padding(28)
         }
         .background(Color(nsColor: .windowBackgroundColor))

@@ -9,6 +9,48 @@ public enum AppReasoningControl: Equatable, Sendable {
     case graded
 }
 
+public enum AppModelHardwareIssue: Equatable, Sendable {
+    case insufficientUnifiedMemory(requiredBytes: UInt64, actualBytes: UInt64)
+    case unsupportedMacOS(requiredMajorVersion: Int, actualMajorVersion: Int)
+    case unsupportedAppleSilicon(requiredGeneration: Int, actualGeneration: Int)
+}
+
+public struct AppModelHardwareEligibility: Equatable, Sendable {
+    public let minimumUnifiedMemoryBytes: UInt64
+    public let actualUnifiedMemoryBytes: UInt64
+    public let issues: [AppModelHardwareIssue]
+
+    public init(
+        minimumUnifiedMemoryBytes: UInt64,
+        actualUnifiedMemoryBytes: UInt64,
+        issues: [AppModelHardwareIssue]
+    ) {
+        self.minimumUnifiedMemoryBytes = minimumUnifiedMemoryBytes
+        self.actualUnifiedMemoryBytes = actualUnifiedMemoryBytes
+        self.issues = issues
+    }
+
+    public var isCompatible: Bool { issues.isEmpty }
+
+    public var explanation: String? {
+        guard let issue = issues.first else { return nil }
+        switch issue {
+        case .insufficientUnifiedMemory(let required, let actual):
+            return "Requires \(Self.memoryLabel(required)) unified memory; "
+                + "this Mac has \(Self.memoryLabel(actual))."
+        case .unsupportedMacOS(let required, let actual):
+            return "Requires macOS \(required) or newer; this Mac is running macOS \(actual)."
+        case .unsupportedAppleSilicon(let required, let actual):
+            return "Requires an M\(required) or newer Mac; this Mac reports M\(actual)."
+        }
+    }
+
+    private static func memoryLabel(_ bytes: UInt64) -> String {
+        let gibibytes = Double(bytes) / Double(TUFFModelCatalog.oneGiB)
+        return "\(gibibytes.formatted(.number.precision(.fractionLength(0...1)))) GB"
+    }
+}
+
 public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let displayName: String
     public let repoID: String
@@ -117,6 +159,41 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// descriptors retain the v1 behavior for tests and local builds.
     public var supportsImageInput: Bool {
         catalogDescriptor?.capabilities.contains(.imageInput) ?? true
+    }
+
+    public var isRecommended: Bool {
+        catalogID == TUFFModelCatalog.default.id
+    }
+
+    public func hardwareEligibility(
+        on device: TUFFDeviceCapabilities
+    ) -> AppModelHardwareEligibility {
+        guard let catalogDescriptor else {
+            return AppModelHardwareEligibility(
+                minimumUnifiedMemoryBytes: 0,
+                actualUnifiedMemoryBytes: device.unifiedMemoryBytes,
+                issues: [])
+        }
+        let compatibility = catalogDescriptor.compatibility(with: device)
+        let issues = compatibility.issues.compactMap { issue -> AppModelHardwareIssue? in
+            switch issue {
+            case .insufficientUnifiedMemory(let required, let actual):
+                return .insufficientUnifiedMemory(
+                    requiredBytes: required, actualBytes: actual)
+            case .unsupportedMacOS(let required, let actual):
+                return .unsupportedMacOS(
+                    requiredMajorVersion: required, actualMajorVersion: actual)
+            case .unsupportedAppleSilicon(let required, let actual):
+                return .unsupportedAppleSilicon(
+                    requiredGeneration: required, actualGeneration: actual)
+            case .contextExceedsSafeMemory:
+                return nil
+            }
+        }
+        return AppModelHardwareEligibility(
+            minimumUnifiedMemoryBytes: catalogDescriptor.hardware.minimumUnifiedMemoryBytes,
+            actualUnifiedMemoryBytes: device.unifiedMemoryBytes,
+            issues: issues)
     }
 
     public var reasoningControl: AppReasoningControl? {

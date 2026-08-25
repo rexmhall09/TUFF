@@ -14,11 +14,16 @@ struct ModelCatalogView: View {
     /// Compact drops the per-model summary and storage detail for the
     /// inspector, where the row sits in a narrow column.
     var compact: Bool = false
+    var showsAddOns: Bool = true
 
     var body: some View {
         VStack(spacing: compact ? 8 : 14) {
             ForEach(model.installs) { install in
-                ModelCatalogRow(model: model, install: install, compact: compact)
+                ModelCatalogRow(
+                    model: model,
+                    install: install,
+                    compact: compact,
+                    showsAddOns: showsAddOns)
             }
         }
     }
@@ -28,6 +33,7 @@ struct ModelCatalogRow: View {
     let model: AppModel
     let install: ModelInstallCoordinator
     var compact: Bool
+    var showsAddOns: Bool
 
     @State private var showingDiscardConfirmation = false
 
@@ -48,7 +54,8 @@ struct ModelCatalogRow: View {
             }
             message
             actions
-            if install.isInstalled && install.descriptor.supportsImageInput {
+            if showsAddOns && install.isInstalled
+                && install.descriptor.supportsImageInput {
                 visionSupport
             }
         }
@@ -75,6 +82,7 @@ struct ModelCatalogRow: View {
             Text("Downloaded ranges for this model will be removed. "
                  + "Other models and any installed model are untouched.")
         }
+        .saturation(hardwareEligibility.isCompatible ? 1 : 0)
     }
 
     private var header: some View {
@@ -87,6 +95,15 @@ struct ModelCatalogRow: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(TurboFieldfareMacTheme.accentColor.opacity(0.18),
+                                in: Capsule())
+            }
+            if install.descriptor.isRecommended {
+                Text("Recommended")
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .foregroundStyle(TurboFieldfareMacTheme.accentColor)
+                    .background(TurboFieldfareMacTheme.accentColor.opacity(0.12),
                                 in: Capsule())
             }
             Spacer(minLength: 8)
@@ -133,6 +150,21 @@ struct ModelCatalogRow: View {
                         install.descriptor.approximateDownloadBytes))
             StorageRow(label: "Installed size",
                        value: MetricFormat.storage(install.descriptor.installedBytes))
+            StorageRow(
+                label: "Unified memory",
+                value: "\(MetricFormat.memory(hardwareEligibility.minimumUnifiedMemoryBytes)) min")
+            if hardwareEligibility.isCompatible {
+                Label("Compatible with this Mac", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let explanation = hardwareEligibility.explanation {
+                Label(explanation, systemImage: "memorychip")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if let requirement = install.requirement, !install.isInstalled {
                 StorageRow(label: "Available on this Mac",
                            value: MetricFormat.storage(requirement.availableBytes))
@@ -219,19 +251,18 @@ struct ModelCatalogRow: View {
                 }
                 if !install.isInstalled {
                     Button(install.hasPartialDownload ? "Resume" : "Download") {
-                        install.install()
+                        model.installModel(install)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!install.canInstall)
+                    .disabled(!model.canInstallModel(install))
+                    .help(downloadHelp)
                 }
             }
             Spacer(minLength: 8)
             if !isSelected {
                 Button("Use This Model") { model.selectModel(install) }
                     .disabled(!model.canSelectModel(install))
-                    .help(install.isInstalled
-                          ? "Load and generate with this model"
-                          : "Make this the model the app loads once it is installed")
+                    .help(selectionHelp)
             }
         }
         .controlSize(compact ? .small : .regular)
@@ -312,6 +343,25 @@ struct ModelCatalogRow: View {
 
     private var visionDescriptor: AppModelInstallDescriptor {
         model.visionInstallDescriptor(for: install)
+    }
+
+    private var hardwareEligibility: AppModelHardwareEligibility {
+        model.hardwareEligibility(for: install)
+    }
+
+    private var downloadHelp: String {
+        if let explanation = hardwareEligibility.explanation { return explanation }
+        if let requirement = install.requirement, !requirement.canInstall {
+            return "Requires \(MetricFormat.storage(requirement.shortfallBytes)) more disk space."
+        }
+        return "Download and install \(install.descriptor.displayName)"
+    }
+
+    private var selectionHelp: String {
+        if let explanation = hardwareEligibility.explanation { return explanation }
+        return install.isInstalled
+            ? "Load and generate with this model"
+            : "Make this the model the app loads once it is installed"
     }
 
     private var visionIsInstalled: Bool {

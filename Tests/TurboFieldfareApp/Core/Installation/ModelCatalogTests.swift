@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TUFFModelCatalog
 import TurboFieldfare
 import TurboFieldfareRepackCore
 
@@ -81,6 +82,41 @@ import TurboFieldfareRepackCore
             == .toggleWithPreservation)
         #expect(AppModelInstallDescriptor.descriptor(
             for: ModelVariant.gptOss_20B)?.reasoningControl == .graded)
+        #expect(AppModelInstallDescriptor.default.isRecommended)
+        #expect(!AppModelInstallDescriptor.gemma4E4B.isRecommended)
+    }
+
+    @MainActor
+    @Test func incompatibleModelsCannotDownloadOrSelect() {
+        let gpt120 = AppModelInstallDescriptor.descriptor(
+            for: ModelVariant.gptOss_120B)!
+        let gptInstaller = MockModelInstallerClient(descriptor: gpt120)
+        let gptCoordinator = ModelInstallCoordinator(
+            descriptor: gpt120,
+            directoryURL: temporaryInstallPath("incompatible-120b"),
+            client: gptInstaller)
+        let device = TUFFDeviceCapabilities(
+            unifiedMemoryBytes: 16 * TUFFModelCatalog.oneGiB,
+            macOSMajorVersion: 26,
+            appleSiliconGeneration: 2)
+        let model = AppModel(
+            modelDirectory: temporaryInstallPath("compatible-gemma"),
+            client: MockLifecycleInferenceClient(),
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [gptCoordinator],
+            deviceCapabilities: device)
+
+        let eligibility = model.hardwareEligibility(for: gptCoordinator)
+        #expect(!eligibility.isCompatible)
+        #expect(eligibility.explanation
+            == "Requires 96 GB unified memory; this Mac has 16 GB.")
+        #expect(!model.canInstallModel(gptCoordinator))
+        #expect(!model.canSelectModel(gptCoordinator))
+
+        model.installModel(gptCoordinator)
+        model.selectModel(gptCoordinator)
+        #expect(!gptCoordinator.isInstalling)
+        #expect(model.selectedDescriptor == .default)
     }
 
     @MainActor

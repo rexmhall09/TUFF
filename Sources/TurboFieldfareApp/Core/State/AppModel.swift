@@ -1,5 +1,6 @@
 import Foundation
 import Synchronization
+import TUFFModelCatalog
 import TurboFieldfare
 import TurboFieldfareRepackCore
 import Observation
@@ -14,6 +15,7 @@ public final class AppModel {
     public let settingsStore = AppSettingsStore()
     public let serverStore = AppServerStore()
     public let inferenceStore = AppSharedInferenceStore()
+    public let deviceCapabilities: TUFFDeviceCapabilities
 
     public var modelPathText: String {
         get { modelLibraryStore.modelPathText }
@@ -298,7 +300,8 @@ public final class AppModel {
                 attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
                 conversationStore: AppConversationStore = AppConversationStore(),
                 visionRuntimeSupported: Bool = true,
-                settingsPersistenceEnabled: Bool = false) {
+                settingsPersistenceEnabled: Bool = false,
+                deviceCapabilities: TUFFDeviceCapabilities = .current()) {
         let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
         let installETAClock = SuspendingClock()
         let settingsProfileKey = installer.descriptor.settingsProfileKey
@@ -315,6 +318,7 @@ public final class AppModel {
         // properties as accesses to self even though each store already has a
         // default value.
         self.conversationStore = conversationStore
+        self.deviceCapabilities = deviceCapabilities
         self.client = client
         self.visionInstaller = visionInstaller
         self.memorySampler = memorySampler
@@ -412,7 +416,8 @@ public final class AppModel {
 
     public func canSelectModel(_ coordinator: ModelInstallCoordinator) -> Bool {
         guard !isRunning, !loadState.isLoading,
-              coordinator.id != selectedModelID else { return false }
+              coordinator.id != selectedModelID,
+              hardwareEligibility(for: coordinator).isCompatible else { return false }
         // A transfer keeps writing beside its original text model. Wait for it
         // to reach a saved state before changing selection; once prepared, the
         // target model itself can be selected for activation.
@@ -501,7 +506,8 @@ public final class AppModel {
     }
 
     public var canLoadModel: Bool {
-        isModelInstalled && !isRunning && !isVisionCompanionOperationInProgress
+        isModelInstalled && selectedModelHardwareEligibility.isCompatible
+            && !isRunning && !isVisionCompanionOperationInProgress
             && (loadState == .notLoaded || loadState.isFailed)
     }
 
@@ -511,7 +517,8 @@ public final class AppModel {
     }
 
     public var canReloadModel: Bool {
-        isModelInstalled && !isRunning && !isVisionCompanionOperationInProgress
+        isModelInstalled && selectedModelHardwareEligibility.isCompatible
+            && !isRunning && !isVisionCompanionOperationInProgress
             && loadState.isReady && hasStaleLoadedRuntime
     }
 
@@ -549,7 +556,22 @@ public final class AppModel {
     public var isInstallingModel: Bool { installState.isInstalling }
 
     public var canInstallModel: Bool {
-        selectedInstall.canInstall && !isRunning && !loadState.isLoading
+        canInstallModel(selectedInstall)
+    }
+
+    public var selectedModelHardwareEligibility: AppModelHardwareEligibility {
+        hardwareEligibility(for: selectedInstall)
+    }
+
+    public func hardwareEligibility(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelHardwareEligibility {
+        coordinator.descriptor.hardwareEligibility(on: deviceCapabilities)
+    }
+
+    public func canInstallModel(_ coordinator: ModelInstallCoordinator) -> Bool {
+        hardwareEligibility(for: coordinator).isCompatible
+            && coordinator.canInstall && !isRunning && !loadState.isLoading
             && !isVisionCompanionOperationInProgress
     }
 
@@ -1259,8 +1281,12 @@ public final class AppModel {
     }
 
     public func installModel() {
-        guard !isRunning, !loadState.isLoading else { return }
-        selectedInstall.install()
+        installModel(selectedInstall)
+    }
+
+    public func installModel(_ coordinator: ModelInstallCoordinator) {
+        guard canInstallModel(coordinator) else { return }
+        coordinator.install()
     }
 
     public func cancelInstall() {

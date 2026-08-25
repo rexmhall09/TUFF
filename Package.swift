@@ -150,7 +150,13 @@ let package = Package(
         ),
         .testTarget(
             name: "TurboFieldfareAppCoreTests",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol"],
+            dependencies: [
+                "TUFFModelCatalog",
+                "TurboFieldfareAppCore",
+                "TurboFieldfare",
+                "TurboFieldfareRepackCore",
+                "TurboFieldfareDecodeProtocol",
+            ],
             path: "Tests/TurboFieldfareApp/Core"
         ),
         .testTarget(
