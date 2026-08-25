@@ -82,6 +82,20 @@ struct RepackCLITests {
         }
     }
 
+    @Test func gptOssSelectorsAreAccepted() throws {
+        for selector in ["gpt-oss", "gpt-oss-20b", "gpt-oss-120b"] {
+            let output = temporaryOutput("\(selector)-model")
+            defer { clean(output) }
+            let result = try run([
+                "--model", selector,
+                "--output", output,
+                "--resume",
+            ])
+            #expect(result.status == 1)
+            #expect(result.stderr.contains("no resumable install state exists"))
+        }
+    }
+
     private func run(_ arguments: [String]) throws
         -> (status: Int32, stdout: String, stderr: String) {
         let executable = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)

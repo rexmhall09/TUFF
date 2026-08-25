@@ -28,6 +28,16 @@ import Testing
         #expect(model.compatibility(with: device(memoryGiB: 24)).isCompatible)
     }
 
+    @Test func unqualifiedGPTOSS120BStaysDisabledOnThisHost() {
+        let model = TUFFModelCatalog.gptOss_120B
+        #expect(!model.compatibility(with: device(memoryGiB: 16)).isCompatible)
+        #expect(!model.compatibility(with: device(memoryGiB: 64)).isCompatible)
+        #expect(model.compatibility(with: device(memoryGiB: 96)).isCompatible)
+        #expect(model.compatibility(
+            with: device(memoryGiB: 96), contextTokens: 4_096).isCompatible)
+        #expect(model.source.approximateDownloadBytes >= 65_248_815_744)
+    }
+
     @Test func insufficientMemoryAndPlatformReturnConcreteIssues() {
         let result = TUFFModelCatalog.default.compatibility(
             with: device(memoryGiB: 4, macOS: 14, generation: 0))

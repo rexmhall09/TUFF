@@ -6,6 +6,7 @@ public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
+    case gptOss_120B = "gpt-oss-120b"
 }
 
 public enum TUFFModelFamily: String, Codable, Sendable {
@@ -19,6 +20,7 @@ public enum TUFFArchitectureID: String, Codable, Sendable {
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
+    case gptOss_120B = "gpt-oss-120b"
 }
 
 public enum TUFFFeedForwardKind: String, Codable, Sendable {
@@ -69,6 +71,12 @@ public extension TUFFArchitectureProfile {
 
     static let gptOss_20B = TUFFArchitectureProfile(
         id: .gptOss_20B,
+        family: .gptOss,
+        feedForwardKind: .mixtureOfExperts,
+        weightLayout: .mxfp4)
+
+    static let gptOss_120B = TUFFArchitectureProfile(
+        id: .gptOss_120B,
         family: .gptOss,
         feedForwardKind: .mixtureOfExperts,
         weightLayout: .mxfp4)
@@ -446,6 +454,16 @@ public enum TUFFModelCatalog {
         installedBytes: 13_792_000_000,
         reserveBytes: oneGiB)
 
+    private static let gptOss120BSource = TUFFModelSource(
+        repoID: "openai/gpt-oss-120b",
+        revision: "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
+        sourceIndexSHA256:
+            "ede2655fdc05008561983b6e0829c600727c28d591e071077377059f03a6c00e",
+        manifestModelID: "openai/gpt-oss-120b",
+        approximateDownloadBytes: 65_300_000_000,
+        installedBytes: 65_400_000_000,
+        reserveBytes: oneGiB)
+
     /// Small text-only launch model. Image and audio remain intentionally
     /// absent until separately packaged add-ons pass their own qualification.
     public static let gemma4_E4B = TUFFModelDescriptor(
@@ -588,11 +606,46 @@ public enum TUFFModelCatalog {
         capabilities: [.textGeneration, .reasoning],
         reasoningControl: .graded)
 
+    /// The pinned 120B checkpoint is installable with the same bounded-memory
+    /// path as 20B. Its 96 GB gate is deliberately conservative until a real
+    /// run on qualifying Apple Silicon records a safe measured working set.
+    public static let gptOss_120B = TUFFModelDescriptor(
+        id: .gptOss_120B,
+        selector: "gpt-oss-120b",
+        apiModelID: "gpt-oss-120b",
+        displayName: "GPT-OSS 120B",
+        shortName: "GPT-OSS 120B",
+        summary: "Maximum-quality GPT-OSS checkpoint with streamed MXFP4 experts.",
+        family: .gptOss,
+        architecture: .gptOss_120B,
+        installDirectoryName: "gpt-oss-120b.gturbo",
+        source: gptOss120BSource,
+        hardware: TUFFModelHardwareRequirements(
+            minimumUnifiedMemoryBytes: 96 * oneGiB),
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 72 * oneGiB,
+            defaultContextTokens: 4_096,
+            defaultExpertCacheSlots: 4,
+            expertCacheBytesPerSlot: 13_238_272,
+            kvCache: TUFFKVCacheProfile(
+                fullAttentionBytesPerToken: 36_864,
+                slidingAttentionBytesPerToken: 36_864,
+                slidingWindowCapacityTokens: 384)),
+        runtimeDefaults: TUFFModelRuntimeDefaults(
+            contextTokens: 4_096,
+            expertCacheSlots: 4,
+            temperature: 1.0,
+            topK: 0,
+            topP: 1.0),
+        capabilities: [.textGeneration, .reasoning],
+        reasoningControl: .graded)
+
     public static let all: [TUFFModelDescriptor] = [
         gemma4_E4B,
         gemma4_26B_A4B,
         qwen36_35B_A3B,
         gptOss_20B,
+        gptOss_120B,
     ]
     public static let `default` = gemma4_26B_A4B
 

@@ -4,13 +4,14 @@ import Testing
 @Suite struct ModelCatalogTests {
     @Test func currentCatalogOrderAndSelectorsAreStable() {
         #expect(TUFFModelCatalog.all.map(\.selector) == [
-            "gemma4-e4b", "gemma4", "qwen36", "gpt-oss-20b",
+            "gemma4-e4b", "gemma4", "qwen36", "gpt-oss-20b", "gpt-oss-120b",
         ])
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
         #expect(TUFFModelCatalog.model(selector: "gemma4")?.id == .gemma4_26B_A4B)
         #expect(TUFFModelCatalog.model(selector: "e4b")?.id == .gemma4_E4B)
         #expect(TUFFModelCatalog.model(selector: "qwen36")?.id == .qwen36_35B_A3B)
         #expect(TUFFModelCatalog.model(selector: "gpt-oss")?.id == .gptOss_20B)
+        #expect(TUFFModelCatalog.model(selector: "gpt-oss-120b")?.id == .gptOss_120B)
         #expect(TUFFModelCatalog.model(selector: "unknown") == nil)
     }
 
@@ -43,20 +44,25 @@ import Testing
         let gemma = TUFFModelCatalog.gemma4_26B_A4B
         let qwen = TUFFModelCatalog.qwen36_35B_A3B
         let gptOss = TUFFModelCatalog.gptOss_20B
+        let gptOss120B = TUFFModelCatalog.gptOss_120B
 
         #expect(TUFFArchitectureProfile.gemma4E4B.feedForwardKind == .dense)
         #expect(TUFFArchitectureProfile.gemma4E4B.weightLayout == .affine)
         #expect(gemma.architecture.id == .gemma4_26B_A4B)
         #expect(qwen.architecture.id == .qwen36_35B_A3B)
         #expect(gptOss.architecture.id == .gptOss_20B)
+        #expect(gptOss120B.architecture.id == .gptOss_120B)
         #expect(gemma.architecture.feedForwardKind == .mixtureOfExperts)
         #expect(qwen.architecture.feedForwardKind == .mixtureOfExperts)
         #expect(gemma.architecture.weightLayout == .affine)
         #expect(qwen.architecture.weightLayout == .affine)
         #expect(gptOss.architecture.weightLayout == .mxfp4)
+        #expect(gptOss120B.architecture.weightLayout == .mxfp4)
         #expect(gemma.capabilities.contains(.imageInput))
         #expect(qwen.capabilities.contains(.reasoning))
         #expect(gptOss.reasoningControl == .graded)
         #expect(gptOss.addons.isEmpty)
+        #expect(gptOss120B.reasoningControl == .graded)
+        #expect(gptOss120B.addons.isEmpty)
     }
 }

@@ -37,6 +37,35 @@ import Testing
         #expect(arch.attentionScale == 0.125)
     }
 
+    @Test func pinned120BSourceAndArchitectureAreStable() throws {
+        let source = SupportedModelSource.gptOss120B
+        #expect(source.name == "gpt-oss-120b")
+        #expect(source.aliases.isEmpty)
+        #expect(source.repoID == "openai/gpt-oss-120b")
+        #expect(source.revision == "b5c939de8f754692c1647ca79fbf85e8c1e70f8a")
+        #expect(source.sourceIndexSHA256
+            == "ede2655fdc05008561983b6e0829c600727c28d591e071077377059f03a6c00e")
+        #expect(SourceFingerprint.modelID(
+            forIndexSha256: source.sourceIndexSHA256,
+            repoID: source.repoID) == source.modelID)
+
+        let root = temporaryRoot("production-120b-config")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try FileManager.default.createDirectory(
+            atPath: root, withIntermediateDirectories: true)
+        let path = (root as NSString).appendingPathComponent("config.json")
+        try writeConfig(path: path, production: true, model120B: true)
+
+        let arch = try ArchInfo.load(configPath: path)
+        #expect(arch.family == .gptOss)
+        #expect(arch.variant == .gptOss_120B)
+        #expect(arch.numLayers == 36)
+        #expect(arch.numExperts == 128)
+        #expect(arch.topKExperts == 4)
+        #expect(arch.fullAttentionLayerMask
+            == (0..<36).map { UInt8($0.isMultiple(of: 2) ? 0 : 1) })
+    }
+
     @Test func mxfp4MetadataAndU8SafetensorsAreAccepted() throws {
         let root = temporaryRoot("metadata")
         defer { try? FileManager.default.removeItem(atPath: root) }
@@ -241,13 +270,15 @@ private func makeToyPlan(tag: String) throws -> GPTOSSToyFixture {
         plan: plan, sourceRoot: source, outputRoot: output)
 }
 
-private func writeConfig(path: String, production: Bool) throws {
-    let layers = production ? 24 : 2
+private func writeConfig(path: String,
+                         production: Bool,
+                         model120B: Bool = false) throws {
+    let layers = production ? (model120B ? 36 : 24) : 2
     let hidden = production ? 2_880 : 64
     let heads = production ? 64 : 4
     let kvHeads = production ? 8 : 2
     let headDim = production ? 64 : 16
-    let experts = production ? 32 : 2
+    let experts = production ? (model120B ? 128 : 32) : 2
     let intermediate = production ? 2_880 : 64
     let vocab = production ? 201_088 : 128
     let root: [String: Any] = [

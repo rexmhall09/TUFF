@@ -368,6 +368,17 @@ import Darwin
         }
     }
 
+    @Test func resolvesGPTOSS120BFromTheVariantRegistry() throws {
+        let (dir, _) = try Self.writeToyManifest(archOverrides: [
+            "family": ModelFamily.gptOss.rawValue,
+            "variant": ModelVariant.gptOss_120B.rawValue,
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let resolved = try ManifestReader.resolveArchitecture(directoryURL: dir)
+        #expect(resolved == .gptOss_120B)
+    }
+
     @Test func denseE4BExtensionRoundTripsPLEAndSharedKVMetadata() throws {
         let dense = ArchConfig(
             hiddenSize: 128,

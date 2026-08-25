@@ -14,6 +14,7 @@ enum RepackModelVariant: String, Sendable, Equatable {
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
+    case gptOss_120B = "gpt-oss-120b"
 }
 
 enum RepackFeedForwardKind: String, Sendable, Equatable {
@@ -78,7 +79,7 @@ struct ArchInfo: Sendable, Equatable {
             throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
         }
         if (root["model_type"] as? String) == "gpt_oss" {
-            return try loadGPTOSS20B(configPath: configPath, config: root)
+            return try loadGPTOSS(configPath: configPath, config: root)
         }
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
@@ -91,7 +92,7 @@ struct ArchInfo: Sendable, Equatable {
 
     // MARK: - GPT-OSS
 
-    private static func loadGPTOSS20B(
+    private static func loadGPTOSS(
         configPath: String,
         config: [String: Any]
     ) throws -> ArchInfo {
@@ -142,8 +143,12 @@ struct ArchInfo: Sendable, Equatable {
             throw RepackError.configJsonInvalid(
                 path: configPath, detail: "missing GPT-OSS expert dimensions")
         }
+        let hiddenSize = try i("hidden_size")
+        let numLayers = try i("num_hidden_layers")
+        let variant: RepackModelVariant = hiddenSize == 2_880 && numLayers == 36
+            ? .gptOss_120B : .gptOss_20B
         let arch = ArchInfo(
-            hiddenSize: try i("hidden_size"),
+            hiddenSize: hiddenSize,
             intermediateSize: try i("intermediate_size"),
             moeIntermediateSize: try i("intermediate_size"),
             numHeads: try i("num_attention_heads"),
@@ -157,7 +162,7 @@ struct ArchInfo: Sendable, Equatable {
             ropeTheta: try d("rope_theta"),
             fullRopeTheta: try d("rope_theta"),
             partialRotaryFactor: 1,
-            numLayers: try i("num_hidden_layers"),
+            numLayers: numLayers,
             numExperts: experts,
             topKExperts: topK,
             tieWordEmbeddings: (config["tie_word_embeddings"] as? Bool) ?? false,
@@ -165,7 +170,7 @@ struct ArchInfo: Sendable, Equatable {
             fullAttentionLayerMask: mask,
             hiddenActivation: "swiglu_capped",
             family: .gptOss,
-            variant: .gptOss_20B,
+            variant: variant,
             feedForwardKind: .mixtureOfExperts,
             attnOutputGate: false,
             attentionScale: 1 / Double(headDim).squareRoot(),
@@ -174,18 +179,37 @@ struct ArchInfo: Sendable, Equatable {
             ffnSandwichNorms: false,
             sharedExpertGated: false,
             ropeNeoxSubdim: true)
-        try crossCheckProductionGPTOSS20B(
+        try crossCheckProductionGPTOSS(
             arch, config: config, configPath: configPath)
         return arch
     }
 
-    private static func crossCheckProductionGPTOSS20B(
+    private static func crossCheckProductionGPTOSS(
         _ arch: ArchInfo,
         config: [String: Any],
         configPath: String
     ) throws {
-        guard arch.hiddenSize == 2_880, arch.numLayers == 24 else { return }
-        let expectedMask = (0..<24).map { UInt8($0.isMultiple(of: 2) ? 0 : 1) }
+        guard arch.hiddenSize == 2_880 else { return }
+        let expectedLayers: Int
+        let expectedExperts: Int
+        let expectedVariant: RepackModelVariant
+        switch arch.numLayers {
+        case 24:
+            expectedLayers = 24
+            expectedExperts = 32
+            expectedVariant = .gptOss_20B
+        case 36:
+            expectedLayers = 36
+            expectedExperts = 128
+            expectedVariant = .gptOss_120B
+        default:
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "unsupported production GPT-OSS layer count \(arch.numLayers)")
+        }
+        let expectedMask = (0..<expectedLayers).map {
+            UInt8($0.isMultiple(of: 2) ? 0 : 1)
+        }
         let rope = config["rope_scaling"] as? [String: Any]
         func number(_ object: Any?) -> Double? {
             (object as? Double) ?? (object as? NSNumber)?.doubleValue
@@ -198,8 +222,9 @@ struct ArchInfo: Sendable, Equatable {
               arch.vocabSize == 201_088,
               arch.slidingWindow == 128,
               arch.ropeTheta == 150_000,
-              arch.numExperts == 32,
+              arch.numExperts == expectedExperts,
               arch.topKExperts == 4,
+              arch.variant == expectedVariant,
               arch.fullAttentionLayerMask == expectedMask,
               arch.attentionScale == 0.125,
               arch.hiddenActivation == "swiglu_capped",
@@ -215,7 +240,7 @@ struct ArchInfo: Sendable, Equatable {
               (rope?["original_max_position_embeddings"] as? Int) == 4_096 else {
             throw RepackError.configJsonInvalid(
                 path: configPath,
-                detail: "GPT-OSS config does not match the pinned 20B architecture baseline")
+                detail: "GPT-OSS config does not match the pinned \(expectedLayers == 24 ? "20B" : "120B") architecture baseline")
         }
     }
 

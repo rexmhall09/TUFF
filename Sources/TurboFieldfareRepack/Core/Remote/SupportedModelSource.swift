@@ -58,6 +58,7 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// layout/manifest sidecars.
     public static let qwen36 = SupportedModelSource(catalog: TUFFModelCatalog.qwen36_35B_A3B)
     public static let gptOss20B = SupportedModelSource(catalog: TUFFModelCatalog.gptOss_20B)
+    public static let gptOss120B = SupportedModelSource(catalog: TUFFModelCatalog.gptOss_120B)
 
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
