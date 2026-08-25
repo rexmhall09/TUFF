@@ -21,8 +21,191 @@ public final class AppConversationStore {
     public var outputText = ""
     public var conversation: [AppChatTurn] = []
     public var runIdentity = 0
+    public private(set) var conversations: [AppConversationRecord] = []
+    public private(set) var selectedConversationID: UUID?
+    public private(set) var persistenceError: String?
 
-    public init() {}
+    private let repository: AppConversationRepository?
+    private var archive = AppConversationArchive()
+    private var persistenceIsReadOnly = false
+
+    public init(repository: AppConversationRepository? = nil) {
+        self.repository = repository
+        guard let repository else { return }
+        do {
+            archive = try repository.load()
+            conversations = archive.conversations.sorted { $0.updatedAt > $1.updatedAt }
+            selectedConversationID = archive.selectedConversationID.flatMap { selected in
+                conversations.contains(where: { $0.id == selected }) ? selected : nil
+            } ?? conversations.first?.id
+            restoreSelectedTurns()
+        } catch {
+            // Do not overwrite an archive this build cannot understand or
+            // decode. The in-memory chat remains usable and the error is shown
+            // in Settings/Chat once that screen lands.
+            persistenceError = String(describing: error)
+            persistenceIsReadOnly = true
+        }
+    }
+
+    public static func persistentDefault() -> AppConversationStore {
+        AppConversationStore(repository: AppConversationRepository())
+    }
+
+    public var selectedConversation: AppConversationRecord? {
+        guard let selectedConversationID else { return nil }
+        return conversations.first { $0.id == selectedConversationID }
+    }
+
+    public var hasCompletedMessages: Bool {
+        !conversation.isEmpty
+    }
+
+    public func startNewConversation(modelID: String, now: Date = Date()) {
+        let record = AppConversationRecord(modelID: modelID, createdAt: now, updatedAt: now)
+        conversations.insert(record, at: 0)
+        selectedConversationID = record.id
+        conversation = []
+        outputPromptText = ""
+        outputImageAttachments = []
+        outputText = ""
+        persistArchive()
+    }
+
+    public func bindEmptyConversation(to modelID: String) {
+        guard let selectedConversationID,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),
+              conversations[index].turns.isEmpty else { return }
+        conversations[index].modelID = modelID
+        conversations[index].updatedAt = Date()
+        moveConversationToFront(at: index)
+        persistArchive()
+    }
+
+    public func selectConversation(id: UUID) {
+        guard conversations.contains(where: { $0.id == id }) else { return }
+        selectedConversationID = id
+        outputPromptText = ""
+        outputImageAttachments = []
+        outputText = ""
+        restoreSelectedTurns()
+        persistArchive()
+    }
+
+    public func renameConversation(id: UUID, title: String) {
+        let cleaned = Self.cleanedTitle(title)
+        guard !cleaned.isEmpty,
+              let index = conversations.firstIndex(where: { $0.id == id }) else { return }
+        conversations[index].title = cleaned
+        conversations[index].updatedAt = Date()
+        moveConversationToFront(at: index)
+        persistArchive()
+    }
+
+    public func deleteConversation(id: UUID) {
+        guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
+        conversations.remove(at: index)
+        if selectedConversationID == id {
+            selectedConversationID = conversations.first?.id
+            outputPromptText = ""
+            outputImageAttachments = []
+            outputText = ""
+            restoreSelectedTurns()
+        }
+        do {
+            try repository?.deleteAttachments(conversationID: id)
+        } catch {
+            persistenceError = String(describing: error)
+        }
+        persistArchive()
+    }
+
+    public func recordCompletedTurn(
+        _ turn: AppChatTurn,
+        attachments: [AppImageAttachment],
+        modelID: String,
+        now: Date = Date()
+    ) {
+        var index: Int
+        if let selectedConversationID,
+           let selected = conversations.firstIndex(where: { $0.id == selectedConversationID }),
+           conversations[selected].modelID == modelID {
+            index = selected
+        } else {
+            let record = AppConversationRecord(
+                modelID: modelID, createdAt: now, updatedAt: now)
+            conversations.insert(record, at: 0)
+            selectedConversationID = record.id
+            index = 0
+        }
+
+        let durableAttachments: [AppConversationAttachment]
+        do {
+            durableAttachments = try repository?.persistAttachments(
+                attachments,
+                conversationID: conversations[index].id) ?? []
+        } catch {
+            // The text is still useful and remains model context. Image
+            // persistence fails visibly instead of pretending the images were
+            // saved when their managed copies do not exist.
+            persistenceError = String(describing: error)
+            durableAttachments = []
+        }
+
+        conversations[index].turns.append(AppPersistedChatTurn(
+            id: turn.id,
+            prompt: turn.prompt,
+            response: turn.response,
+            attachments: durableAttachments))
+        if conversations[index].title == "New Chat" {
+            conversations[index].title = Self.automaticTitle(for: turn.prompt)
+        }
+        conversations[index].updatedAt = now
+        moveConversationToFront(at: index)
+        conversation.append(turn)
+        persistArchive()
+    }
+
+    public func attachments(for turnID: UUID) -> [AppImageAttachment] {
+        guard let record = selectedConversation,
+              let turn = record.turns.first(where: { $0.id == turnID }),
+              let repository else { return [] }
+        return turn.attachments.compactMap { try? repository.resolve($0) }
+    }
+
+    private func restoreSelectedTurns() {
+        conversation = selectedConversation?.turns.map(\.chatTurn) ?? []
+    }
+
+    private func persistArchive() {
+        guard let repository, !persistenceIsReadOnly else { return }
+        archive = AppConversationArchive(
+            selectedConversationID: selectedConversationID,
+            conversations: conversations)
+        do {
+            try repository.save(archive)
+        } catch {
+            persistenceError = String(describing: error)
+            persistenceIsReadOnly = true
+        }
+    }
+
+    private func moveConversationToFront(at index: Int) {
+        guard index > 0 else { return }
+        let record = conversations.remove(at: index)
+        conversations.insert(record, at: 0)
+    }
+
+    private static func automaticTitle(for prompt: String) -> String {
+        let cleaned = cleanedTitle(prompt)
+        guard cleaned.count > 52 else { return cleaned.isEmpty ? "New Chat" : cleaned }
+        let end = cleaned.index(cleaned.startIndex, offsetBy: 49)
+        return String(cleaned[..<end]).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    private static func cleanedTitle(_ value: String) -> String {
+        value.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
 }
 
 /// Download, selection, and optional add-on state for the model library.

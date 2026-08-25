@@ -83,10 +83,15 @@ public struct AppImageAttachmentStore: Sendable {
     private static var allowedRoots: [URL] {
         var roots = [FileManager.default.temporaryDirectory]
         if let userTemp = darwinUserTemporaryDirectory { roots.append(userTemp) }
-        return roots.map {
+        var allowed = roots.map {
             $0.appendingPathComponent(rootName, isDirectory: true)
                 .standardizedFileURL.resolvingSymlinksInPath()
         }
+        allowed.append(
+            AppConversationRepository.defaultRootURL
+                .appendingPathComponent("attachments", isDirectory: true)
+                .standardizedFileURL.resolvingSymlinksInPath())
+        return allowed
     }
 
     private static var darwinUserTemporaryDirectory: URL? {

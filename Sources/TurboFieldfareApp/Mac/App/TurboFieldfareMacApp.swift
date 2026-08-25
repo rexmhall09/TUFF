@@ -36,6 +36,8 @@ struct TurboFieldfareMacApp: App {
     init() {
         let model = AppModel(
             client: DecodeServiceInferenceClient(),
+            installer: RepackModelInstallerClient(descriptor: .selected),
+            conversationStore: .persistentDefault(),
             visionRuntimeSupported: AppModel.currentDeviceSupportsVisionRuntime,
             settingsPersistenceEnabled: true)
         _model = State(initialValue: model)

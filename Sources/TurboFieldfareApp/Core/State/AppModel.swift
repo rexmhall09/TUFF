@@ -9,7 +9,7 @@ import Observation
 public final class AppModel {
     public typealias RunState = AppRunState
 
-    public let conversationStore = AppConversationStore()
+    public let conversationStore: AppConversationStore
     public let modelLibraryStore = AppModelLibraryStore()
     public let settingsStore = AppSettingsStore()
     public let serverStore = AppServerStore()
@@ -279,11 +279,12 @@ public final class AppModel {
     /// the network or a real install directory.
     public init(modelDirectory: URL? = nil,
                 client: any AppInferenceClient = RealInferenceClient(),
-                installer: any AppModelInstallerClient = RepackModelInstallerClient(descriptor: .selected),
+                installer: any AppModelInstallerClient = RepackModelInstallerClient(descriptor: .default),
                 otherInstalls: [ModelInstallCoordinator]? = nil,
                 visionInstaller: any AppVisionPackInstallerClient = RepackVisionPackInstallerClient(),
                 memorySampler: AppMemorySampler = AppMemorySampler(),
                 attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
+                conversationStore: AppConversationStore = AppConversationStore(),
                 visionRuntimeSupported: Bool = true,
                 settingsPersistenceEnabled: Bool = false) {
         let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
@@ -301,6 +302,7 @@ public final class AppModel {
         // domain-store proxy properties below. Swift treats those computed
         // properties as accesses to self even though each store already has a
         // default value.
+        self.conversationStore = conversationStore
         self.client = client
         self.visionInstaller = visionInstaller
         self.memorySampler = memorySampler
@@ -364,6 +366,7 @@ public final class AppModel {
                     .reduce(0) { $0 + $1.outstandingBytes }
             }
         }
+        applySelectedConversationModelBinding()
         // Staged images of runs that were killed before they could clean up;
         // nothing else ever removes them.
         AppImageAttachmentStore.sweepAbandoned()
@@ -380,6 +383,15 @@ public final class AppModel {
 
     public var selectedDescriptor: AppModelInstallDescriptor {
         selectedInstall.descriptor
+    }
+
+    private func applySelectedConversationModelBinding() {
+        guard let modelID = conversationStore.selectedConversation?.modelID,
+              let coordinator = installs.first(where: {
+                  $0.descriptor.settingsProfileKey == modelID
+              }), coordinator.id != selectedModelID else { return }
+        selectedModelID = coordinator.id
+        applySelectedModelDirectory(coordinator.directoryURL)
     }
 
     /// Whether any model in the catalog is downloading right now — the
@@ -408,7 +420,49 @@ public final class AppModel {
         // which profile key persistence resolves.
         persistSettings()
         selectedModelID = coordinator.id
+        if hasOutputTranscript {
+            beginNewConversation(modelID: coordinator.descriptor.settingsProfileKey)
+        } else {
+            conversationStore.bindEmptyConversation(
+                to: coordinator.descriptor.settingsProfileKey)
+        }
         applySelectedModelDirectory(coordinator.directoryURL)
+    }
+
+    /// Restore a named chat and the model it was created with. This is the one
+    /// model switch that must not create another chat: the destination already
+    /// owns the history and prompt dialect being restored.
+    public func selectConversation(_ record: AppConversationRecord) {
+        guard !isRunning, !loadState.isLoading else { return }
+        releaseTranscriptImages()
+        clearImages()
+        conversationStore.selectConversation(id: record.id)
+        if let coordinator = installs.first(where: {
+            $0.descriptor.settingsProfileKey == record.modelID
+        }), coordinator.id != selectedModelID {
+            persistSettings()
+            selectedModelID = coordinator.id
+            applySelectedModelDirectory(coordinator.directoryURL)
+        }
+        generationTranscriptMailbox?.reset()
+        diagnostics = nil
+        error = nil
+    }
+
+    public func renameConversation(_ record: AppConversationRecord, to title: String) {
+        conversationStore.renameConversation(id: record.id, title: title)
+    }
+
+    public func deleteConversation(_ record: AppConversationRecord) {
+        guard !isRunning else { return }
+        if conversationStore.selectedConversationID == record.id {
+            releaseTranscriptImages()
+            generationTranscriptMailbox?.reset()
+            diagnostics = nil
+            error = nil
+        }
+        conversationStore.deleteConversation(id: record.id)
+        applySelectedConversationModelBinding()
     }
 
     /// A finished install selects its model when nothing else is loaded, so a
@@ -1833,13 +1887,15 @@ public final class AppModel {
 
     public func clearOutput() {
         guard !isRunning else { return }
-        conversation = []
-        outputPromptText = ""
         releaseTranscriptImages()
-        outputText = ""
+        beginNewConversation(modelID: selectedDescriptor.settingsProfileKey)
         generationTranscriptMailbox?.reset()
         diagnostics = nil
         error = nil
+    }
+
+    private func beginNewConversation(modelID: String) {
+        conversationStore.startNewConversation(modelID: modelID)
     }
 
     public func run() {
@@ -1998,8 +2054,10 @@ public final class AppModel {
         // of its own as established.
         let response = outputResponsePlainText
         if !outputPromptText.isEmpty, !response.isEmpty {
-            conversation.append(
-                AppChatTurn(prompt: outputPromptText, response: response))
+            conversationStore.recordCompletedTurn(
+                AppChatTurn(prompt: outputPromptText, response: response),
+                attachments: outputImageAttachments,
+                modelID: selectedDescriptor.settingsProfileKey)
         }
         finishTerminalRun()
     }
