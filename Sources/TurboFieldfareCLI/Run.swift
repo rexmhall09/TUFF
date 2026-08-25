@@ -73,7 +73,7 @@ public func run(args: Args,
             selectedDevice = device
         }
         let tokenizer = try await GFTokenizer.load(forModelDirectory: modelURL)
-        let currentDate = harmonyCurrentDate()
+        let currentDate = HarmonyPromptRenderer.calendarDate()
         var promptIds: [Int32]
         var multimodalMessages: [MultimodalMessage]?
         var imageURLs: [UUID: URL] = [:]
@@ -394,7 +394,7 @@ func estimatedPromptTokens(
             return try tokenizer.encodeHarmonyChat(
                 messages: messages,
                 reasoningEffort: reasoningEffort ?? .medium,
-                currentDate: currentDate ?? harmonyCurrentDate()).count
+                currentDate: currentDate ?? HarmonyPromptRenderer.calendarDate()).count
         }
         return tokenizer.encode(
             try tokenizer.applyChatTemplate(
@@ -446,20 +446,6 @@ func encodeTextChat(
             modelVariant: architecture.variant,
             reasoning: thinking),
         addBOS: false)
-}
-
-func harmonyCurrentDate(
-    _ date: Date = Date(),
-    timeZone: TimeZone = .current
-) -> String {
-    var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = timeZone
-    let components = calendar.dateComponents([.year, .month, .day], from: date)
-    return String(
-        format: "%04d-%02d-%02d",
-        components.year ?? 0,
-        components.month ?? 0,
-        components.day ?? 0)
 }
 
 func prefillCoercionNotice(

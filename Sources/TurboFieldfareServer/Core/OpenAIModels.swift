@@ -155,9 +155,10 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let presencePenalty: Float?
     public let frequencyPenalty: Float?
     /// TUFF's model-aware on/off reasoning control for Gemma 4 and Qwen.
-    /// GPT-OSS adds the standard graded `reasoning_effort` field with its
-    /// family integration.
     public let enableThinking: Bool?
+    /// GPT-OSS graded reasoning control. Harmony defaults to Medium when this
+    /// field is absent; other model families reject it.
+    public let reasoningEffort: GPTOSSReasoningEffort?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
@@ -172,6 +173,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case presencePenalty = "presence_penalty"
         case frequencyPenalty = "frequency_penalty"
         case enableThinking = "enable_thinking"
+        case reasoningEffort = "reasoning_effort"
     }
 }
 
@@ -272,6 +274,11 @@ public struct ValidatedChatRequest: Sendable {
     public let generationConfig: GenerationConfig
     public let maximumCompletionTokens: Int
     public let reasoning: ChatReasoning
+    public let reasoningEffort: GPTOSSReasoningEffort?
+    /// The local calendar day rendered into Harmony's system message. It is
+    /// captured during validation so queued requests and cache comparisons do
+    /// not change identity across midnight.
+    public let harmonyCurrentDate: String?
     /// Every staging directory this request's image files live in. The parser
     /// and the validator's store each stage under their own lease, and a
     /// request may carry files from both, so dropping either would delete
@@ -288,7 +295,9 @@ public struct ValidatedChatRequest: Sendable {
         includeUsage: Bool,
         generationConfig: GenerationConfig,
         maximumCompletionTokens: Int,
-        reasoning: ChatReasoning = .off
+        reasoning: ChatReasoning = .off,
+        reasoningEffort: GPTOSSReasoningEffort? = nil,
+        harmonyCurrentDate: String? = nil
     ) {
         self.messages = messages
         self.multimodalMessages = multimodalMessages
@@ -300,6 +309,8 @@ public struct ValidatedChatRequest: Sendable {
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
         self.reasoning = reasoning
+        self.reasoningEffort = reasoningEffort
+        self.harmonyCurrentDate = harmonyCurrentDate
         self.attachmentLeases = []
     }
 
@@ -314,6 +325,8 @@ public struct ValidatedChatRequest: Sendable {
         generationConfig: GenerationConfig,
         maximumCompletionTokens: Int,
         reasoning: ChatReasoning,
+        reasoningEffort: GPTOSSReasoningEffort?,
+        harmonyCurrentDate: String?,
         attachmentLeases: [ServerAttachmentLease]
     ) {
         self.messages = messages
@@ -326,6 +339,8 @@ public struct ValidatedChatRequest: Sendable {
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
         self.reasoning = reasoning
+        self.reasoningEffort = reasoningEffort
+        self.harmonyCurrentDate = harmonyCurrentDate
         self.attachmentLeases = attachmentLeases
     }
 }
@@ -414,7 +429,28 @@ public enum OpenAIRequestValidator {
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
                           "invalid_value")
         }
-        let reasoning: ChatReasoning = request.enableThinking == true ? .on : .off
+        let reasoning: ChatReasoning
+        let reasoningEffort: GPTOSSReasoningEffort?
+        let harmonyCurrentDate: String?
+        if dialect == .harmony {
+            guard request.enableThinking == nil else {
+                throw invalid(
+                    "enable_thinking is not supported by GPT-OSS; use reasoning_effort",
+                    "enable_thinking", "unsupported_parameter")
+            }
+            reasoning = .off
+            reasoningEffort = request.reasoningEffort ?? .medium
+            harmonyCurrentDate = HarmonyPromptRenderer.calendarDate()
+        } else {
+            guard request.reasoningEffort == nil else {
+                throw invalid(
+                    "reasoning_effort is only supported by GPT-OSS",
+                    "reasoning_effort", "unsupported_parameter")
+            }
+            reasoning = request.enableThinking == true ? .on : .off
+            reasoningEffort = nil
+            harmonyCurrentDate = nil
+        }
 
         let includeTools: Bool
         switch request.toolChoice {
@@ -455,6 +491,8 @@ public enum OpenAIRequestValidator {
                                     generationConfig: config,
                                     maximumCompletionTokens: maximum,
                                     reasoning: reasoning,
+                                    reasoningEffort: reasoningEffort,
+                                    harmonyCurrentDate: harmonyCurrentDate,
                                     attachmentLeases: validatedMessages.leases)
     }
 

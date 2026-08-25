@@ -842,6 +842,16 @@ struct ServerPromptCacheTests {
         #expect(cache.entryMissReason(domain: domain, request: thinking)
             .contains("reasoning mode changed"))
 
+        let effort = request(
+            messages: initial.messages, reasoningEffort: .high)
+        #expect(cache.entryMissReason(domain: domain, request: effort)
+            .contains("reasoning effort changed"))
+
+        let nextDate = request(
+            messages: initial.messages, harmonyCurrentDate: "2026-08-26")
+        #expect(cache.entryMissReason(domain: domain, request: nextDate)
+            .contains("calendar date changed"))
+
         #expect(cache.historyMissReason(entry: entry, request: initial)
             .contains("history did not extend"))
 
@@ -858,7 +868,9 @@ struct ServerPromptCacheTests {
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition] = [],
         imageIdentities: [[String]] = [],
-        reasoning: ChatReasoning = .off
+        reasoning: ChatReasoning = .off,
+        reasoningEffort: GPTOSSReasoningEffort? = nil,
+        harmonyCurrentDate: String? = nil
     ) -> ValidatedChatRequest {
         ValidatedChatRequest(
             messages: messages,
@@ -868,7 +880,9 @@ struct ServerPromptCacheTests {
             includeUsage: false,
             generationConfig: GenerationConfig(maxNewTokens: 16, temperature: 0),
             maximumCompletionTokens: 16,
-            reasoning: reasoning)
+            reasoning: reasoning,
+            reasoningEffort: reasoningEffort,
+            harmonyCurrentDate: harmonyCurrentDate)
     }
 
     private func rawResult(

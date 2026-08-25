@@ -1141,7 +1141,20 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     private func renderPrompt(_ request: ValidatedChatRequest) throws -> [Int32] {
         let promptIDs: [Int32]
-        if usesToolTemplate(request) {
+        if chatDialect == .harmony {
+            guard let reasoningEffort = request.reasoningEffort,
+                  let currentDate = request.harmonyCurrentDate else {
+                throw ServerRequestError.invalid(
+                    message: "Harmony reasoning metadata is missing",
+                    param: "reasoning_effort",
+                    code: "invalid_request")
+            }
+            promptIDs = try tokenizer.encodeHarmonyChat(
+                messages: request.messages,
+                tools: request.tools,
+                reasoningEffort: reasoningEffort,
+                currentDate: currentDate)
+        } else if usesToolTemplate(request) {
             promptIDs = try tokenizer.encodeToolChat(
                 messages: request.messages,
                 tools: request.tools,

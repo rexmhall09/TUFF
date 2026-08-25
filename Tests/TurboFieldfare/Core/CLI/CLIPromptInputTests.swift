@@ -12,10 +12,10 @@ import TurboFieldfare
     @Test func harmonyDateUsesTheRequestedCalendarDay() throws {
         let date = try #require(ISO8601DateFormatter().date(
             from: "2026-08-25T23:30:00Z"))
-        #expect(harmonyCurrentDate(
+        #expect(HarmonyPromptRenderer.calendarDate(
             date, timeZone: try #require(TimeZone(secondsFromGMT: 0)))
             == "2026-08-25")
-        #expect(harmonyCurrentDate(
+        #expect(HarmonyPromptRenderer.calendarDate(
             date, timeZone: try #require(TimeZone(secondsFromGMT: 3_600)))
             == "2026-08-26")
     }

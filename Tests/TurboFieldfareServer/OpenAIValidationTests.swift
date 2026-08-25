@@ -25,6 +25,50 @@ struct OpenAIValidationTests {
         #expect(validated.reasoning == .on)
     }
 
+    @Test func harmonySelectsGradedReasoningAndCapturesDate() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[{"role":"user","content":"x"}],"reasoning_effort":"high"}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .harmony)
+        #expect(validated.reasoning == .off)
+        #expect(validated.reasoningEffort == .high)
+        #expect(validated.harmonyCurrentDate?.range(
+            of: #"^\d{4}-\d{2}-\d{2}$"#,
+            options: .regularExpression) != nil)
+    }
+
+    @Test func harmonyDefaultsToMediumReasoning() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[{"role":"user","content":"x"}]}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: "m", dialect: .harmony)
+        #expect(validated.reasoningEffort == .medium)
+    }
+
+    @Test func modelSpecificReasoningFieldsFailClosed() throws {
+        let graded = try JSONDecoder().decode(
+            OpenAIChatRequest.self,
+            from: Data(#"""
+            {"model":"m","messages":[{"role":"user","content":"x"}],"reasoning_effort":"low"}
+            """#.utf8))
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(graded, modelID: "m", dialect: .gemma)
+        }
+
+        let binary = try JSONDecoder().decode(
+            OpenAIChatRequest.self,
+            from: Data(#"""
+            {"model":"m","messages":[{"role":"user","content":"x"}],"enable_thinking":false}
+            """#.utf8))
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(binary, modelID: "m", dialect: .harmony)
+        }
+    }
+
     @Test func capturedOpenCodeToolResultValidates() throws {
         let request = try fixture("opencode-1.15.11-tool-result.json")
         let validated = try OpenAIRequestValidator.validate(

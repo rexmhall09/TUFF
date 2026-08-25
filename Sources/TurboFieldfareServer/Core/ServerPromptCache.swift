@@ -31,6 +31,8 @@ struct ServerPromptCacheEntry: Sendable, Equatable {
     let inputImageIdentities: [[String]]
     let tools: [GFTokenizer.FunctionDefinition]
     let reasoning: ChatReasoning
+    let reasoningEffort: GPTOSSReasoningEffort?
+    let harmonyCurrentDate: String?
     let assistantTurn: CachedAssistantTurn
     let kvBackedTokenIDs: [Int32]
     let uncommittedBoundaryTokenIDs: [Int32]
@@ -154,6 +156,8 @@ struct ServerPromptCache: Sendable {
             inputImageIdentities: identities,
             tools: request.tools,
             reasoning: request.reasoning,
+            reasoningEffort: request.reasoningEffort,
+            harmonyCurrentDate: request.harmonyCurrentDate,
             assistantTurn: CachedAssistantTurn(
                 message: assistant,
                 rawStopReason: result.reason),
@@ -176,6 +180,8 @@ struct ServerPromptCache: Sendable {
               entry.domain == domain,
               entry.tools == request.tools,
               entry.reasoning == request.reasoning,
+              entry.reasoningEffort == request.reasoningEffort,
+              entry.harmonyCurrentDate == request.harmonyCurrentDate,
               entry.kvPosition == entry.kvBackedTokenIDs.count,
               entry.kvPosition > 0,
               entry.uncommittedBoundaryTokenIDs.count == 1 else {
@@ -263,6 +269,12 @@ struct ServerPromptCache: Sendable {
         }
         if entry.reasoning != request.reasoning {
             return "reasoning mode changed"
+        }
+        if entry.reasoningEffort != request.reasoningEffort {
+            return "reasoning effort changed"
+        }
+        if entry.harmonyCurrentDate != request.harmonyCurrentDate {
+            return "Harmony calendar date changed"
         }
         return "entry inconsistent: kvPosition=\(entry.kvPosition) "
             + "kvBacked=\(entry.kvBackedTokenIDs.count) "
