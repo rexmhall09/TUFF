@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfare
 @testable import TurboFieldfareAppCore
 
 @Suite struct AppGenerationRequestTests {
@@ -152,6 +153,73 @@ import Testing
                 family: .qwen36,
                 reasoning: .off,
                 reasoningEffort: .low)
+        }
+    }
+
+    @Test func structuredMessagesCanReplaceTheSimplePrompt() throws {
+        let request = AppGenerationRequest(
+            modelDirectory: existingDirectory,
+            prompt: "",
+            structuredMessages: [
+                GFTokenizer.Message(role: .user, content: "hello"),
+            ],
+            repetitionPenalty: 0.8,
+            seed: 17,
+            stopStrings: ["done"])
+
+        try request.validate()
+        #expect(request.seed == 17)
+        #expect(request.stopStrings == ["done"])
+    }
+
+    @Test func structuredImagesRequireExactMultimodalReferences() throws {
+        let attachment = AppImageAttachment(
+            fileURL: URL(fileURLWithPath: "/tmp/image.png"),
+            displayName: "image.png",
+            encodedBytes: 4,
+            sha256: String(repeating: "a", count: 64))
+        let messages = [GFTokenizer.Message(role: .user, content: "describe")]
+
+        #expect(throws: AppInferenceError.self) {
+            try AppGenerationRequest(
+                modelDirectory: existingDirectory,
+                prompt: "",
+                structuredMessages: messages,
+                imageAttachments: [attachment]).validate()
+        }
+        #expect(throws: AppInferenceError.self) {
+            try AppGenerationRequest(
+                modelDirectory: existingDirectory,
+                prompt: "",
+                structuredMessages: messages,
+                multimodalMessages: [MultimodalMessage(
+                    role: .user,
+                    content: [.image(id: UUID())])],
+                imageAttachments: [attachment]).validate()
+        }
+
+        let valid = AppGenerationRequest(
+            modelDirectory: existingDirectory,
+            prompt: "",
+            structuredMessages: messages,
+            multimodalMessages: [MultimodalMessage(
+                role: .user,
+                content: [.image(id: attachment.id), .text("describe")])],
+            imageAttachments: [attachment])
+        try valid.validate()
+    }
+
+    @Test func structuredStopStringsCannotBeEmpty() {
+        let request = AppGenerationRequest(
+            modelDirectory: existingDirectory,
+            prompt: "",
+            structuredMessages: [
+                GFTokenizer.Message(role: .user, content: "hello"),
+            ],
+            stopStrings: [""])
+
+        #expect(throws: AppInferenceError.self) {
+            try request.validate()
         }
     }
 

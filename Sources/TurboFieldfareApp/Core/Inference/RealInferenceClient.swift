@@ -293,7 +293,9 @@ actor RealInferenceSession {
                          temperature: request.temperature,
                          topK: request.topK,
                          topP: request.topP,
-                         repetitionPenalty: request.repetitionPenalty)
+                         repetitionPenalty: request.repetitionPenalty,
+                         seed: request.seed,
+                         stopStrings: request.stopStrings)
     }
 
     static func effectiveMaxNewTokens(requested: Int,
@@ -310,6 +312,54 @@ actor RealInferenceSession {
     struct RenderedMultimodalConversation {
         let input: MultimodalPrefillInput
         let trim: AppConversationTrim
+    }
+
+    static func renderStructuredConversation(
+        request: AppGenerationRequest,
+        tokenizer: GFTokenizer,
+        maxContext: Int,
+        modelVariant: ModelVariant
+    ) throws -> RenderedConversation {
+        guard let messages = request.structuredMessages, !messages.isEmpty else {
+            throw AppInferenceError.invalidRequest(
+                "Structured server requests require at least one message.")
+        }
+        let tokens: [Int32]
+        if modelVariant == .gptOss_20B || modelVariant == .gptOss_120B {
+            tokens = try tokenizer.encodeHarmonyChat(
+                messages: messages,
+                tools: request.tools,
+                reasoningEffort: request.reasoningEffort ?? .medium,
+                currentDate: request.harmonyCurrentDate
+                    ?? HarmonyPromptRenderer.calendarDate())
+        } else if !request.tools.isEmpty
+                    || messages.contains(where: {
+                        $0.role == .developer || $0.role == .tool
+                            || !$0.toolCalls.isEmpty
+                    }) {
+            tokens = try tokenizer.encodeToolChat(
+                messages: messages,
+                tools: request.tools,
+                reasoning: request.reasoning,
+                preserveThinking: request.preserveThinking)
+        } else {
+            tokens = tokenizer.encode(
+                try tokenizer.applyChatTemplate(
+                    messages,
+                    modelVariant: modelVariant,
+                    reasoning: request.reasoning,
+                    preserveThinking: request.preserveThinking),
+                addBOS: false)
+        }
+        guard tokens.count < maxContext else {
+            throw AppInferenceError.contextOverflow(
+                prompt: tokens.count,
+                maxNew: request.maxNewTokens,
+                maxContext: maxContext)
+        }
+        return RenderedConversation(
+            tokens: tokens,
+            trim: AppConversationTrim(droppedTurns: 0, promptTokens: tokens.count))
     }
 
     /// Render the conversation to tokens, dropping oldest turns until it fits.
@@ -388,6 +438,28 @@ actor RealInferenceSession {
         family: ModelFamily = .gemma4,
         modelVariant: ModelVariant? = nil
     ) throws -> RenderedMultimodalConversation {
+        if let messages = request.multimodalMessages {
+            let input = try MultimodalPromptRenderer.render(
+                messages: messages,
+                featuresByID: features,
+                tokenizer: tokenizer,
+                tools: request.tools,
+                family: family,
+                modelVariant: modelVariant,
+                reasoning: request.reasoning,
+                preserveThinking: request.preserveThinking)
+            guard input.effectiveTokenIDs.count < maxContext else {
+                throw AppInferenceError.contextOverflow(
+                    prompt: input.effectiveTokenIDs.count,
+                    maxNew: request.maxNewTokens,
+                    maxContext: maxContext)
+            }
+            return RenderedMultimodalConversation(
+                input: input,
+                trim: AppConversationTrim(
+                    droppedTurns: 0,
+                    promptTokens: input.effectiveTokenIDs.count))
+        }
         var currentContent = request.imageAttachments.map {
             MultimodalContentPart.image(id: $0.id)
         }
@@ -481,11 +553,17 @@ actor RealInferenceSession {
             let multimodalInput: MultimodalPrefillInput?
             let conversationTrim: AppConversationTrim
             if request.imageAttachments.isEmpty {
-                let rendered = try Self.renderConversation(
-                    request: request,
-                    tokenizer: tokenizer,
-                    maxContext: runner.maxContext,
-                    modelVariant: model.config.variant)
+                let rendered = try request.structuredMessages == nil
+                    ? Self.renderConversation(
+                        request: request,
+                        tokenizer: tokenizer,
+                        maxContext: runner.maxContext,
+                        modelVariant: model.config.variant)
+                    : Self.renderStructuredConversation(
+                        request: request,
+                        tokenizer: tokenizer,
+                        maxContext: runner.maxContext,
+                        modelVariant: model.config.variant)
                 promptIds = rendered.tokens
                 multimodalInput = nil
                 conversationTrim = rendered.trim
@@ -539,7 +617,8 @@ actor RealInferenceSession {
             progress.prefillStart = Date()
 
             let assistantDecoder = StructuredAssistantDecoder(
-                tokenizer: tokenizer, allowedTools: [])
+                tokenizer: tokenizer,
+                allowedTools: Set(request.tools.map(\.name)))
             var assistantDecodeError: Error?
             func publishAssistantEvents(
                 _ events: [StructuredAssistantEvent],
@@ -557,10 +636,8 @@ actor RealInferenceSession {
                         continuation.yield(.token(token(text)))
                     case .thinking(let text):
                         continuation.yield(.thinking(token(text)))
-                    case .toolCall:
-                        // No tools are advertised by Chat. The decoder rejects
-                        // any named call before it can reach this branch.
-                        break
+                    case .toolCall(let call):
+                        continuation.yield(.toolCall(call))
                     }
                 }
             }

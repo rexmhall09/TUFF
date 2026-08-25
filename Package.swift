@@ -76,6 +76,7 @@ let package = Package(
         ),
         .target(
             name: "TurboFieldfareDecodeProtocol",
+            dependencies: ["TurboFieldfare"],
             path: "Sources/TurboFieldfareDecodeProtocol"
         ),
         .executableTarget(

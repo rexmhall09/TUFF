@@ -1,6 +1,6 @@
 import Foundation
 
-public enum MultimodalContentPart: Sendable, Equatable {
+public enum MultimodalContentPart: Codable, Sendable, Equatable {
     case text(String)
     case image(id: UUID)
 }
@@ -19,7 +19,7 @@ public struct MultimodalContinuationTokens: Sendable, Equatable {
     public let imageTokenRanges: [Range<Int>]
 }
 
-public struct MultimodalMessage: Sendable, Equatable {
+public struct MultimodalMessage: Codable, Sendable, Equatable {
     public let role: GFTokenizer.Role
     public let content: [MultimodalContentPart]
     public let thinking: String?

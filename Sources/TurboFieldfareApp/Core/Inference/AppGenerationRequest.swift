@@ -7,6 +7,11 @@ public struct AppGenerationRequest: Equatable, Sendable {
     /// Completed turns preceding `prompt`, oldest first. Empty is the
     /// single-turn behavior this type had before.
     public var history: [AppChatTurn]
+    /// Fully structured messages used by the app-hosted OpenAI-compatible
+    /// server. Nil keeps the simpler Chat conversation path above.
+    public var structuredMessages: [GFTokenizer.Message]?
+    public var multimodalMessages: [MultimodalMessage]?
+    public var tools: [GFTokenizer.FunctionDefinition]
     public var imageAttachments: [AppImageAttachment]
     public var maxNewTokens: Int
     public var maxContextTokens: Int
@@ -17,11 +22,17 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var topK: Int?
     public var topP: Float?
     public var repetitionPenalty: Float
+    public var seed: UInt64?
+    public var stopStrings: [String]
+    public var harmonyCurrentDate: String?
     public var runtimeOptions: AppRuntimeOptions
 
     public init(modelDirectory: URL,
                 prompt: String,
                 history: [AppChatTurn] = [],
+                structuredMessages: [GFTokenizer.Message]? = nil,
+                multimodalMessages: [MultimodalMessage]? = nil,
+                tools: [GFTokenizer.FunctionDefinition] = [],
                 imageAttachments: [AppImageAttachment] = [],
                 maxNewTokens: Int = 4_096,
                 maxContextTokens: Int = 4096,
@@ -32,10 +43,16 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 topK: Int? = 64,
                 topP: Float? = 0.95,
                 repetitionPenalty: Float = 1.0,
+                seed: UInt64? = nil,
+                stopStrings: [String] = [],
+                harmonyCurrentDate: String? = nil,
                 runtimeOptions: AppRuntimeOptions = AppRuntimeOptions()) {
         self.modelDirectory = modelDirectory
         self.prompt = prompt
         self.history = history
+        self.structuredMessages = structuredMessages
+        self.multimodalMessages = multimodalMessages
+        self.tools = tools
         self.imageAttachments = imageAttachments
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
@@ -46,6 +63,9 @@ public struct AppGenerationRequest: Equatable, Sendable {
         self.topK = topK
         self.topP = topP
         self.repetitionPenalty = repetitionPenalty
+        self.seed = seed
+        self.stopStrings = stopStrings
+        self.harmonyCurrentDate = harmonyCurrentDate
         self.runtimeOptions = runtimeOptions
     }
 
@@ -55,7 +75,8 @@ public struct AppGenerationRequest: Equatable, Sendable {
 
     public func validate(fileManager: FileManager = .default,
                          requireModelDirectory: Bool = true) throws {
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard structuredMessages?.isEmpty == false
+                || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !imageAttachments.isEmpty else {
             throw AppInferenceError.invalidRequest("Prompt or image cannot be empty.")
         }
@@ -63,6 +84,21 @@ public struct AppGenerationRequest: Equatable, Sendable {
         // meant a request the API accepted was refused in the app.
         guard Set(imageAttachments.map(\.id)).count == imageAttachments.count else {
             throw AppInferenceError.invalidRequest("Images must be distinct.")
+        }
+        if let multimodalMessages {
+            let referenced = Set(multimodalMessages.flatMap { message in
+                message.content.compactMap { part -> UUID? in
+                    if case .image(let id) = part { return id }
+                    return nil
+                }
+            })
+            guard referenced == Set(imageAttachments.map(\.id)) else {
+                throw AppInferenceError.invalidRequest(
+                    "Structured image references do not match staged attachments.")
+            }
+        } else if !imageAttachments.isEmpty, structuredMessages != nil {
+            throw AppInferenceError.invalidRequest(
+                "Structured image requests require multimodal messages.")
         }
         let family = (try? ManifestReader.resolveArchitecture(
             directoryURL: modelDirectory).family)
@@ -115,8 +151,19 @@ public struct AppGenerationRequest: Equatable, Sendable {
                     "Top-P below 1 requires Top-K to be enabled.")
             }
         }
-        guard repetitionPenalty >= 1 else {
-            throw AppInferenceError.invalidRequest("Repetition penalty must be at least 1.")
+        if structuredMessages == nil {
+            guard repetitionPenalty >= 1 else {
+                throw AppInferenceError.invalidRequest(
+                    "Repetition penalty must be at least 1.")
+            }
+        } else {
+            guard repetitionPenalty > 0 else {
+                throw AppInferenceError.invalidRequest(
+                    "Repetition penalty must be positive.")
+            }
+        }
+        guard stopStrings.allSatisfy({ !$0.isEmpty }) else {
+            throw AppInferenceError.invalidRequest("Stop strings cannot be empty.")
         }
         try runtimeOptions.validate()
 

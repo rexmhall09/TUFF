@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfare
 @testable import TurboFieldfareAppCore
 @testable import TurboFieldfareDecodeService
 import TurboFieldfareDecodeProtocol
@@ -134,6 +135,40 @@ import TurboFieldfareDecodeProtocol
         #expect(snapshot.kind == .snapshot)
         #expect(snapshot.thinkingDelta == "private reasoning")
         #expect(snapshot.textDelta == "visible answer")
+        let terminal = try DecodeFrameCodec.read(
+            DecodeServiceEvent.self, from: pipe.fileHandleForReading)
+        #expect(terminal.kind == .finished)
+        #expect(writerFinished.wait(timeout: .now() + 2) == .success)
+    }
+
+    @Test func toolCallsTravelOnTheSnapshotChannelWithoutVisibleText() throws {
+        let generationID = UUID()
+        let call = ParsedToolCall(
+            id: "call_1",
+            name: "weather",
+            arguments: .object(["city": .string("Paris")]),
+            argumentsJSON: #"{"city":"Paris"}"#)
+        let outbox = DecodeServiceOutbox(generationID: generationID)
+        outbox.publish(.toolCall(call))
+        outbox.publish(.finished(diagnostics(stopReason: .eos)))
+        outbox.finish()
+
+        let pipe = Pipe()
+        let writerFinished = DispatchSemaphore(value: 0)
+        let writer = Thread {
+            defer {
+                try? pipe.fileHandleForWriting.close()
+                writerFinished.signal()
+            }
+            try? outbox.runWriter(to: pipe.fileHandleForWriting)
+        }
+        writer.start()
+
+        let snapshot = try DecodeFrameCodec.read(
+            DecodeServiceEvent.self, from: pipe.fileHandleForReading)
+        #expect(snapshot.kind == .snapshot)
+        #expect(snapshot.textDelta.isEmpty)
+        #expect(snapshot.toolCalls == [call])
         let terminal = try DecodeFrameCodec.read(
             DecodeServiceEvent.self, from: pipe.fileHandleForReading)
         #expect(terminal.kind == .finished)

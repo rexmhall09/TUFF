@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ParsedToolCall: Equatable, Sendable {
+public struct ParsedToolCall: Codable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let arguments: JSONValue

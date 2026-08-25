@@ -2254,6 +2254,10 @@ public final class AppModel {
             if !token.textDelta.isEmpty {
                 outputThinkingText += token.textDelta
             }
+        case .toolCall:
+            // Chat does not advertise tools. The app-hosted server consumes
+            // this event through the shared broker instead.
+            break
         case .finished(let diagnostics):
             visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
             finishSuccessfully(diagnostics)

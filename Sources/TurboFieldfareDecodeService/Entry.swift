@@ -138,6 +138,9 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                                 response: $0.response,
                                 thinking: $0.thinking)
                         },
+                        structuredMessages: request.structuredMessages,
+                        multimodalMessages: request.multimodalMessages,
+                        tools: request.tools,
                         imageAttachments: (request.imageAttachments ?? []).map {
                             AppImageAttachment(
                                 id: $0.id,
@@ -158,6 +161,9 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         topK: request.topK,
                         topP: request.topP,
                         repetitionPenalty: request.repetitionPenalty,
+                        seed: request.seed,
+                        stopStrings: request.stopStrings,
+                        harmonyCurrentDate: request.harmonyCurrentDate,
                         runtimeOptions: options)
                     for try await event in client.generate(generation) {
                         outbox.publish(event)

@@ -112,6 +112,7 @@ public enum AppInferenceEvent: Equatable, Sendable {
     case memorySample
     case token(AppTokenEvent)
     case thinking(AppTokenEvent)
+    case toolCall(ParsedToolCall)
     case finished(AppDiagnostics)
     case cancelled(AppDiagnostics)
     case failed(AppInferenceError, partial: AppDiagnostics?)

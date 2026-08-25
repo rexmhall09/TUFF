@@ -95,6 +95,9 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                                 response: $0.response,
                                 thinking: $0.thinking)
                         },
+                        structuredMessages: request.structuredMessages,
+                        multimodalMessages: request.multimodalMessages,
+                        tools: request.tools,
                         imageAttachments: request.imageAttachments.map {
                             DecodeImageAttachment(
                                 id: $0.id,
@@ -115,6 +118,9 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         topK: request.topK,
                         topP: request.topP,
                         repetitionPenalty: request.repetitionPenalty,
+                        seed: request.seed,
+                        stopStrings: request.stopStrings,
+                        harmonyCurrentDate: request.harmonyCurrentDate,
                         runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
                         generationID: generationID)
                     try handles.input.write(contentsOf: DecodeFrameCodec.encode(
@@ -162,6 +168,9 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                                     textDelta: thinking,
                                     elapsedDecodeSeconds: event.decodeSeconds)))
                             }
+                            for call in event.toolCalls ?? [] {
+                                continuation.yield(.toolCall(call))
+                            }
                             generationTranscriptMailbox.append(event.textDelta)
                             if event.textDelta.isEmpty { continue }
                             let now = Date()
@@ -202,9 +211,12 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { [weak self] _ in
+            continuation.onTermination = { [weak self] termination in
                 task.cancel()
-                self?.cancel()
+                // A finished stream already has a matching terminal event.
+                // Sending a global cancel here could land after the broker has
+                // admitted the next request and cancel that request instead.
+                if case .cancelled = termination { self?.cancel() }
             }
         }
     }
