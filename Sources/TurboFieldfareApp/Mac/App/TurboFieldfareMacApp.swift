@@ -47,7 +47,7 @@ struct TurboFieldfareMacApp: App {
     var body: some Scene {
         Window("TUFF", id: "main") {
             RootView(model: model)
-                .frame(minWidth: 1040, minHeight: 560)
+                .frame(minWidth: 820, minHeight: 560)
                 // Once, when the window first appears: the setting is read
                 // from disk in init, and loadModelAtLaunchIfEnabled ignores a
                 // model that is missing or already busy.
@@ -70,7 +70,7 @@ struct TurboFieldfareMacApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1040, height: 720)
+        .defaultSize(width: 1080, height: 720)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appInfo) {
