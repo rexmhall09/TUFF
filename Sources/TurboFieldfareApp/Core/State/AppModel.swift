@@ -147,9 +147,15 @@ public final class AppModel {
                 settingsPersistenceEnabled: Bool = false) {
         let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
         let installETAClock = SuspendingClock()
+        let settingsProfileKey = installer.descriptor.settingsProfileKey
         let settings = settingsPersistenceEnabled
-            ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
-            : MacAppSettings()
+            ? MacAppSettingsFileStore.loadOrCreate(
+                forModelDirectory: directory,
+                profileKey: settingsProfileKey)
+            : MacAppSettings(modelProfiles: [
+                settingsProfileKey: .defaults(for: settingsProfileKey)
+            ])
+        let modelSettings = settings.profile(for: settingsProfileKey)
         self.modelPathText = directory.path
         // The app always releases the image tower after each image. Keeping it
         // resident saves a few hundred milliseconds on a run of images and
@@ -158,16 +164,16 @@ public final class AppModel {
         // one more setting whose effect no figure on screen could show.
         // `keepReady` remains available through AppRuntimeOptions for those.
         self.runtimeOptions = AppRuntimeOptions(
-            expertCacheSlots: settings.expertCacheSlots,
-            prefillEnabled: settings.prefillEnabled,
-            rdadvisePolicy: settings.rdadvisePolicy,
+            expertCacheSlots: modelSettings.expertCacheSlots,
+            prefillEnabled: modelSettings.prefillEnabled,
+            rdadvisePolicy: modelSettings.rdadvisePolicy,
             visionResidencyPolicy: .onDemand)
-        self.maxContextTokens = settings.contextTokens
-        self.temperature = settings.temperature
-        self.topKEnabled = settings.topKEnabled
-        self.topK = settings.topK
-        self.topPEnabled = settings.topPEnabled
-        self.topP = settings.topP
+        self.maxContextTokens = modelSettings.contextTokens
+        self.temperature = modelSettings.temperature
+        self.topKEnabled = modelSettings.topKEnabled
+        self.topK = modelSettings.topK
+        self.topPEnabled = modelSettings.topPEnabled
+        self.topP = modelSettings.topP
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.sentPromptBehavior = settings.sentPromptBehavior
@@ -253,6 +259,9 @@ public final class AppModel {
     /// left alone — only the loaded runtime and the active directory change.
     public func selectModel(_ coordinator: ModelInstallCoordinator) {
         guard canSelectModel(coordinator) else { return }
+        // Capture edits to the current model before `selectedModelID` changes
+        // which profile key persistence resolves.
+        persistSettings()
         selectedModelID = coordinator.id
         applySelectedModelDirectory(coordinator.directoryURL)
     }
@@ -1517,23 +1526,26 @@ public final class AppModel {
 
     private func applyPersistedSettings(forModelDirectory modelDirectory: URL) {
         guard settingsPersistenceEnabled else { return }
+        let profileKey = selectedDescriptor.settingsProfileKey
         let settings = MacAppSettingsFileStore.loadOrCreate(
-            forModelDirectory: modelDirectory)
+            forModelDirectory: modelDirectory,
+            profileKey: profileKey)
+        let modelSettings = settings.profile(for: profileKey)
         runtimeOptions = AppRuntimeOptions(
-            expertCacheSlots: settings.expertCacheSlots,
-            prefillEnabled: settings.prefillEnabled,
-            rdadvisePolicy: settings.rdadvisePolicy,
+            expertCacheSlots: modelSettings.expertCacheSlots,
+            prefillEnabled: modelSettings.prefillEnabled,
+            rdadvisePolicy: modelSettings.rdadvisePolicy,
             // Pinned for the same reason as `init`: the app always releases the
             // image tower. Reading the persisted value here would let a
             // `keepReady` written by an older build resurrect ~1 GB of resident
             // tower on a machine with no control that shows or clears it.
             visionResidencyPolicy: .onDemand)
-        maxContextTokens = settings.contextTokens
-        temperature = settings.temperature
-        topKEnabled = settings.topKEnabled
-        topK = settings.topK
-        topPEnabled = settings.topPEnabled
-        topP = settings.topP
+        maxContextTokens = modelSettings.contextTokens
+        temperature = modelSettings.temperature
+        topKEnabled = modelSettings.topKEnabled
+        topK = modelSettings.topK
+        topPEnabled = modelSettings.topPEnabled
+        topP = modelSettings.topP
         newlineShortcut = settings.newlineShortcut
         showPromptExamples = settings.showPromptExamples
         sentPromptBehavior = settings.sentPromptBehavior
@@ -1542,7 +1554,12 @@ public final class AppModel {
 
     private func persistSettings() {
         guard settingsPersistenceEnabled else { return }
-        let settings = MacAppSettings(
+        let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
+        let profileKey = selectedDescriptor.settingsProfileKey
+        var settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory,
+            profileKey: profileKey)
+        settings.setProfile(MacModelSettings(
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
             temperature: temperature,
@@ -1551,13 +1568,12 @@ public final class AppModel {
             topPEnabled: topPEnabled,
             topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
-            newlineShortcut: newlineShortcut,
-            showPromptExamples: showPromptExamples,
-            sentPromptBehavior: sentPromptBehavior,
             visionResidencyPolicy: runtimeOptions.visionResidencyPolicy,
-            rdadvisePolicy: runtimeOptions.rdadvisePolicy,
-            loadModelOnLaunch: loadModelOnLaunch)
-        let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
+            rdadvisePolicy: runtimeOptions.rdadvisePolicy), for: profileKey)
+        settings.newlineShortcut = newlineShortcut
+        settings.showPromptExamples = showPromptExamples
+        settings.sentPromptBehavior = sentPromptBehavior
+        settings.loadModelOnLaunch = loadModelOnLaunch
         try? MacAppSettingsFileStore.save(
             settings,
             forModelDirectory: modelDirectory)

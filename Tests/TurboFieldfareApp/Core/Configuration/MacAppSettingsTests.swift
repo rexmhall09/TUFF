@@ -85,6 +85,123 @@ import Testing
         #expect(settings.sentPromptBehavior == .keep)
     }
 
+    @Test func legacySettingsMigrateIntoTheActiveModelProfile() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("qwen36.gturbo", isDirectory: true)
+        let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
+        try Data("""
+        {
+          "version": 2,
+          "contextTokens": 16384,
+          "expertCacheSlots": 24,
+          "temperature": 0.4,
+          "topKEnabled": false,
+          "topK": 32,
+          "topPEnabled": false,
+          "topP": 0.8,
+          "prefillEnabled": false,
+          "newlineShortcut": "shift-return",
+          "showPromptExamples": false,
+          "sentPromptBehavior": "clear",
+          "visionResidencyPolicy": "on-demand",
+          "rdadvisePolicy": "bounded",
+          "loadModelOnLaunch": true
+        }
+        """.utf8).write(to: fileURL)
+
+        let key = AppModelInstallDescriptor.qwen36.settingsProfileKey
+        let settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: model,
+            profileKey: key)
+        let profile = settings.profile(for: key)
+
+        #expect(settings.version == MacAppSettings.currentVersion)
+        #expect(settings.modelProfiles.count == 1)
+        #expect(profile.contextTokens == 16_384)
+        #expect(profile.expertCacheSlots == 24)
+        #expect(profile.temperature == 0.4)
+        #expect(!profile.topKEnabled)
+        #expect(profile.topK == 32)
+        #expect(!profile.topPEnabled)
+        #expect(profile.topP == 0.8)
+        #expect(!profile.prefillEnabled)
+        #expect(profile.rdadvisePolicy == .bounded)
+        #expect(settings.newlineShortcut == .shiftReturn)
+        #expect(!settings.showPromptExamples)
+        #expect(settings.sentPromptBehavior == .clear)
+        #expect(settings.loadModelOnLaunch)
+
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: fileURL))
+                as? [String: Any])
+        #expect(object["modelProfiles"] != nil)
+        #expect(object["contextTokens"] == nil)
+    }
+
+    @Test func modelProfilesRoundTripWithoutOverwritingEachOther() throws {
+        let gemmaKey = AppModelInstallDescriptor.default.settingsProfileKey
+        let qwenKey = AppModelInstallDescriptor.qwen36.settingsProfileKey
+        var settings = MacAppSettings()
+        settings.setProfile(
+            MacModelSettings(contextTokens: 4_096, temperature: 0.1),
+            for: gemmaKey)
+        settings.setProfile(
+            MacModelSettings(contextTokens: 32_768, temperature: 0.7),
+            for: qwenKey)
+
+        let decoded = try JSONDecoder().decode(
+            MacAppSettings.self,
+            from: JSONEncoder().encode(settings))
+
+        #expect(decoded.profile(for: gemmaKey).contextTokens == 4_096)
+        #expect(decoded.profile(for: gemmaKey).temperature == 0.1)
+        #expect(decoded.profile(for: qwenKey).contextTokens == 32_768)
+        #expect(decoded.profile(for: qwenKey).temperature == 0.7)
+    }
+
+    @MainActor
+    @Test func selectingModelsSavesAndLoadsTheirOwnProfiles() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gemmaDirectory = root.appendingPathComponent(
+            "gemma4.gturbo", isDirectory: true)
+        let qwenDirectory = root.appendingPathComponent(
+            "qwen36.gturbo", isDirectory: true)
+        let gemmaKey = AppModelInstallDescriptor.default.settingsProfileKey
+        let qwenKey = AppModelInstallDescriptor.qwen36.settingsProfileKey
+        var settings = MacAppSettings()
+        settings.setProfile(MacModelSettings(temperature: 0.1), for: gemmaKey)
+        settings.setProfile(MacModelSettings(temperature: 0.7), for: qwenKey)
+        try MacAppSettingsFileStore.save(
+            settings, forModelDirectory: gemmaDirectory)
+
+        let qwen = ModelInstallCoordinator(
+            descriptor: .qwen36,
+            directoryURL: qwenDirectory,
+            client: MockModelInstallerClient(descriptor: .qwen36))
+        let model = AppModel(
+            modelDirectory: gemmaDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [qwen],
+            settingsPersistenceEnabled: true)
+        let gemma = try #require(
+            model.installs.first { $0.descriptor == .default })
+
+        #expect(model.temperature == 0.1)
+        model.temperature = 0.55
+        model.selectModel(qwen)
+        #expect(model.temperature == 0.7)
+        model.selectModel(gemma)
+        #expect(model.temperature == 0.55)
+
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: gemmaDirectory,
+            profileKey: gemmaKey)
+        #expect(saved.profile(for: gemmaKey).temperature == 0.55)
+        #expect(saved.profile(for: qwenKey).temperature == 0.7)
+    }
+
     @Test(arguments: AppNewlineShortcut.allCases)
     func newlineShortcutRoundTrips(_ shortcut: AppNewlineShortcut) throws {
         let initial = MacAppSettings(newlineShortcut: shortcut)
@@ -171,6 +288,7 @@ import Testing
 
         let model = AppModel(
             modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
         #expect(model.maxContextTokens == 8_192)
         #expect(model.runtimeOptions.expertCacheSlots == 24)
@@ -212,6 +330,7 @@ import Testing
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
 
         model.setNewlineShortcut(.shiftReturn)
@@ -228,6 +347,7 @@ import Testing
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
 
         model.setShowPromptExamples(false)
@@ -244,6 +364,7 @@ import Testing
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
 
         model.setSentPromptBehavior(.clear)
@@ -265,7 +386,10 @@ import Testing
         try MacAppSettingsFileStore.save(
             MacAppSettings(newlineShortcut: .shiftReturn, showPromptExamples: false),
             forModelDirectory: second)
-        let model = AppModel(modelDirectory: first, settingsPersistenceEnabled: true)
+        let model = AppModel(
+            modelDirectory: first,
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
         #expect(model.newlineShortcut == .return)
         #expect(model.showPromptExamples)
 
@@ -276,8 +400,8 @@ import Testing
     }
 
     /// Phase D item 15. The newer-version branch says "Every key decodes with
-    /// `decodeIfPresent`, so it reads cleanly", and that is false: nine keys use
-    /// a hard `decode`. So a version-3 file whose schema moved any of those nine
+    /// `decodeIfPresent`, so it reads cleanly", and that is false: required keys
+    /// still use a hard `decode`. So a version-4 file whose schema moved one
     /// throws inside `JSONDecoder().decode` *before* the version guard is
     /// reached, and lands in the `catch` that deletes the file - destroying a
     /// newer build's settings, which is the exact outcome that branch exists to
@@ -288,19 +412,11 @@ import Testing
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: modelDirectory)
 
-        // A plausible version 3: `topP` became `topProbability`. Everything else
-        // this build knows is still present and still valid.
+        // A plausible version 4 with a schema this build does not understand.
         let newer = """
         {
-          "version": 3,
-          "contextTokens": 8192,
-          "expertCacheSlots": 16,
-          "temperature": 0.2,
-          "topKEnabled": true,
-          "topK": 64,
-          "topPEnabled": true,
-          "topProbability": 0.95,
-          "prefillEnabled": true
+          "version": 4,
+          "profilesByModel": {}
         }
         """
         try Data(newer.utf8).write(to: fileURL)
@@ -361,7 +477,10 @@ import Testing
         try MacAppSettingsFileStore.save(
             MacAppSettings(visionResidencyPolicy: .keepReady),
             forModelDirectory: second)
-        let model = AppModel(modelDirectory: first, settingsPersistenceEnabled: true)
+        let model = AppModel(
+            modelDirectory: first,
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
         #expect(model.runtimeOptions.visionResidencyPolicy == .onDemand)
 
         model.setModelURL(second)

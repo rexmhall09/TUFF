@@ -85,6 +85,19 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// separates their downloads on disk, so it is the natural key.
     public var id: String { installDirectoryName }
 
+    /// Stable registry identity used by settings and other persisted app data.
+    /// Test-only/custom descriptors keep their install basename as a safe
+    /// fallback so they never collide with a shipped model profile.
+    public var catalogID: TUFFModelID? {
+        if self == .qwen36 { return .qwen36_35B_A3B }
+        if self == .default { return .gemma4_26B_A4B }
+        return nil
+    }
+
+    public var settingsProfileKey: String {
+        catalogID?.rawValue ?? id
+    }
+
     /// The model family this descriptor installs.
     public var family: ModelFamily {
         self == .qwen36 ? .qwen36 : .gemma4
