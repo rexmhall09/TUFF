@@ -36,11 +36,12 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
 
 /// Chat framing dialect, resolved from the loaded tokenizer's special tokens.
 ///
-/// `.chatml` is detected by the presence of the `<|im_end|>` special token
-/// (Qwen-style ChatML); everything else uses the Gemma 4 contract.
+/// Harmony is detected first by `<|start|>`, then ChatML by `<|im_end|>`;
+/// everything else uses the Gemma 4 contract.
 public enum ChatDialect: String, Sendable {
     case gemma
     case chatml
+    case harmony
 }
 
 /// Model-supported reasoning switch used by chat prompt renderers.
@@ -64,7 +65,7 @@ public enum TokenDecoding: String, Sendable {
     case byteLevel
 }
 
-/// Tokenizer wrapper for the supported model families (Gemma 4 and ChatML/Qwen).
+/// Tokenizer wrapper for Gemma 4, ChatML/Qwen, and Harmony/GPT-OSS.
 ///
 /// Prefers tokenizer sidecars in a completed `.gturbo/tokenizer/` directory,
 /// then falls back to the IT variant's Hugging Face Hub tokenizer cache. Exposes
@@ -79,6 +80,7 @@ public struct GFTokenizer: @unchecked Sendable {
     public static let modelID = "google/gemma-4-26B-A4B-it"
     public static let chatTemplateIdentity = "gemma4-it-text-no-tools-v1"
     public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
+    public static let harmonyChatTemplateIdentity = "gpt-oss-harmony-v1"
 
     public let dialect: ChatDialect
     /// Decoder pipeline declared by the installed `tokenizer.json`.
@@ -100,6 +102,7 @@ public struct GFTokenizer: @unchecked Sendable {
     /// ChatML `<think>` / `</think>` special-token IDs; nil for Gemma.
     public let thinkStartID: Int32?
     public let thinkEndID: Int32?
+    public let harmonyTokenIDs: HarmonySpecialTokenIDs?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
     /// The channel/tool markers that structure assistant output. Streaming
@@ -107,8 +110,14 @@ public struct GFTokenizer: @unchecked Sendable {
     /// one, or its text would surface after the marker and be routed under the
     /// wrong channel state.
     public var structuralMarkerIDs: Set<Int32> {
-        [toolCallStartID, toolCallEndID, toolResponseID, toolResponseEndID,
-         channelStartID, channelEndID]
+        var ids: Set<Int32> = [
+            toolCallStartID, toolCallEndID, toolResponseID, toolResponseEndID,
+            channelStartID, channelEndID,
+        ]
+        if let harmonyTokenIDs {
+            ids.formUnion(harmonyTokenIDs.structuralMarkerIDs)
+        }
+        return ids
     }
     /// IDs that `decode(skipSpecialTokens: true)` strips — the
     /// `added_tokens[special == true]` set from `tokenizer.json`, identical to
@@ -255,11 +264,18 @@ public struct GFTokenizer: @unchecked Sendable {
         }
         self.specialTokenIDs = specials
 
-        let dialect: ChatDialect =
-            Self.specialTokenID(tokenizer, Self.imEndMark) != nil ? .chatml : .gemma
-        let resolved = dialect == .chatml
-            ? try Self.resolveChatMLTokens(tokenizer)
-            : try Self.resolveGemmaTokens(tokenizer)
+        let dialect: ChatDialect
+        let resolved: ResolvedSpecialTokens
+        if Self.specialTokenID(tokenizer, Self.harmonyStartMark) != nil {
+            dialect = .harmony
+            resolved = try Self.resolveHarmonyTokens(tokenizer)
+        } else if Self.specialTokenID(tokenizer, Self.imEndMark) != nil {
+            dialect = .chatml
+            resolved = try Self.resolveChatMLTokens(tokenizer)
+        } else {
+            dialect = .gemma
+            resolved = try Self.resolveGemmaTokens(tokenizer)
+        }
 
         self.dialect = dialect
         self.bosID = resolved.bosID
@@ -275,6 +291,7 @@ public struct GFTokenizer: @unchecked Sendable {
         self.channelEndID = resolved.channelEndID
         self.thinkStartID = resolved.thinkStartID
         self.thinkEndID = resolved.thinkEndID
+        self.harmonyTokenIDs = resolved.harmonyTokenIDs
         self.stopTokenIDs = resolved.stopTokenIDs
         self.vocabSize = resolved.vocabSize
     }
@@ -293,6 +310,7 @@ public struct GFTokenizer: @unchecked Sendable {
         let channelEndID: Int32
         let thinkStartID: Int32?
         let thinkEndID: Int32?
+        let harmonyTokenIDs: HarmonySpecialTokenIDs?
         let stopTokenIDs: Set<Int32>
         let vocabSize: Int
     }
@@ -347,6 +365,7 @@ public struct GFTokenizer: @unchecked Sendable {
             channelEndID: channelEnd,
             thinkStartID: nil,
             thinkEndID: nil,
+            harmonyTokenIDs: nil,
             stopTokenIDs: [eosID, eot, toolResponse],
             vocabSize: 262_144)
     }
@@ -393,10 +412,66 @@ public struct GFTokenizer: @unchecked Sendable {
             channelEndID: thinkEnd,
             thinkStartID: thinkStart,
             thinkEndID: thinkEnd,
+            harmonyTokenIDs: nil,
             stopTokenIDs: [imEnd, endOfText],
             // The model's padded embedding/lm_head row count, not the
             // tokenizer's actual vocab (248 077) — logits buffers use this.
             vocabSize: 248_320)
+    }
+
+    private static func resolveHarmonyTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            try Self.requireTokenID(tokenizer, token)
+        }
+        let resolved = HarmonySpecialTokenIDs(
+            startOfText: try id("<|startoftext|>"),
+            endOfText: try id("<|endoftext|>"),
+            return: try id("<|return|>"),
+            constrain: try id("<|constrain|>"),
+            channel: try id("<|channel|>"),
+            start: try id(Self.harmonyStartMark),
+            end: try id("<|end|>"),
+            message: try id("<|message|>"),
+            call: try id("<|call|>"))
+        let expected = HarmonySpecialTokenIDs.official
+        for (token, actual, pinned) in [
+            ("<|startoftext|>", resolved.startOfText, expected.startOfText),
+            ("<|endoftext|>", resolved.endOfText, expected.endOfText),
+            ("<|return|>", resolved.return, expected.return),
+            ("<|constrain|>", resolved.constrain, expected.constrain),
+            ("<|channel|>", resolved.channel, expected.channel),
+            (Self.harmonyStartMark, resolved.start, expected.start),
+            ("<|end|>", resolved.end, expected.end),
+            ("<|message|>", resolved.message, expected.message),
+            ("<|call|>", resolved.call, expected.call),
+        ] where actual != pinned {
+            throw GFTokenizerError.specialTokenMismatch(
+                token: token, expected: pinned, resolved: actual)
+        }
+        return ResolvedSpecialTokens(
+            bosID: resolved.startOfText,
+            bosPrefixID: nil,
+            eosID: resolved.return,
+            padID: resolved.endOfText,
+            endOfTurnID: resolved.end,
+            toolCallStartID: resolved.start,
+            toolCallEndID: resolved.call,
+            // The raw generation loop uses this generic slot to classify a
+            // stop boundary as a tool call. Harmony's `<|call|>` both closes
+            // the payload and stops generation.
+            toolResponseID: resolved.call,
+            toolResponseEndID: resolved.end,
+            channelStartID: resolved.channel,
+            channelEndID: resolved.message,
+            thinkStartID: nil,
+            thinkEndID: nil,
+            harmonyTokenIDs: resolved,
+            stopTokenIDs: [resolved.return, resolved.call, resolved.endOfText],
+            // Both official checkpoints pad embedding and unembedding rows to
+            // this size; the actual o200k Harmony vocabulary ends at 200018.
+            vocabSize: 201_088)
     }
 
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
@@ -459,6 +534,7 @@ public struct GFTokenizer: @unchecked Sendable {
     public struct Message: Sendable, Equatable {
         public let role: Role
         public let content: String?
+        public let thinking: String?
         public let toolCalls: [HistoricalToolCall]
         public let toolCallID: String?
         public let name: String?
@@ -466,6 +542,7 @@ public struct GFTokenizer: @unchecked Sendable {
         public init(role: Role, content: String) {
             self.role = role
             self.content = content
+            self.thinking = nil
             self.toolCalls = []
             self.toolCallID = nil
             self.name = nil
@@ -478,6 +555,21 @@ public struct GFTokenizer: @unchecked Sendable {
                     name: String? = nil) {
             self.role = role
             self.content = content
+            self.thinking = nil
+            self.toolCalls = toolCalls
+            self.toolCallID = toolCallID
+            self.name = name
+        }
+
+        public init(role: Role,
+                    content: String?,
+                    thinking: String?,
+                    toolCalls: [HistoricalToolCall] = [],
+                    toolCallID: String? = nil,
+                    name: String? = nil) {
+            self.role = role
+            self.content = content
+            self.thinking = thinking
             self.toolCalls = toolCalls
             self.toolCallID = toolCallID
             self.name = name
@@ -492,6 +584,7 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let bosMark     = "<bos>"
     private static let imStartMark = "<|im_start|>"
     private static let imEndMark   = "<|im_end|>"
+    private static let harmonyStartMark = "<|start|>"
     /// Generation prompt with thinking disabled, matching the Jinja template's
     /// `add_generation_prompt` + `enable_thinking=false` branch.
     private static let chatMLThinkingOffSuffix =
@@ -510,7 +603,45 @@ public struct GFTokenizer: @unchecked Sendable {
                 messages, modelVariant: modelVariant, reasoning: reasoning)
         case .chatml:
             return try chatMLChatTemplate(messages, reasoning: reasoning)
+        case .harmony:
+            throw GFTokenizerError.unsupportedForDialect(
+                "binary reasoning control for Harmony")
         }
+    }
+
+    public func applyHarmonyChatTemplate(
+        _ messages: [Message],
+        tools: [FunctionDefinition] = [],
+        reasoningEffort: GPTOSSReasoningEffort = .medium,
+        currentDate: String,
+        modelIdentity: String = HarmonyPromptRenderer.defaultModelIdentity
+    ) throws -> String {
+        guard dialect == .harmony else {
+            throw GFTokenizerError.unsupportedForDialect("Harmony prompt rendering")
+        }
+        return try HarmonyPromptRenderer().render(
+            messages: messages,
+            tools: tools,
+            reasoningEffort: reasoningEffort,
+            currentDate: currentDate,
+            modelIdentity: modelIdentity)
+    }
+
+    public func encodeHarmonyChat(
+        messages: [Message],
+        tools: [FunctionDefinition] = [],
+        reasoningEffort: GPTOSSReasoningEffort = .medium,
+        currentDate: String,
+        modelIdentity: String = HarmonyPromptRenderer.defaultModelIdentity
+    ) throws -> [Int32] {
+        encode(
+            try applyHarmonyChatTemplate(
+                messages,
+                tools: tools,
+                reasoningEffort: reasoningEffort,
+                currentDate: currentDate,
+                modelIdentity: modelIdentity),
+            addBOS: false)
     }
 
     private func gemmaChatTemplate(
@@ -584,6 +715,10 @@ public struct GFTokenizer: @unchecked Sendable {
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition],
                                reasoning: ChatReasoning = .off) throws -> [Int32] {
+        guard dialect != .harmony else {
+            throw GFTokenizerError.unsupportedForDialect(
+                "binary reasoning control for Harmony tool chat")
+        }
         guard tokenizer.hasChatTemplate else {
             throw GFTokenizerError.missingToolTemplate
         }
@@ -650,6 +785,11 @@ public struct GFTokenizer: @unchecked Sendable {
                     + (reasoning == .on
                         ? Self.chatMLThinkingOnSuffix
                         : Self.chatMLThinkingOffSuffix),
+                addBOS: false)
+        case .harmony:
+            return [eosID] + encode(
+                "\(Self.harmonyStartMark)user<|message|>\(content)<|end|>"
+                    + "\(Self.harmonyStartMark)assistant",
                 addBOS: false)
         }
     }

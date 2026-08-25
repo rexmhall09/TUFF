@@ -1002,6 +1002,23 @@ public actor ServerModelSession: ServerInferenceBackend {
         var decodingError: Error?
         var shouldStop = false
 
+        func handle(_ events: [StructuredAssistantEvent]) {
+            for event in events {
+                switch event {
+                case .content(let text):
+                    let visible = stopMatcher.push(text)
+                    if !visible.isEmpty {
+                        content += visible
+                        onEvent(.content(visible))
+                    }
+                    if stopMatcher.isStopped { shouldStop = true }
+                case .toolCall(let call):
+                    calls.append(call)
+                    onEvent(.toolCall(call))
+                }
+            }
+        }
+
         completionStarted = true
         let result = try await runRawCompletion(
             producer: runner,
@@ -1016,22 +1033,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             shouldStop: { shouldStop }) { progress in
                 guard decodingError == nil else { return }
                 do {
-                    func handle(_ events: [StructuredAssistantEvent]) {
-                        for event in events {
-                            switch event {
-                            case .content(let text):
-                                let visible = stopMatcher.push(text)
-                                if !visible.isEmpty {
-                                    content += visible
-                                    onEvent(.content(visible))
-                                }
-                                if stopMatcher.isStopped { shouldStop = true }
-                            case .toolCall(let call):
-                                calls.append(call)
-                                onEvent(.toolCall(call))
-                            }
-                        }
-                    }
                     switch progress {
                     case .prefill:
                         break
@@ -1051,6 +1052,20 @@ public actor ServerModelSession: ServerInferenceBackend {
                     decodingError = error
                     shouldStop = true
                 }
+        }
+        // Stop tokens are intentionally not emitted as `.token` progress by
+        // the raw loop. Most dialects finish their structure before that
+        // boundary; Harmony's `<|call|>` is both the tool-payload terminator and
+        // a stop token, so the structured decoder must consume the recorded
+        // boundary explicitly before `finish()` validates its state.
+        if decodingError == nil {
+            do {
+                for tokenID in result.uncommittedBoundaryTokenIDs {
+                    handle(try decoder.consume(tokenID: tokenID, delta: ""))
+                }
+            } catch {
+                decodingError = error
+            }
         }
         func structuredFailure(
             kind: StructuredOutputFailureKind,

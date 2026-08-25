@@ -474,7 +474,7 @@ public enum OpenAIRequestValidator {
         }
         try validateSchemaKeys(tool.function.parameters, dialect: dialect)
         // The Gemma template can only render a restricted schema subset, so it
-        // needs the adaptation pass. ChatML passes the schema through as JSON.
+        // needs the adaptation pass. ChatML and Harmony preserve the schema.
         let parameters = dialect == .gemma
             ? try GemmaToolSchema.adapted(tool.function.parameters, toolName: name)
             : tool.function.parameters
@@ -499,8 +499,8 @@ public enum OpenAIRequestValidator {
                     }
                     for (key, definition) in definitions {
                         // Gemma's tool-call DSL cannot round-trip arbitrary
-                        // parameter names; ChatML tool calls are free-form.
-                        guard dialect == .chatml
+                        // parameter names; ChatML and Harmony calls are JSON.
+                        guard dialect != .gemma
                                 || GemmaToolCallParser.isRepresentableObjectKey(key) else {
                             throw invalid(
                                 "tool parameter names may contain only letters, numbers, _, -, ., and $",

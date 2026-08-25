@@ -15,6 +15,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private let tokenizer: GFTokenizer
     private let allowedTools: Set<String>
     private let idGenerator: @Sendable () -> String
+    private let harmonyDecoder: HarmonyAssistantDecoder?
     private var channel: Channel = .visible
     private var label = ""
     private var toolTokens: [Int32]?
@@ -29,11 +30,19 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         self.tokenizer = tokenizer
         self.allowedTools = allowedTools
         self.idGenerator = idGenerator
+        self.harmonyDecoder = tokenizer.harmonyTokenIDs.map {
+            HarmonyAssistantDecoder(
+                tokens: $0,
+                allowedTools: allowedTools,
+                idGenerator: idGenerator)
+        }
     }
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
         guard !failed else { throw ToolCallParserError.malformed }
-        if tokenizer.dialect == .chatml {
+        if let harmonyDecoder {
+            return try harmonyDecoder.consume(tokenID: tokenID, delta: delta)
+        } else if tokenizer.dialect == .chatml {
             return try consumeChatML(tokenID: tokenID, delta: delta)
         }
 
@@ -113,6 +122,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     /// thought channel would leak its held-back bytes into visible content.
     public func consumeTail(_ text: String) throws -> [StructuredAssistantEvent] {
         guard !failed else { throw GemmaToolCallParserError.malformed }
+        if let harmonyDecoder {
+            return try harmonyDecoder.consumeTail(text)
+        }
         guard toolTokens == nil, !text.isEmpty else { return [] }
         return routeText(text)
     }
@@ -189,10 +201,16 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     }
 
     public func finish() throws {
+        if let harmonyDecoder {
+            try harmonyDecoder.finish()
+            return
+        }
         guard !failed, toolTokens == nil else {
             throw ToolCallParserError.malformed
         }
     }
 
-    public var hasToolCalls: Bool { emittedCalls > 0 }
+    public var hasToolCalls: Bool {
+        harmonyDecoder?.hasToolCalls ?? (emittedCalls > 0)
+    }
 }

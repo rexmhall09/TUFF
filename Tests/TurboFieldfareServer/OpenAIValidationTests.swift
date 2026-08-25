@@ -537,6 +537,10 @@ struct OpenAIValidationTests {
         #expect(throws: ServerRequestError.self) {
             try OpenAIRequestValidator.validate(request, modelID: "m")
         }
+        #expect(throws: Never.self) {
+            _ = try OpenAIRequestValidator.validate(
+                request, modelID: "m", dialect: .harmony)
+        }
     }
 
     private func fixture(_ name: String) throws -> OpenAIChatRequest {
