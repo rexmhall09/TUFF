@@ -155,6 +155,13 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         case .gptOss(let runner): return runner.totalHeadNanos
         }
     }
+
+    var gptOssPrefillExpertGroupCount: Int {
+        switch backend {
+        case .affine: return 0
+        case .gptOss(let runner): return runner.prefillExpertGroupCount
+        }
+    }
     public var totalHeadFusedNanos: UInt64 {
         switch backend {
         case .affine(let runner): return runner.totalHeadFusedNanos

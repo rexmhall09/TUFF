@@ -283,7 +283,7 @@ private enum GPTOSSToyCPUReference {
         #expect(runner.totalHeadNanos > 0)
     }
 
-    @Test func scalarPrefillMatchesDecodeAndContinuation() async throws {
+    @Test func groupedPrefillMatchesDecodeAndContinuation() async throws {
         let (directory, context, _, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: directory) }
         let output = try logits(context)
@@ -305,6 +305,8 @@ private enum GPTOSSToyCPUReference {
         #expect(result == PrefillResult(newPosition: 2, seed: .logitsWritten))
         #expect(progress == [1, 2])
         #expect(values(output) == decodeReference)
+        #expect(runner.gptOssPrefillExpertGroupCount
+            == ArchConfig.gptOssToy().numLayers)
 
         try runner.prepareForContinuation(expectedPosition: 2)
         try await runner.produce(token: 19, position: 2, into: output)

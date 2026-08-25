@@ -1,13 +1,14 @@
 import Foundation
 import Metal
 
-/// One-token-at-a-time GPT-OSS forward path. The resident BF16 projections
-/// stay mapped while the four routed MXFP4 experts are fetched and executed
-/// serially for each layer. This is also the correctness fallback for prefill;
-/// a later optimization may batch those same operations without changing the
-/// model contract or KV layout.
+/// GPT-OSS forward path. Decode keeps resident BF16 projections mapped and
+/// streams the four selected MXFP4 experts. Prefill works in bounded chunks,
+/// groups routes by expert, and reads each selected expert once per layer and
+/// chunk instead of once per token.
 final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     ContinuableLogitProducer, @unchecked Sendable {
+    private static let prefillQueryCapacity =
+        GPTOSSExpertScratchLayout.maximumPrefillQueries
     private struct LayerViews {
         let inputNorm: TensorView
         let postAttentionNorm: TensorView
@@ -53,6 +54,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private(set) var totalCb1Nanos: UInt64 = 0
     private(set) var totalCb2Nanos: UInt64 = 0
     private(set) var totalHeadNanos: UInt64 = 0
+    private(set) var prefillExpertGroupCount = 0
 
     init(model: Model, context: MetalContext, maxContext: Int,
          runtimeConfiguration: RuntimeConfiguration) throws {
@@ -125,25 +127,26 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         }
         let hiddenSize = config.hiddenSize
         let querySize = config.numHeads * config.headDim
-        hidden = try sharedBuffer(elements: hiddenSize,
+        let queryCapacity = Self.prefillQueryCapacity
+        hidden = try sharedBuffer(elements: queryCapacity * hiddenSize,
                                   stride: MemoryLayout<Float16>.stride,
                                   label: "gptoss.hidden")
-        normed = try sharedBuffer(elements: hiddenSize,
+        normed = try sharedBuffer(elements: queryCapacity * hiddenSize,
                                   stride: MemoryLayout<Float16>.stride,
                                   label: "gptoss.normed")
-        query = try sharedBuffer(elements: querySize,
+        query = try sharedBuffer(elements: queryCapacity * querySize,
                                  stride: MemoryLayout<Float16>.stride,
                                  label: "gptoss.query")
-        attentionOutput = try sharedBuffer(elements: querySize,
+        attentionOutput = try sharedBuffer(elements: queryCapacity * querySize,
                                            stride: MemoryLayout<Float16>.stride,
                                            label: "gptoss.attention")
-        projectedAttention = try sharedBuffer(elements: hiddenSize,
+        projectedAttention = try sharedBuffer(elements: queryCapacity * hiddenSize,
                                               stride: MemoryLayout<Float16>.stride,
                                               label: "gptoss.projectedAttention")
-        routerLogits = try sharedBuffer(elements: config.numExperts,
+        routerLogits = try sharedBuffer(elements: queryCapacity * config.numExperts,
                                         stride: MemoryLayout<Float>.stride,
                                         label: "gptoss.routerLogits")
-        routedIndices = try sharedBuffer(elements: config.topKExperts,
+        routedIndices = try sharedBuffer(elements: queryCapacity * config.topKExperts,
                                          stride: MemoryLayout<UInt32>.stride,
                                          label: "gptoss.routedIndices")
         expertScratch = try GPTOSSExpertScratchBuffers.allocate(
@@ -152,7 +155,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 hiddenSize: hiddenSize,
                 intermediateSize: config.moeIntermediateSize,
                 topK: config.topKExperts,
-                queryCapacity: 1))
+                queryCapacity: queryCapacity))
     }
 
     func reset() {
@@ -197,17 +200,264 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                                  seed: .logitsWritten)
         }
 
-        for (offset, token) in tokens.enumerated() {
-            try Task.checkCancellation()
-            try await executeToken(
-                token: token,
-                position: startPosition + offset,
-                emitHead: offset == tokens.count - 1,
+        let spans = PrefillChunkPlanner.spans(
+            tokenCount: tokens.count,
+            startPosition: startPosition,
+            config: prefillConfig)
+        try await PrefillSpanIteration.forEachSpan(spans) { _, span in
+            let lower = tokens.index(tokens.startIndex,
+                                     offsetBy: span.tokenOffset)
+            let upper = tokens.index(lower, offsetBy: span.tokenCount)
+            try await executePrefillChunk(
+                tokens: tokens[lower..<upper],
+                startPosition: span.startPosition,
+                emitHead: span.completedCount == tokens.count,
                 logits: logits)
-            onProgress(offset + 1)
+            let firstCompleted = span.completedCount - span.tokenCount + 1
+            for completed in firstCompleted...span.completedCount {
+                onProgress(completed)
+            }
         }
         return PrefillResult(newPosition: startPosition + tokens.count,
                              seed: .logitsWritten)
+    }
+
+    private func executePrefillChunk(tokens: ArraySlice<Int32>,
+                                     startPosition: Int,
+                                     emitHead: Bool,
+                                     logits: MTLBuffer) async throws {
+        let queryCount = tokens.count
+        guard queryCount > 0, queryCount <= Self.prefillQueryCapacity else {
+            throw PrefillError.chunkedUnsupported(
+                "GPT-OSS prefill chunk has unsupported size \(queryCount)")
+        }
+        if emitHead && logits.length < config.vocabSize * MemoryLayout<Float16>.stride {
+            throw PrefillError.chunkedUnsupported(
+                "GPT-OSS logits buffer is smaller than the model vocabulary")
+        }
+
+        let halfBytes = MemoryLayout<Float16>.stride
+        let embeddingCB = context.queue.makeCommandBuffer()!
+        for (row, token) in tokens.enumerated() {
+            guard token >= 0, Int(token) < config.vocabSize else {
+                throw GeneratorError.invalidGenerationConfig(
+                    "GPT-OSS token ID \(token) is outside vocab \(config.vocabSize)")
+            }
+            bf16.encodeEmbedding(
+                commandBuffer: embeddingCB,
+                table: model.embedding,
+                token: UInt32(token),
+                output: hidden,
+                outputOffset: row * config.hiddenSize * halfBytes,
+                hiddenSize: config.hiddenSize)
+        }
+        embeddingCB.commit()
+        try waitForCompletion(embeddingCB)
+
+        for layer in 0..<config.numLayers {
+            try Task.checkCancellation()
+            try await executePrefillLayer(
+                layer, startPosition: startPosition, queryCount: queryCount)
+        }
+        for _ in 0..<queryCount { kv.advance() }
+
+        if emitHead {
+            try executeHead(
+                hiddenOffset: (queryCount - 1) * config.hiddenSize * halfBytes,
+                logits: logits)
+        }
+    }
+
+    private func executePrefillLayer(_ layer: Int,
+                                     startPosition: Int,
+                                     queryCount: Int) async throws {
+        let views = layers[layer]
+        let hiddenSize = config.hiddenSize
+        let qRows = config.numHeads * config.headDim
+        let kvRows = config.numKVHeads * config.headDim
+        let halfBytes = MemoryLayout<Float16>.stride
+        let floatBytes = MemoryLayout<Float>.stride
+        let indexBytes = MemoryLayout<UInt32>.stride
+
+        let cb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let cb1 = context.queue.makeCommandBuffer()!
+        for row in 0..<queryCount {
+            let position = startPosition + row
+            let hiddenOffset = row * hiddenSize * halfBytes
+            let queryOffset = row * qRows * halfBytes
+            let routerOffset = row * config.numExperts * floatBytes
+            let routeOffset = row * config.topKExperts
+            let kSlot = kv.kSlot(layer: layer, position: position)
+            let vSlot = kv.vSlot(layer: layer, position: position)
+
+            rms.encodeBF16W(
+                commandBuffer: cb1,
+                x: hidden, xOffset: hiddenOffset,
+                weight: views.inputNorm.buffer,
+                weightOffset: Int(views.inputNorm.offset),
+                out: normed, outOffset: hiddenOffset,
+                d: UInt32(hiddenSize), eps: 1e-5)
+            bf16.encodeHalf(
+                commandBuffer: cb1,
+                weights: views.qWeight,
+                input: normed, inputOffset: hiddenOffset,
+                output: query, outputOffset: queryOffset,
+                bias: views.qBias,
+                rows: qRows, columns: hiddenSize)
+            bf16.encodeHalf(
+                commandBuffer: cb1,
+                weights: views.kWeight,
+                input: normed, inputOffset: hiddenOffset,
+                output: kSlot.buffer, outputOffset: kSlot.offset,
+                bias: views.kBias,
+                rows: kvRows, columns: hiddenSize)
+            bf16.encodeHalf(
+                commandBuffer: cb1,
+                weights: views.vWeight,
+                input: normed, inputOffset: hiddenOffset,
+                output: vSlot.buffer, outputOffset: vSlot.offset,
+                bias: views.vBias,
+                rows: kvRows, columns: hiddenSize)
+            encodeRoPE(commandBuffer: cb1, data: query,
+                       dataOffset: queryOffset,
+                       position: position, heads: config.numHeads)
+            encodeRoPE(commandBuffer: cb1, data: kSlot.buffer,
+                       dataOffset: kSlot.offset,
+                       position: position, heads: config.numKVHeads)
+
+            let sequenceLength = UInt32(position + 1)
+            if config.layerIsFull(layer) {
+                attention.encodeFull(
+                    commandBuffer: cb1,
+                    q: query, qOffset: queryOffset,
+                    k: kSlot.buffer,
+                    v: vSlot.buffer,
+                    out: attentionOutput, outOffset: queryOffset,
+                    headDim: UInt32(config.headDim),
+                    numQHeads: UInt32(config.numHeads),
+                    numKVHeads: UInt32(config.numKVHeads),
+                    seqLen: sequenceLength,
+                    scale: Float(config.attentionScale),
+                    sinks: views.sinks.buffer,
+                    sinksOffset: Int(views.sinks.offset))
+            } else {
+                attention.encodeSWA(
+                    commandBuffer: cb1,
+                    q: query, qOffset: queryOffset,
+                    k: kSlot.buffer,
+                    v: vSlot.buffer,
+                    out: attentionOutput, outOffset: queryOffset,
+                    headDim: UInt32(config.headDim),
+                    numQHeads: UInt32(config.numHeads),
+                    numKVHeads: UInt32(config.numKVHeads),
+                    seqLen: sequenceLength,
+                    window: UInt32(config.slidingWindow),
+                    scale: Float(config.attentionScale),
+                    sinks: views.sinks.buffer,
+                    sinksOffset: Int(views.sinks.offset),
+                    ringCapacity: UInt32(kv.ringCapacity(layer: layer)))
+            }
+            bf16.encodeHalf(
+                commandBuffer: cb1,
+                weights: views.oWeight,
+                input: attentionOutput, inputOffset: queryOffset,
+                output: projectedAttention, outputOffset: hiddenOffset,
+                bias: views.oBias,
+                rows: hiddenSize, columns: qRows)
+            elementwise.encodeResidualAdd(
+                commandBuffer: cb1,
+                hidden: hidden, hiddenOffset: hiddenOffset,
+                delta: projectedAttention, deltaOffset: hiddenOffset,
+                count: hiddenSize)
+            rms.encodeBF16W(
+                commandBuffer: cb1,
+                x: hidden, xOffset: hiddenOffset,
+                weight: views.postAttentionNorm.buffer,
+                weightOffset: Int(views.postAttentionNorm.offset),
+                out: normed, outOffset: hiddenOffset,
+                d: UInt32(hiddenSize), eps: 1e-5)
+            bf16.encodeFloat(
+                commandBuffer: cb1,
+                weights: views.routerWeight,
+                input: normed, inputOffset: hiddenOffset,
+                output: routerLogits, outputOffset: routerOffset,
+                bias: views.routerBias,
+                rows: config.numExperts, columns: hiddenSize)
+            moePrimitives.encodeRouterTop4(
+                commandBuffer: cb1,
+                logits: routerLogits,
+                logitsOffset: routerOffset,
+                outputIndices: routedIndices,
+                outputIndicesOffset: routeOffset * indexBytes,
+                outputWeights: expertScratch.routeWeights,
+                outputWeightsOffset: routeOffset * halfBytes,
+                numExperts: UInt32(config.numExperts))
+        }
+        cb1.commit()
+        try waitForCompletion(cb1)
+        totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cb1Start
+
+        let indexPointer = routedIndices.contents()
+            .assumingMemoryBound(to: UInt32.self)
+        var uniqueExperts = Set<Int>()
+        for route in 0..<(queryCount * config.topKExperts) {
+            uniqueExperts.insert(Int(indexPointer[route]))
+        }
+        let physicalOffsets = model.routedExpertPhysicalOffsets(layer: layer)
+        let orderedExperts = uniqueExperts.sorted {
+            physicalOffsets[$0] < physicalOffsets[$1]
+        }
+        let availableSlots = model.routedExpertCacheSlotCount(layer: layer)
+            ?? orderedExperts.count
+        let groupSize = max(1, min(availableSlots, orderedExperts.count))
+        var groupStart = 0
+        while groupStart < orderedExperts.count {
+            try Task.checkCancellation()
+            let groupEnd = min(orderedExperts.count, groupStart + groupSize)
+            let expertIDs = Array(orderedExperts[groupStart..<groupEnd])
+            prefillExpertGroupCount += 1
+            let ioStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let blobs = try await model.fetchRoutedExperts(
+                layer: layer, experts: expertIDs)
+            totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - ioStart
+            var blobByExpert: [Int: TensorView] = [:]
+            for (expert, blob) in zip(expertIDs, blobs) {
+                blobByExpert[expert] = blob
+            }
+
+            let cb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let cb2 = context.queue.makeCommandBuffer()!
+            for row in 0..<queryCount {
+                for routeSlot in 0..<config.topKExperts {
+                    let routeIndex = row * config.topKExperts + routeSlot
+                    let expert = Int(indexPointer[routeIndex])
+                    guard let blob = blobByExpert[expert] else { continue }
+                    try expertRuntime.encodeExpert(
+                        commandBuffer: cb2,
+                        blob: blob,
+                        offsets: views.expertOffsets,
+                        input: normed,
+                        queryIndex: row,
+                        routeSlot: routeSlot,
+                        scratch: expertScratch,
+                        swigluLimit: Float(config.swigluLimit))
+                }
+            }
+            if groupEnd == orderedExperts.count {
+                try expertRuntime.encodeReduce(
+                    commandBuffer: cb2,
+                    scratch: expertScratch,
+                    residual: hidden,
+                    output: hidden,
+                    queryCount: queryCount)
+            }
+            cb2.commit()
+            try withExtendedLifetime(blobs) {
+                try waitForCompletion(cb2)
+            }
+            totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cb2Start
+            groupStart = groupEnd
+        }
     }
 
     private func executeToken(token: Int32, position: Int,
@@ -245,18 +495,22 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         kv.advance()
 
         guard emitHead else { return }
+        try executeHead(hiddenOffset: 0, logits: logits)
+    }
+
+    private func executeHead(hiddenOffset: Int, logits: MTLBuffer) throws {
         let headStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let headCB = context.queue.makeCommandBuffer()!
         rms.encodeBF16W(commandBuffer: headCB,
-                        x: hidden,
+                        x: hidden, xOffset: hiddenOffset,
                         weight: model.finalNorm.buffer,
                         weightOffset: Int(model.finalNorm.offset),
-                        out: normed,
+                        out: normed, outOffset: hiddenOffset,
                         d: UInt32(config.hiddenSize),
                         eps: 1e-5)
         bf16.encodeHalf(commandBuffer: headCB,
                         weights: model.lmHead,
-                        input: normed,
+                        input: normed, inputOffset: hiddenOffset,
                         output: logits,
                         rows: config.vocabSize,
                         columns: config.hiddenSize)
