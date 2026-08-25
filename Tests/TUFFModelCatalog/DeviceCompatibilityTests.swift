@@ -22,10 +22,13 @@ import Testing
         }
     }
 
-    @Test func unqualifiedGPTOSSUsesConservativeMemoryGate() {
+    @Test func qualifiedGPTOSS20BUsesMeasuredSixteenGBGate() {
         let model = TUFFModelCatalog.gptOss_20B
-        #expect(!model.compatibility(with: device(memoryGiB: 16)).isCompatible)
-        #expect(model.compatibility(with: device(memoryGiB: 24)).isCompatible)
+        #expect(!model.compatibility(with: device(memoryGiB: 8)).isCompatible)
+        #expect(model.compatibility(with: device(memoryGiB: 16)).isCompatible)
+        #expect(model.compatibility(
+            with: device(memoryGiB: 16), contextTokens: 4_096).isCompatible)
+        #expect(model.memory.qualifiedDefaultWorkingSetBytes == 5_487_695_296)
     }
 
     @Test func unqualifiedGPTOSS120BStaysDisabledOnThisHost() {

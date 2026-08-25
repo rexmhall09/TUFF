@@ -571,9 +571,7 @@ public enum TUFFModelCatalog {
                 minimumUnifiedMemoryBytes: eightGiB,
                 minimumAppleSiliconGeneration: 2))])
 
-    /// Official Harmony checkpoint. The conservative 24 GB gate remains in
-    /// place until the real 20B qualification commit records its measured
-    /// peak working set and safe context limits.
+    /// Official Harmony checkpoint, qualified at 4K context on a 16 GB M2.
     public static let gptOss_20B = TUFFModelDescriptor(
         id: .gptOss_20B,
         selector: "gpt-oss-20b",
@@ -587,9 +585,9 @@ public enum TUFFModelCatalog {
         installDirectoryName: "gpt-oss-20b.gturbo",
         source: gptOss20BSource,
         hardware: TUFFModelHardwareRequirements(
-            minimumUnifiedMemoryBytes: 24 * oneGiB),
+            minimumUnifiedMemoryBytes: 16 * oneGiB),
         memory: TUFFModelMemoryProfile(
-            qualifiedDefaultWorkingSetBytes: 20 * oneGiB,
+            qualifiedDefaultWorkingSetBytes: 5_487_695_296,
             defaultContextTokens: 4_096,
             defaultExpertCacheSlots: 4,
             expertCacheBytesPerSlot: 13_238_272,

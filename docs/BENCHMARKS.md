@@ -73,6 +73,55 @@ Exact measured commands:
   --temperature 0.2 --top-k 64 --top-p 0.95 --seed 20260723
 ```
 
+## GPT-OSS qualification
+
+GPT-OSS 20B ran on 2026-08-25 on an M2 MacBook Air (`Mac14,2`) with 16 GB of
+memory, macOS 26.5.2, and Swift 6.3.1. The installed model came from
+`openai/gpt-oss-20b` revision
+`6cee5e81ee83917806bbde320786a8fb61efebee`; its source index and completed
+13,791,724,503-byte `.gturbo` install both passed SHA-256 verification. The
+measured code was commit `0a95916bcb9f5b4b1a7df17ddad3dcbbe9ccd6da`.
+
+The first deterministic smoke used Low reasoning at 1,024 context and answered
+`4` with no visible analysis or channel markers. It stopped at EOS after 16
+generated tokens, prefilling 80 tokens in 16.50 seconds and decoding at 2.822
+tok/s. Peak RSS was 1,912,078,336 bytes and peak footprint was 5,385,082,256
+bytes.
+
+The frozen short qualification case used a 4,096-token context, Low reasoning,
+greedy decoding, and no experimental controls. Its 113-token Harmony prompt
+prefilled in 20.23 seconds. The generated explanation was coherent but reached
+the 128-token cap, so its 4.115 tok/s rate is a qualification measurement, not
+a complete benchmark row. Peak RSS was 2,180,726,784 bytes and peak footprint
+was 5,487,695,296 bytes. The catalog records that measured 4K footprint and
+requires 16 GB unified memory; no 8 GB GPT-OSS run has been made.
+
+Exact commands:
+
+```bash
+/usr/bin/time -l .build/release/TUFFCLI \
+  --model scratch/gpt-oss-20b.gturbo \
+  --chat-prompt 'What is 2+2? Reply with only the number.' \
+  --reasoning low --max-new 32 --max-context 1024 \
+  --temperature 0 --top-k 0 --top-p 1 \
+  --expert-cache-slots 16 --prefill on \
+  --prefill-chunk-tokens auto --rdadvise off
+
+/usr/bin/time -l .build/release/TUFFCLI \
+  --model scratch/gpt-oss-20b.gturbo \
+  --messages-file docs/benchmark-prompts/real-generation-v1/short-explanation.json \
+  --reasoning low --max-new 128 --max-context 4096 \
+  --temperature 0 --top-k 0 --top-p 1 \
+  --expert-cache-slots 16 --prefill on \
+  --prefill-chunk-tokens auto --rdadvise off
+```
+
+GPT-OSS 120B was not downloaded or run on this host. Its 96 GB catalog gate is
+provisional, and TUFF must not claim that checkpoint as live-verified until a
+qualifying Apple Silicon Mac completes the same install, smoke, and memory
+checks. The model-free suite covers its pinned architecture and streamed
+installer but does not substitute for that run.
+
 ## M2 measured decode
 
 These rows ran on a `Mac14,15` M2 MacBook Air with 8 GB of memory. No
