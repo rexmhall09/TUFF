@@ -32,14 +32,18 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
 struct TurboFieldfareMacApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: ForegroundAppDelegate
     @State private var model: AppModel
+    private let inferenceBroker: SharedInferenceBroker
 
     init() {
+        let inferenceBroker = SharedInferenceBroker(
+            client: DecodeServiceInferenceClient())
         let model = AppModel(
-            client: DecodeServiceInferenceClient(),
+            client: inferenceBroker,
             installer: RepackModelInstallerClient(descriptor: .selected),
             conversationStore: .persistentDefault(),
             visionRuntimeSupported: AppModel.currentDeviceSupportsVisionRuntime,
             settingsPersistenceEnabled: true)
+        self.inferenceBroker = inferenceBroker
         _model = State(initialValue: model)
         MainActor.assumeIsolated { ForegroundAppDelegate.model = model }
     }
