@@ -113,6 +113,18 @@ import Darwin
         ]
     }
 
+    static func mxfp4Quant() -> [String: Any] {
+        var result = quant()
+        result["routedExpert"] = [
+            "weightBits": 4,
+            "scheme": "mxfp4",
+            "scaleType": "ue8m0",
+            "biasType": "none",
+            "groupSize": Quantization.mxfp4GroupSize,
+        ]
+        return result
+    }
+
     @Test func loadsValidManifest() throws {
         let (dir, toy) = try Self.writeToyManifest()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -252,6 +264,17 @@ import Darwin
         defer { try? FileManager.default.removeItem(at: dir) }
         let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
         #expect(manifest.quant?.sharedExpert.weightBits == 8)
+    }
+
+    @Test func mxfp4FlagSelectsTheRoutedExpertDecoderContract() throws {
+        let (dir, config) = try Self.writeToyManifest(
+            ["versionMinor": 1, "quant": Self.mxfp4Quant()],
+            flags: ["streamingPresent": true, "mxfp4Weights": true])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
+        #expect(manifest.quant?.routedExpert.scheme == "mxfp4")
+        #expect(manifest.quant?.routedExpert.groupSize
+                == Quantization.mxfp4GroupSize)
     }
 
     @Test func productionManifestRejectsUnsupportedQuantMetadata() throws {

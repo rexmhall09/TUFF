@@ -27,6 +27,66 @@ public enum Quantization {
         Float(bitPattern: UInt32(bits) << 16)
     }
 
+    // MARK: - MXFP4 E2M1
+
+    /// GPT-OSS stores 32 E2M1 values in each MXFP4 block. Two values share a
+    /// byte (low nibble first) and one UE8M0 exponent scales the whole block.
+    public static let mxfp4GroupSize = 32
+
+    /// The exact E2M1 codebook published with the GPT-OSS reference runtime.
+    /// Codes 0 and 8 preserve distinct signed-zero bit patterns on disk but
+    /// both decode to numeric zero for inference.
+    public static let mxfp4Values: [Float] = [
+        0, 0.5, 1, 1.5, 2, 3, 4, 6,
+        -0.0, -0.5, -1, -1.5, -2, -3, -4, -6,
+    ]
+
+    @inline(__always)
+    public static func mxfp4Value(code: UInt8) -> Float {
+        mxfp4Values[Int(code & 0x0F)]
+    }
+
+    /// UE8M0 uses the stored byte as a biased base-two exponent.
+    @inline(__always)
+    public static func mxfp4Scale(_ exponent: UInt8) -> Float {
+        Float(sign: .plus, exponent: Int(exponent) - 127, significand: 1)
+    }
+
+    /// Decodes row-major MXFP4 blocks without changing their checkpoint
+    /// ordering. This is used by deterministic fixtures and audit tooling; the
+    /// production path performs the same decode inside Metal kernels.
+    public static func dequantizeMXFP4(
+        packed: [UInt8],
+        scales: [UInt8],
+        rows: Int,
+        columns: Int
+    ) -> [Float] {
+        precondition(rows > 0 && columns > 0)
+        precondition(columns % mxfp4GroupSize == 0,
+                     "MXFP4 columns must be a multiple of \(mxfp4GroupSize)")
+        precondition(packed.count == rows * columns / 2)
+        precondition(scales.count == rows * columns / mxfp4GroupSize)
+
+        let groupsPerRow = columns / mxfp4GroupSize
+        var result = [Float](repeating: 0, count: rows * columns)
+        for row in 0..<rows {
+            for group in 0..<groupsPerRow {
+                let scale = mxfp4Scale(scales[row * groupsPerRow + group])
+                let packedBase = row * (columns / 2)
+                    + group * (mxfp4GroupSize / 2)
+                let outputBase = row * columns + group * mxfp4GroupSize
+                for byteIndex in 0..<(mxfp4GroupSize / 2) {
+                    let byte = packed[packedBase + byteIndex]
+                    result[outputBase + byteIndex * 2] =
+                        mxfp4Value(code: byte) * scale
+                    result[outputBase + byteIndex * 2 + 1] =
+                        mxfp4Value(code: byte >> 4) * scale
+                }
+            }
+        }
+        return result
+    }
+
     // MARK: - INT4 affine
 
     /// MLX `affine` 4-bit row. Packed unsigned nibbles, BF16 scale + bias per

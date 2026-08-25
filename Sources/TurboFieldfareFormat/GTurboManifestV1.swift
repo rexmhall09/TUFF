@@ -255,6 +255,11 @@ package enum GTurboManifestCodec {
                 field: "manifest.flags.denseFFN",
                 reason: "must match manifest.arch.feedForwardKind")
         }
+        if isDense, manifest.flags["mxfp4Weights"] == true {
+            throw GTurboFormatError.invalid(
+                field: "manifest.flags.mxfp4Weights",
+                reason: "MXFP4 is only valid for streamed routed experts")
+        }
         guard !manifest.modelID.isEmpty,
               manifest.numLayers > 0 else {
             throw GTurboFormatError.invalid(field: "manifest", reason: "invalid dimensions or stride")
@@ -336,6 +341,27 @@ package enum GTurboManifestCodec {
                         field: "manifest.quant.\(name)", reason: "invalid quantization values")
                 }
             }
+            let routed = quant.routedExpert
+            let routedIsMXFP4 = routed.scheme.lowercased() == "mxfp4"
+            let hasMXFP4Flag = manifest.flags["mxfp4Weights"] == true
+            guard routedIsMXFP4 == hasMXFP4Flag else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.flags.mxfp4Weights",
+                    reason: "must match routed-expert quantization")
+            }
+            if routedIsMXFP4 {
+                guard routed.weightBits == 4,
+                      routed.groupSize == 32,
+                      routed.scaleType.lowercased() == "ue8m0",
+                      routed.biasType.lowercased() == "none" else {
+                    throw GTurboFormatError.invalid(
+                        field: "manifest.quant.routedExpert",
+                        reason: "MXFP4 requires E2M1 blocks with UE8M0 scales")
+                }
+            }
+        } else if manifest.flags["mxfp4Weights"] == true {
+            throw GTurboFormatError.invalid(
+                field: "manifest.quant", reason: "MXFP4 metadata is required")
         }
         let reservedFiles: Set<String> = ["manifest.json", "verified-install.json"]
         let filePaths = manifest.files.keys.sorted()

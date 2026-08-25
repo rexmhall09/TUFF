@@ -48,4 +48,28 @@ import TurboFieldfareValidationSupport
         #expect(abs(recon0 - row[0]) <= scale + 1e-3)
         #expect(abs(recon1 - row[1]) <= scale + 1e-3)
     }
+
+    @Test func mxfp4DecodesThePublishedE2M1CodebookExactly() {
+        let ascendingPairs: [UInt8] = [
+            0x10, 0x32, 0x54, 0x76, 0x98, 0xBA, 0xDC, 0xFE,
+        ]
+        let packed = ascendingPairs + ascendingPairs
+        let decoded = Quantization.dequantizeMXFP4(
+            packed: packed, scales: [127], rows: 1, columns: 32)
+        let expected: [Float] = [
+            0, 0.5, 1, 1.5, 2, 3, 4, 6,
+            -0.0, -0.5, -1, -1.5, -2, -3, -4, -6,
+        ]
+        #expect(decoded == expected + expected)
+    }
+
+    @Test func mxfp4RuntimeDecoderMatchesIndependentReference() {
+        let packed = (0..<64).map { UInt8(truncatingIfNeeded: $0 * 37 + 11) }
+        let scales: [UInt8] = [124, 127, 129, 122]
+        let runtime = Quantization.dequantizeMXFP4(
+            packed: packed, scales: scales, rows: 2, columns: 64)
+        let reference = MXFP4Reference.decode(
+            packed: packed, scales: scales, rows: 2, columns: 64)
+        #expect(runtime == reference)
+    }
 }
