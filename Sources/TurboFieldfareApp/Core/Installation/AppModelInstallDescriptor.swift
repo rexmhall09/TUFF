@@ -69,15 +69,17 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
 
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
-        switch family {
-        case .gemma4: return .default
-        case .qwen36: return .qwen36
-        }
+        catalog.first { $0.family == family }
+    }
+
+    public static func descriptor(for variant: ModelVariant) -> AppModelInstallDescriptor? {
+        catalog.first { $0.catalogDescriptor?.architecture.id.rawValue == variant.rawValue }
     }
 
     /// Basename of the installed `.gturbo` directory for this descriptor.
     public var installDirectoryName: String {
-        self == .qwen36 ? "qwen36.gturbo" : "gemma4.gturbo"
+        catalogDescriptor?.installDirectoryName
+            ?? (self == .qwen36 ? "qwen36.gturbo" : "gemma4.gturbo")
     }
 
     /// Stable identity for catalog lookups and UI selection. The install
@@ -89,9 +91,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// Test-only/custom descriptors keep their install basename as a safe
     /// fallback so they never collide with a shipped model profile.
     public var catalogID: TUFFModelID? {
-        if self == .qwen36 { return .qwen36_35B_A3B }
-        if self == .default { return .gemma4_26B_A4B }
-        return nil
+        catalogDescriptor?.id
     }
 
     public var settingsProfileKey: String {
@@ -100,23 +100,18 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
 
     /// The model family this descriptor installs.
     public var family: ModelFamily {
-        self == .qwen36 ? .qwen36 : .gemma4
+        catalogDescriptor.flatMap { ModelFamily(rawValue: $0.family.rawValue) }
+            ?? (self == .qwen36 ? .qwen36 : .gemma4)
     }
 
     /// Every model the app can install, in the order the UI lists them.
-    public static let catalog: [AppModelInstallDescriptor] = [.default, .qwen36]
+    public static let catalog: [AppModelInstallDescriptor] =
+        TUFFModelCatalog.all.map(AppModelInstallDescriptor.init(catalog:))
 
     /// A short line describing what the model is good for, shown beside its
     /// name in the picker.
     public var summary: String {
-        switch family {
-        case .gemma4:
-            return "26B total, 3.9B active. The original TurboFieldfare target; "
-                + "smallest install and lowest resident footprint."
-        case .qwen36:
-            return "35B total, 3B active. Hybrid linear/full attention, so its "
-                + "KV cache stays small at long context; larger install."
-        }
+        catalogDescriptor?.summary ?? displayName
     }
 
     /// The descriptor the app products select at launch. Defaults to Gemma 4.
@@ -127,10 +122,11 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         let environmentValue = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_MODEL"]
         let preferenceValue = UserDefaults(suiteName: "TurboFieldfare")?
             .string(forKey: "model")
-        switch environmentValue ?? preferenceValue {
-        case "qwen36": return .qwen36
-        default: return .default
+        guard let selector = environmentValue ?? preferenceValue,
+              let descriptor = TUFFModelCatalog.model(selector: selector) else {
+            return .default
         }
+        return AppModelInstallDescriptor(catalog: descriptor)
     }
 
     public static let visionCompanion = AppModelInstallDescriptor(
@@ -143,6 +139,15 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         for family: ModelFamily
     ) -> AppModelInstallDescriptor {
         family == .qwen36 ? .qwen36VisionCompanion : .visionCompanion
+    }
+
+    private var catalogDescriptor: TUFFModelDescriptor? {
+        TUFFModelCatalog.all.first {
+            $0.source.repoID == repoID
+                && $0.source.revision == revision
+                && $0.source.sourceIndexSHA256 == sourceIndexSHA256
+                && $0.source.installedBytes == installedBytes
+        }
     }
 }
 

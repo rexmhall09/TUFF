@@ -122,6 +122,34 @@ import Darwin
         #expect(m.expertStride == 16384)
     }
 
+    @Test func legacyFamiliesResolveToTheirExactRegisteredVariants() throws {
+        let (gemmaDirectory, _) = try Self.writeToyManifest()
+        defer { try? FileManager.default.removeItem(at: gemmaDirectory) }
+        let (qwenDirectory, _) = try Self.writeToyManifest(
+            archOverrides: ["family": "qwen36"])
+        defer { try? FileManager.default.removeItem(at: qwenDirectory) }
+
+        #expect(try ManifestReader.resolveArchitecture(
+            directoryURL: gemmaDirectory).variant == .gemma4_26B_A4B)
+        #expect(try ManifestReader.resolveArchitecture(
+            directoryURL: qwenDirectory).variant == .qwen36_35B_A3B)
+    }
+
+    @Test func unknownVariantIsRejectedBeforeModelLoad() throws {
+        let (directory, _) = try Self.writeToyManifest(
+            archOverrides: ["variant": "future-model"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        #expect {
+            _ = try ManifestReader.resolveArchitecture(directoryURL: directory)
+        } throws: { error in
+            guard case ModelError.indexCorrupt(let detail) = error else {
+                return false
+            }
+            return detail.contains("unknown arch.variant")
+        }
+    }
+
     @Test func missingManifestThrowsPartialInstall() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-empty-\(UUID().uuidString)")

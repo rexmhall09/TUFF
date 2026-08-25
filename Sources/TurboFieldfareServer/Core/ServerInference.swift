@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import TUFFModelCatalog
 import TurboFieldfare
 
 public enum ServerInferenceEvent: Equatable, Sendable {
@@ -479,14 +480,11 @@ enum ServerRequestImages {
 public actor ServerModelSession: ServerInferenceBackend {
     /// Chat dialect of the loaded tokenizer; drives request-validation rules.
     public nonisolated let chatDialect: ChatDialect
-    /// Family-derived API model identifier used when --model-id is absent.
+    /// Registry-derived API model identifier used when --model-id is absent.
     public nonisolated var defaultModelID: String {
-        switch modelFamily {
-        case .gemma4: return "gemma-4-26b-a4b-it"
-        case .qwen36: return "qwen3.6-35b-a3b"
-        }
+        registryModelID
     }
-    private nonisolated let modelFamily: ModelFamily
+    private nonisolated let registryModelID: String
 
     private let context: MetalContext
     private let model: Model
@@ -525,6 +523,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             .map { "\($0.key)=\($0.value)" }
             .sorted()
         return (configuration + switches).joined(separator: ":")
+    }
+
+    static func registryModelID(
+        for variant: ModelVariant,
+        fallback: String
+    ) -> String {
+        TUFFModelCatalog.all.first {
+            $0.architecture.id.rawValue == variant.rawValue
+        }?.apiModelID ?? fallback
     }
 
     public static func load(modelDirectory: URL,
@@ -658,7 +665,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.model = model
         self.tokenizer = tokenizer
         self.chatDialect = tokenizer.dialect
-        self.modelFamily = model.config.family
+        self.registryModelID = Self.registryModelID(
+            for: model.config.variant,
+            fallback: model.modelID)
         self.runner = runner
         self.scratch = scratch
         self.prefillConfig = prefillConfig

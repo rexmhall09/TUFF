@@ -55,7 +55,8 @@ public struct AppGenerationRequest: Equatable, Sendable {
         guard Set(imageAttachments.map(\.id)).count == imageAttachments.count else {
             throw AppInferenceError.invalidRequest("Images must be distinct.")
         }
-        let family = (try? ManifestReader.peekFamily(directoryURL: modelDirectory))
+        let family = (try? ManifestReader.resolveArchitecture(
+            directoryURL: modelDirectory).family)
             ?? .gemma4
         let capacity = VisionImageTokenBudget.capacity(
             maxContext: maxContextTokens, reservedTextTokens: 0,

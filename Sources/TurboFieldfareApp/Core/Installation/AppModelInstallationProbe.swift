@@ -23,17 +23,15 @@ public enum AppModelInstallationProbe {
         }
 
         do {
-            let family = try ManifestReader.peekFamily(directoryURL: directory)
-            guard let baseline = ArchConfig.knownArchitectures[family] else {
-                return .partial("unknown model family \(family.rawValue)")
-            }
+            let baseline = try ManifestReader.resolveArchitecture(
+                directoryURL: directory)
             let manifest = try ManifestReader.load(directoryURL: directory, expecting: baseline)
             // Validate the checkpoint against the descriptor for the family the
             // manifest itself declares, so the probe does not depend on which
             // model the app happens to have selected.
             guard let expected = descriptor
-                    ?? AppModelInstallDescriptor.descriptor(for: family) else {
-                return .partial("no descriptor for family \(family.rawValue)")
+                    ?? AppModelInstallDescriptor.descriptor(for: baseline.variant) else {
+                return .partial("no descriptor for variant \(baseline.variant.rawValue)")
             }
             let expectedSource = "sha256:" + expected.sourceIndexSHA256
             guard manifest.sourceSnapshotHash == expectedSource else {

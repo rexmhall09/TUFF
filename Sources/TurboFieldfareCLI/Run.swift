@@ -52,7 +52,8 @@ public func run(args: Args,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
-        let modelFamily = try ManifestReader.peekFamily(directoryURL: modelURL)
+        let modelFamily = try ManifestReader.resolveArchitecture(
+            directoryURL: modelURL).family
         let input = try parseInput(args: args)
         var selectedDevice: MTLDevice?
         if input.hasImages {

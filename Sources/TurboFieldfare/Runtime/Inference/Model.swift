@@ -399,10 +399,8 @@ extension Model {
                             expertCachePolicy: ExpertCachePolicy = PreadExpertStreamer.cachePolicyDefault,
                             integrityPolicy: ModelIntegrityPolicy? = nil,
                             loadStats: UnsafeMutablePointer<ModelLoadStats>? = nil) throws -> Model {
-        let family = try ManifestReader.peekFamily(directoryURL: directoryURL)
-        guard let baseline = ArchConfig.knownArchitectures[family] else {
-            throw ModelError.indexCorrupt(detail: "no baseline for family \(family.rawValue)")
-        }
+        let baseline = try ManifestReader.resolveArchitecture(
+            directoryURL: directoryURL)
         return try load(directoryURL: directoryURL,
                         device: device,
                         expecting: baseline,

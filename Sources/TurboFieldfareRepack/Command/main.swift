@@ -1,9 +1,12 @@
 import Foundation
 import TurboFieldfareRepackCore
 
+private let supportedModelSelectors = SupportedModelSource.all
+    .map(\.name).joined(separator: "|")
+
 private let usage = """
 Usage:
-  TUFFRepack [--model <gemma4|qwen36>] --output <model.gturbo> [--overwrite] [--resume] [--repo-id <owner/repo>] [--revision <ref>]
+  TUFFRepack [--model <\(supportedModelSelectors)>] --output <model.gturbo> [--overwrite] [--resume] [--repo-id <owner/repo>] [--revision <ref>]
   TUFFRepack --discard-partial --output <model.gturbo>
   TUFFRepack --verify-install --input-gturbo <model.gturbo>
   TUFFRepack --vision-output <model.vision.gturbo>
@@ -29,8 +32,8 @@ Set HF_TOKEN only if Hugging Face requests authentication. A cancelled or
 interrupted download can be continued with --resume or removed with
 --discard-partial.
 
-The optional Gemma 4 or Qwen3.6 image companion pack installs beside its
-matching text model and is bound to it. The family is inferred from the text
+An optional compatible image companion pack installs beside its matching text
+model and is bound to it. The architecture is inferred from the text
 manifest (or selected explicitly with --model). Without the pack the text
 runtime is unchanged; image input is unavailable.
 """

@@ -271,14 +271,9 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
-    /// Registry keyed by `manifest.arch.family` for auto-detection at load.
-    public static let knownArchitectures: [ModelFamily: ArchConfig] = [
-        .gemma4: .gemma4_26B_A4B,
-        .qwen36: .qwen36_35B_A3B,
-    ]
-
-    /// Variant registry used by v1.1 manifests. `knownArchitectures` remains
-    /// for legacy 1.0 family-only installs until all call sites route here.
+    /// Variant registry used by both v1.1 manifests and the legacy-family
+    /// resolver. Family alone is intentionally not a registry key because
+    /// multiple checkpoints can share prompt behavior without sharing shapes.
     public static let registeredArchitectures: [ModelVariant: ArchConfig] = [
         .gemma4_26B_A4B: .gemma4_26B_A4B,
         .qwen36_35B_A3B: .qwen36_35B_A3B,

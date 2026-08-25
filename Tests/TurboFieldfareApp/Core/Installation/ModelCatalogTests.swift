@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfare
 import TurboFieldfareRepackCore
 
 @testable import TurboFieldfareAppCore
@@ -46,6 +47,19 @@ import TurboFieldfareRepackCore
         #expect(model.selectedModelID == AppModelInstallDescriptor.default.id)
         #expect(model.selectedDescriptor == .default)
         #expect(model.installs.map(\.descriptor) == [.default, .qwen36])
+    }
+
+    @Test func appCatalogKeepsStableRegistryIdentities() {
+        #expect(AppModelInstallDescriptor.catalog.map(\.settingsProfileKey) == [
+            "gemma4-26b-a4b",
+            "qwen36-35b-a3b",
+        ])
+        #expect(AppModelInstallDescriptor.catalog.map(\.installDirectoryName) == [
+            "gemma4.gturbo",
+            "qwen36.gturbo",
+        ])
+        #expect(AppModelInstallDescriptor.descriptor(
+            for: ModelVariant.qwen36_35B_A3B) == .qwen36)
     }
 
     @MainActor

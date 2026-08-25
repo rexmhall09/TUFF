@@ -204,11 +204,9 @@ public final class VisionRuntime {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> VisionRuntime {
         try requireSupportedDevice(context.device)
-        let textFamily = try ManifestReader.peekFamily(directoryURL: textModelURL)
-        guard let baseline = ArchConfig.knownArchitectures[textFamily] else {
-            throw VisionRuntimeError.invalidInput(
-                "unsupported text family \(textFamily.rawValue)")
-        }
+        let baseline = try ManifestReader.resolveArchitecture(
+            directoryURL: textModelURL)
+        let textFamily = baseline.family
         let manifest = try ManifestReader.load(
             directoryURL: textModelURL,
             expecting: baseline)

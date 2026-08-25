@@ -273,6 +273,17 @@ public enum ManifestReader {
     /// without arch validation. Used by `Model.load` auto-detection.
     public static func peekFamily(directoryURL: URL,
                                   maxBytes: UInt64 = defaultMaxBytes) throws -> ModelFamily {
+        try resolveArchitecture(
+            directoryURL: directoryURL, maxBytes: maxBytes).family
+    }
+
+    /// Resolve the exact architecture variant. A legacy v1.0 manifest without
+    /// `arch.variant` uses the one historical baseline for its family; v1.1
+    /// manifests select directly from the variant registry.
+    public static func resolveArchitecture(
+        directoryURL: URL,
+        maxBytes: UInt64 = defaultMaxBytes
+    ) throws -> ArchConfig {
         let directory = try GTurboModelDirectory(rootURL: directoryURL)
         let data: Data
         do {
@@ -286,11 +297,28 @@ public enum ManifestReader {
         } catch {
             throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
         }
-        guard let raw = manifest.arch.family else { return .gemma4 }
-        guard let family = ModelFamily(rawValue: raw) else {
-            throw ModelError.indexCorrupt(detail: "unknown arch.family \"\(raw)\"")
+        let familyRaw = manifest.arch.family ?? ModelFamily.gemma4.rawValue
+        guard let family = ModelFamily(rawValue: familyRaw) else {
+            throw ModelError.indexCorrupt(detail: "unknown arch.family \"\(familyRaw)\"")
         }
-        return family
+        let variant: ModelVariant
+        if let raw = manifest.arch.variant {
+            guard let decoded = ModelVariant(rawValue: raw) else {
+                throw ModelError.indexCorrupt(detail: "unknown arch.variant \"\(raw)\"")
+            }
+            variant = decoded
+        } else {
+            variant = ModelVariant.legacyDefault(for: family)
+        }
+        guard let baseline = ArchConfig.registeredArchitectures[variant] else {
+            throw ModelError.indexCorrupt(
+                detail: "no baseline for arch.variant \"\(variant.rawValue)\"")
+        }
+        guard baseline.family == family else {
+            throw ModelError.indexCorrupt(
+                detail: "arch.variant \"\(variant.rawValue)\" is not in family \"\(family.rawValue)\"")
+        }
+        return baseline
     }
 }
 

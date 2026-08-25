@@ -279,6 +279,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
     public let id: TUFFModelID
     public let selector: String
     public let aliases: [String]
+    public let apiModelID: String
     public let displayName: String
     public let shortName: String
     public let summary: String
@@ -296,6 +297,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
     public init(id: TUFFModelID,
                 selector: String,
                 aliases: [String] = [],
+                apiModelID: String,
                 displayName: String,
                 shortName: String,
                 summary: String,
@@ -312,6 +314,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         self.id = id
         self.selector = selector
         self.aliases = aliases
+        self.apiModelID = apiModelID
         self.displayName = displayName
         self.shortName = shortName
         self.summary = summary
@@ -394,6 +397,7 @@ public enum TUFFModelCatalog {
     public static let gemma4_26B_A4B = TUFFModelDescriptor(
         id: .gemma4_26B_A4B,
         selector: "gemma4",
+        apiModelID: "gemma-4-26b-a4b-it",
         displayName: "Gemma 4 26B-A4B IT 4-bit",
         shortName: "Gemma 4 26B",
         summary: "26B total, 3.9B active. The original TurboFieldfare target; "
@@ -435,6 +439,7 @@ public enum TUFFModelCatalog {
     public static let qwen36_35B_A3B = TUFFModelDescriptor(
         id: .qwen36_35B_A3B,
         selector: "qwen36",
+        apiModelID: "qwen3.6-35b-a3b",
         displayName: "Qwen3.6 35B-A3B 4-bit",
         shortName: "Qwen3.6 35B",
         summary: "35B total, 3B active. Hybrid linear/full attention, so its "

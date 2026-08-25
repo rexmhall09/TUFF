@@ -7,6 +7,7 @@ import TUFFModelCatalog
 public struct SupportedModelSource: Sendable, Equatable {
     /// CLI selector value (`--model <name>`).
     public let name: String
+    public let aliases: [String]
     public let displayName: String
     public let repoID: String
     public let revision: String
@@ -20,6 +21,7 @@ public struct SupportedModelSource: Sendable, Equatable {
     public init(catalog descriptor: TUFFModelDescriptor) {
         let source = descriptor.source
         self.name = descriptor.selector
+        self.aliases = descriptor.aliases
         self.displayName = descriptor.displayName
         self.repoID = source.repoID
         self.revision = source.revision
@@ -58,9 +60,10 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
-    public static let all: [SupportedModelSource] = [gemma4, qwen36]
+    public static let all: [SupportedModelSource] =
+        TUFFModelCatalog.all.map(SupportedModelSource.init(catalog:))
 
     public static func named(_ name: String) -> SupportedModelSource? {
-        all.first { $0.name == name }
+        all.first { $0.name == name || $0.aliases.contains(name) }
     }
 }

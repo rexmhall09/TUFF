@@ -86,6 +86,7 @@ let package = Package(
         .target(
             name: "TurboFieldfareServerCore",
             dependencies: [
+                "TUFFModelCatalog",
                 "TurboFieldfare",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),

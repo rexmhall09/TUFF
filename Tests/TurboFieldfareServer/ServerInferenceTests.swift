@@ -9,6 +9,15 @@ import UniformTypeIdentifiers
 
 @Suite("Server vision capability")
 struct ServerVisionCapabilityTests {
+    @Test func defaultAPIModelIDsComeFromTheSharedRegistry() {
+        #expect(ServerModelSession.registryModelID(
+            for: .gemma4_26B_A4B, fallback: "fallback")
+            == "gemma-4-26b-a4b-it")
+        #expect(ServerModelSession.registryModelID(
+            for: .qwen36_35B_A3B, fallback: "fallback")
+            == "qwen3.6-35b-a3b")
+    }
+
     @Test func unsupportedHardwareDominatesPackAvailability() {
         #expect(ServerModelSession.hardwareVisionCapability(
             supportsVisionRuntime: false) == "unsupported")
