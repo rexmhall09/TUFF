@@ -13,6 +13,7 @@ import TurboFieldfare
         // passing --max-context.
         #expect(arguments.maxContext == 8192)
         #expect(arguments.thinking == .off)
+        #expect(arguments.reasoningEffort == nil)
         #expect(arguments.temperature == 0.2)
         #expect(arguments.topK == 64)
         #expect(arguments.topP == 0.95)
@@ -70,7 +71,7 @@ import TurboFieldfare
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
-            "--thinking",
+            "--thinking", "--reasoning",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--expert-cache-slots",
             "--expert-cache-policy", "--prefill", "--prefill-chunk-tokens",
@@ -98,6 +99,34 @@ import TurboFieldfare
             _ = try Args.parse([
                 "--model", "m.gturbo", "--chat-prompt", "hi",
                 "--thinking", "medium",
+            ])
+        }
+    }
+
+    @Test func gptOssReasoningParsesForChatAndRejectsConflicts() throws {
+        for effort in GPTOSSReasoningEffort.allCases {
+            let arguments = try Args.parse([
+                "--model", "m.gturbo", "--chat-prompt", "hi",
+                "--reasoning", effort.rawValue,
+            ])
+            #expect(arguments.reasoningEffort == effort)
+        }
+        #expect(throws: ArgsError.mutuallyExclusive("--prompt", "--reasoning")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--reasoning", "low",
+            ])
+        }
+        #expect(throws: ArgsError.mutuallyExclusive("--thinking", "--reasoning")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--chat-prompt", "hi",
+                "--thinking", "on", "--reasoning", "high",
+            ])
+        }
+        #expect(throws: ArgsError.invalidValue(flag: "--reasoning", value: "on")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--chat-prompt", "hi",
+                "--reasoning", "on",
             ])
         }
     }

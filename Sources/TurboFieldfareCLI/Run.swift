@@ -55,6 +55,14 @@ public func run(args: Args,
         let architecture = try ManifestReader.resolveArchitecture(
             directoryURL: modelURL)
         let modelFamily = architecture.family
+        if modelFamily == .gptOss, args.thinking != .off {
+            throw ArgsError.unsupported(
+                flag: "--thinking", context: "GPT-OSS; use --reasoning")
+        }
+        if modelFamily != .gptOss, args.reasoningEffort != nil {
+            throw ArgsError.unsupported(
+                flag: "--reasoning", context: modelFamily.rawValue)
+        }
         let input = try parseInput(args: args)
         var selectedDevice: MTLDevice?
         if input.hasImages {
@@ -65,6 +73,7 @@ public func run(args: Args,
             selectedDevice = device
         }
         let tokenizer = try await GFTokenizer.load(forModelDirectory: modelURL)
+        let currentDate = harmonyCurrentDate()
         var promptIds: [Int32]
         var multimodalMessages: [MultimodalMessage]?
         var imageURLs: [UUID: URL] = [:]
@@ -74,12 +83,13 @@ public func run(args: Args,
             promptIds = tokenizer.encode(text, addBOS: true)
         case .messages(let messages):
             multimodalMessages = nil
-            promptIds = tokenizer.encode(
-                try tokenizer.applyChatTemplate(
-                    messages,
-                    modelVariant: architecture.variant,
-                    reasoning: args.thinking),
-                addBOS: false)
+            promptIds = try encodeTextChat(
+                messages: messages,
+                tokenizer: tokenizer,
+                architecture: architecture,
+                thinking: args.thinking,
+                reasoningEffort: args.reasoningEffort,
+                currentDate: currentDate)
         case .multimodal(let messages, let images):
             multimodalMessages = messages
             imageURLs = images
@@ -120,7 +130,9 @@ public func run(args: Args,
                 input: input, tokenizer: tokenizer, device: device,
                 family: modelFamily,
                 modelVariant: architecture.variant,
-                reasoning: args.thinking)
+                reasoning: args.thinking,
+                reasoningEffort: args.reasoningEffort,
+                currentDate: currentDate)
             effectiveArgs.prefillChunkTokens =
                 PrefillRuntimeConfig.autoChunkTokens(promptTokens: promptTokens)
             if !args.quiet {
@@ -346,17 +358,26 @@ func estimatedPromptTokens(
     device: MTLDevice,
     family: ModelFamily = .gemma4,
     modelVariant: ModelVariant? = nil,
-    reasoning: ChatReasoning = .off
+    reasoning: ChatReasoning = .off,
+    reasoningEffort: GPTOSSReasoningEffort? = nil,
+    currentDate: String? = nil
 ) throws -> Int {
     switch input {
     case .raw(let text):
         return tokenizer.encode(text, addBOS: true).count
     case .messages(let messages):
-        return tokenizer.encode(try tokenizer.applyChatTemplate(
-                                    messages,
-                                    modelVariant: modelVariant,
-                                    reasoning: reasoning),
-                                addBOS: false).count
+        if family == .gptOss {
+            return try tokenizer.encodeHarmonyChat(
+                messages: messages,
+                reasoningEffort: reasoningEffort ?? .medium,
+                currentDate: currentDate ?? harmonyCurrentDate()).count
+        }
+        return tokenizer.encode(
+            try tokenizer.applyChatTemplate(
+                messages,
+                modelVariant: modelVariant,
+                reasoning: reasoning),
+            addBOS: false).count
     case .multimodal(let messages, let images):
         var total = 0
         for message in messages {
@@ -379,6 +400,42 @@ func estimatedPromptTokens(
         }
         return total
     }
+}
+
+func encodeTextChat(
+    messages: [GFTokenizer.Message],
+    tokenizer: GFTokenizer,
+    architecture: ArchConfig,
+    thinking: ChatReasoning,
+    reasoningEffort: GPTOSSReasoningEffort?,
+    currentDate: String
+) throws -> [Int32] {
+    if architecture.family == .gptOss {
+        return try tokenizer.encodeHarmonyChat(
+            messages: messages,
+            reasoningEffort: reasoningEffort ?? .medium,
+            currentDate: currentDate)
+    }
+    return tokenizer.encode(
+        try tokenizer.applyChatTemplate(
+            messages,
+            modelVariant: architecture.variant,
+            reasoning: thinking),
+        addBOS: false)
+}
+
+func harmonyCurrentDate(
+    _ date: Date = Date(),
+    timeZone: TimeZone = .current
+) -> String {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = timeZone
+    let components = calendar.dateComponents([.year, .month, .day], from: date)
+    return String(
+        format: "%04d-%02d-%02d",
+        components.year ?? 0,
+        components.month ?? 0,
+        components.day ?? 0)
 }
 
 func prefillCoercionNotice(

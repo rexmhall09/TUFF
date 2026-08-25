@@ -11,6 +11,7 @@ public struct Args: Equatable, Sendable {
     public var maxNew: Int
     public var maxContext: Int
     public var thinking: ChatReasoning
+    public var reasoningEffort: GPTOSSReasoningEffort?
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
@@ -37,6 +38,7 @@ public struct Args: Equatable, Sendable {
                 maxNew: Int = 1_024,
                 maxContext: Int = 8192,
                 thinking: ChatReasoning = .off,
+                reasoningEffort: GPTOSSReasoningEffort? = nil,
                 temperature: Float = 0.2,
                 topK: Int? = 64,
                 topP: Float? = 0.95,
@@ -60,6 +62,7 @@ public struct Args: Equatable, Sendable {
         self.maxNew = maxNew
         self.maxContext = maxContext
         self.thinking = thinking
+        self.reasoningEffort = reasoningEffort
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
@@ -83,6 +86,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
     case invalidValue(flag: String, value: String)
     case requiredMissing(String)
     case mutuallyExclusive(String, String)
+    case unsupported(flag: String, context: String)
     case modeMissing
     case imagePromptNeedsExpertCacheSlots(have: Int, need: Int)
 
@@ -94,6 +98,8 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
         case .invalidValue(let flag, let value): return "invalid value for \(flag): \(value)"
         case .requiredMissing(let flag): return "required flag missing: \(flag)"
         case .mutuallyExclusive(let a, let b): return "\(a) and \(b) are mutually exclusive"
+        case .unsupported(let flag, let context):
+            return "\(flag) is not supported for \(context)"
         case .modeMissing:
             return "one of --prompt, --chat-prompt or --messages-file is required"
         case .imagePromptNeedsExpertCacheSlots(let have, let need):
@@ -106,7 +112,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 
 extension Args {
     public static let usage = """
-    TUFFCLI — Gemma 4 / Qwen3.6 text generation
+    TUFFCLI — local text generation
 
     usage: TUFFCLI --model <dir>
            (--prompt <string> | --chat-prompt <string> | --messages-file <path>) [options]
@@ -126,6 +132,8 @@ extension Args {
       --max-new <int>            Generated-token limit (default 1024).
       --max-context <int>        Context limit in tokens (default 8192).
       --thinking <off|on>        Native chat reasoning (default off).
+      --reasoning <low|medium|high>
+                                GPT-OSS reasoning effort (default medium).
       --temperature <float>      Sampling temperature (default 0.2; 0 = greedy).
       --top-k <int>              Top-k truncation, 1...256 (default 64; 0 = off).
       --top-p <float>            Nucleus truncation (default 0.95).
@@ -195,6 +203,7 @@ extension Args {
         var maxNew = 1_024
         var maxContext = 8192
         var thinking: ChatReasoning = .off
+        var reasoningEffort: GPTOSSReasoningEffort?
         var temperature: Float = 0.2
         var topK: Int? = 64
         var topP: Float? = 0.95
@@ -255,6 +264,12 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 thinking = parsed
+            case "--reasoning":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = GPTOSSReasoningEffort(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                reasoningEffort = parsed
             case "--temperature":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed >= 0 else {
@@ -346,6 +361,12 @@ extension Args {
         if prompt != nil, thinking != .off {
             throw ArgsError.mutuallyExclusive("--prompt", "--thinking")
         }
+        if prompt != nil, reasoningEffort != nil {
+            throw ArgsError.mutuallyExclusive("--prompt", "--reasoning")
+        }
+        if thinking != .off, reasoningEffort != nil {
+            throw ArgsError.mutuallyExclusive("--thinking", "--reasoning")
+        }
         let minimumSlots = RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
         if !images.isEmpty, expertCacheSlots < minimumSlots {
             throw ArgsError.imagePromptNeedsExpertCacheSlots(
@@ -377,6 +398,7 @@ extension Args {
                              maxNew: maxNew,
                              maxContext: maxContext,
                              thinking: thinking,
+                             reasoningEffort: reasoningEffort,
                              temperature: temperature,
                              topK: topK,
                              topP: topP,

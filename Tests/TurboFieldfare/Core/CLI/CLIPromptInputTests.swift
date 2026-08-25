@@ -9,6 +9,17 @@ import TurboFieldfare
 /// looked live, and the size check is only worth anything if it runs before the
 /// model load.
 @Suite struct CLIPromptInputTests {
+    @Test func harmonyDateUsesTheRequestedCalendarDay() throws {
+        let date = try #require(ISO8601DateFormatter().date(
+            from: "2026-08-25T23:30:00Z"))
+        #expect(harmonyCurrentDate(
+            date, timeZone: try #require(TimeZone(secondsFromGMT: 0)))
+            == "2026-08-25")
+        #expect(harmonyCurrentDate(
+            date, timeZone: try #require(TimeZone(secondsFromGMT: 3_600)))
+            == "2026-08-26")
+    }
+
     private func makeMessagesFile(
         _ json: String, in directory: URL
     ) throws -> URL {
