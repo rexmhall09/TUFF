@@ -43,6 +43,17 @@ public enum ChatDialect: String, Sendable {
     case chatml
 }
 
+/// Model-supported reasoning switch used by chat prompt renderers.
+///
+/// GPT-OSS adds graded effort in its own family integration. Gemma 4 and Qwen
+/// expose a true on/off template switch, so keeping this type narrow prevents a
+/// caller from silently mapping `low` or `high` onto a model that cannot honor
+/// that distinction.
+public enum ChatReasoning: String, Codable, Sendable, Equatable, CaseIterable {
+    case off
+    case on
+}
+
 /// Detokenization pipeline declared by `tokenizer.json`. Resolved from the
 /// decoder declaration rather than from the chat dialect, because it is the
 /// decoder — not the chat framing — that decides how token text becomes bytes.
@@ -473,9 +484,9 @@ public struct GFTokenizer: @unchecked Sendable {
         }
     }
 
-    /// Text-only, no-tool rendering of the pinned checkpoint's bundled
-    /// `chat_template.jinja`, with thinking disabled. Keeping this narrow makes
-    /// unsupported tool/media behavior explicit instead of approximating it.
+    /// Text-only, no-tool rendering of the pinned checkpoints' bundled
+    /// `chat_template.jinja`. Keeping this narrow makes unsupported tool/media
+    /// behavior explicit instead of approximating it.
     private static let turnOpen    = "<|turn>"
     private static let turnClose   = "<turn|>"
     private static let bosMark     = "<bos>"
@@ -483,34 +494,76 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let imEndMark   = "<|im_end|>"
     /// Generation prompt with thinking disabled, matching the Jinja template's
     /// `add_generation_prompt` + `enable_thinking=false` branch.
-    private static let chatMLGenerationSuffix =
+    private static let chatMLThinkingOffSuffix =
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    private static let chatMLThinkingOnSuffix =
+        "<|im_start|>assistant\n<think>\n"
 
-    public func applyChatTemplate(_ messages: [Message]) throws -> String {
+    public func applyChatTemplate(
+        _ messages: [Message],
+        modelVariant: ModelVariant? = nil,
+        reasoning: ChatReasoning = .off
+    ) throws -> String {
         switch dialect {
-        case .gemma: return try gemmaChatTemplate(messages)
-        case .chatml: return try chatMLChatTemplate(messages)
+        case .gemma:
+            return try gemmaChatTemplate(
+                messages, modelVariant: modelVariant, reasoning: reasoning)
+        case .chatml:
+            return try chatMLChatTemplate(messages, reasoning: reasoning)
         }
     }
 
-    private func gemmaChatTemplate(_ messages: [Message]) throws -> String {
+    private func gemmaChatTemplate(
+        _ messages: [Message],
+        modelVariant: ModelVariant?,
+        reasoning: ChatReasoning
+    ) throws -> String {
         var s = Self.bosMark
-        for (index, message) in messages.enumerated() {
+        var loopMessages = messages[...]
+
+        // Both pinned Gemma 4 templates enable native thinking by placing the
+        // control token at the top of the first system turn. If the caller
+        // supplied a system/developer message, the token and content share that
+        // turn; otherwise the renderer creates a control-only system turn.
+        if reasoning == .on {
+            s += Self.turnOpen + "system\n<|think|>\n"
+            if let first = messages.first,
+               first.role == .system || first.role == .developer {
+                guard let rawContent = first.content else {
+                    throw GFTokenizerError.invalidChatTemplate(
+                        "text-only messages require content")
+                }
+                s += rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                loopMessages = messages.dropFirst()
+            }
+            s += Self.turnClose + "\n"
+        }
+
+        for (index, message) in loopMessages.enumerated() {
             guard let rawContent = message.content else {
                 throw GFTokenizerError.invalidChatTemplate("text-only messages require content")
             }
             let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
-            if message.role == .system && index != 0 {
+            if (message.role == .system || message.role == .developer)
+                && (index != 0 || reasoning == .on) {
                 throw GFTokenizerError.invalidChatTemplate("system message must be first")
             }
             let role = message.role == .assistant ? "model" : message.role.rawValue
             s += Self.turnOpen + role + "\n" + content + Self.turnClose + "\n"
         }
-        s += Self.turnOpen + "model\n<|channel>thought\n<channel|>"
+        s += Self.turnOpen + "model\n"
+        // The E4B checkpoint omits the empty thought channel when thinking is
+        // off. The 26B template includes it, and that exact suffix is the v1
+        // behavior, so an absent variant intentionally keeps the legacy path.
+        if reasoning == .off, modelVariant != .gemma4_E4B {
+            s += "<|channel>thought\n<channel|>"
+        }
         return s
     }
 
-    private func chatMLChatTemplate(_ messages: [Message]) throws -> String {
+    private func chatMLChatTemplate(
+        _ messages: [Message], reasoning: ChatReasoning
+    ) throws -> String {
         var s = ""
         for (index, message) in messages.enumerated() {
             guard let rawContent = message.content else {
@@ -522,12 +575,15 @@ public struct GFTokenizer: @unchecked Sendable {
             }
             s += Self.imStartMark + message.role.rawValue + "\n" + content + Self.imEndMark + "\n"
         }
-        s += Self.chatMLGenerationSuffix
+        s += reasoning == .on
+            ? Self.chatMLThinkingOnSuffix
+            : Self.chatMLThinkingOffSuffix
         return s
     }
 
     public func encodeToolChat(messages: [Message],
-                               tools: [FunctionDefinition]) throws -> [Int32] {
+                               tools: [FunctionDefinition],
+                               reasoning: ChatReasoning = .off) throws -> [Int32] {
         guard tokenizer.hasChatTemplate else {
             throw GFTokenizerError.missingToolTemplate
         }
@@ -569,22 +625,31 @@ public struct GFTokenizer: @unchecked Sendable {
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
-            additionalContext: ["enable_thinking": false]
+            additionalContext: ["enable_thinking": reasoning == .on]
         ).map(Int32.init)
     }
 
-    public func encodeTextContinuation(userContent: String) -> [Int32] {
+    public func encodeTextContinuation(
+        userContent: String,
+        modelVariant: ModelVariant? = nil,
+        reasoning: ChatReasoning = .off
+    ) -> [Int32] {
         let content = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
         switch dialect {
         case .gemma:
+            let suffix = reasoning == .off && modelVariant != .gemma4_E4B
+                ? "<|channel>thought\n<channel|>"
+                : ""
             return [endOfTurnID] + encode(
                 "\n\(Self.turnOpen)user\n\(content)\(Self.turnClose)\n"
-                    + "\(Self.turnOpen)model\n<|channel>thought\n<channel|>",
+                    + "\(Self.turnOpen)model\n" + suffix,
                 addBOS: false)
         case .chatml:
             return [endOfTurnID] + encode(
                 "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
-                    + Self.chatMLGenerationSuffix,
+                    + (reasoning == .on
+                        ? Self.chatMLThinkingOnSuffix
+                        : Self.chatMLThinkingOffSuffix),
                 addBOS: false)
         }
     }
@@ -603,7 +668,9 @@ public struct GFTokenizer: @unchecked Sendable {
         textAndImages: [MultimodalContinuationPart],
         imageTokenCounts: [Int],
         openingConversation: Bool = false,
-        family: ModelFamily = .gemma4
+        family: ModelFamily = .gemma4,
+        modelVariant: ModelVariant? = nil,
+        reasoning: ChatReasoning = .off
     ) throws -> MultimodalContinuationTokens {
         let policy = MultimodalPromptRenderer.FamilyPolicy.forFamily(family)
         var text = ""
@@ -637,17 +704,25 @@ public struct GFTokenizer: @unchecked Sendable {
             // first turn of a conversation is identical whether or not it
             // carries an image.
             template = encode(
-                try applyChatTemplate([Message(role: .user, content: content)]),
+                try applyChatTemplate(
+                    [Message(role: .user, content: content)],
+                    modelVariant: modelVariant,
+                    reasoning: reasoning),
                 addBOS: false)
         } else if dialect == .gemma {
+            let suffix = reasoning == .off && modelVariant != .gemma4_E4B
+                ? "<|channel>thought\n<channel|>"
+                : ""
             template = [endOfTurnID] + encode(
                 "\n\(Self.turnOpen)user\n\(content)\(Self.turnClose)\n"
-                    + "\(Self.turnOpen)model\n<|channel>thought\n<channel|>",
+                    + "\(Self.turnOpen)model\n" + suffix,
                 addBOS: false)
         } else {
             template = [endOfTurnID] + encode(
                 "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
-                    + Self.chatMLGenerationSuffix,
+                    + (reasoning == .on
+                        ? Self.chatMLThinkingOnSuffix
+                        : Self.chatMLThinkingOffSuffix),
                 addBOS: false)
         }
         // Count the placeholders the tokenizer actually produced before indexing
@@ -700,7 +775,8 @@ public struct GFTokenizer: @unchecked Sendable {
         cachedMessages: [Message],
         assistant: Message,
         incomingMessages: [Message],
-        tools: [FunctionDefinition]
+        tools: [FunctionDefinition],
+        reasoning: ChatReasoning = .off
     ) throws -> [Int32] {
         // The ChatML template's `<think>` stripping depends on each assistant
         // turn's position relative to the last user query, so a re-rendered
@@ -732,8 +808,12 @@ public struct GFTokenizer: @unchecked Sendable {
         }
         let prefix = try encodeToolChat(
             messages: cachedMessages + [assistant],
-            tools: tools)
-        let full = try encodeToolChat(messages: incomingMessages, tools: tools)
+            tools: tools,
+            reasoning: reasoning)
+        let full = try encodeToolChat(
+            messages: incomingMessages,
+            tools: tools,
+            reasoning: reasoning)
         let callCount = assistant.toolCalls.count
         let starts = prefix.indices.filter { prefix[$0] == toolCallStartID }
         guard callCount > 0, starts.count >= callCount,

@@ -3,9 +3,12 @@ import Testing
 
 @Suite struct ModelCatalogTests {
     @Test func currentCatalogOrderAndSelectorsAreStable() {
-        #expect(TUFFModelCatalog.all.map(\.selector) == ["gemma4", "qwen36"])
+        #expect(TUFFModelCatalog.all.map(\.selector) == [
+            "gemma4-e4b", "gemma4", "qwen36",
+        ])
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
         #expect(TUFFModelCatalog.model(selector: "gemma4")?.id == .gemma4_26B_A4B)
+        #expect(TUFFModelCatalog.model(selector: "e4b")?.id == .gemma4_E4B)
         #expect(TUFFModelCatalog.model(selector: "qwen36")?.id == .qwen36_35B_A3B)
         #expect(TUFFModelCatalog.model(selector: "unknown") == nil)
     }
@@ -25,7 +28,9 @@ import Testing
     }
 
     @Test func imageAddonsRemainSeparateAndM2Gated() {
-        for model in TUFFModelCatalog.all {
+        #expect(TUFFModelCatalog.gemma4_E4B.addons.isEmpty)
+        for model in [TUFFModelCatalog.gemma4_26B_A4B,
+                      TUFFModelCatalog.qwen36_35B_A3B] {
             let addon = model.addons[0]
             #expect(addon.kind == .imageInput)
             #expect(addon.hardware.minimumAppleSiliconGeneration == 2)

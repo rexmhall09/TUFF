@@ -428,7 +428,8 @@ public final class AppModel {
     public func canInstallVisionPack(
         for coordinator: ModelInstallCoordinator
     ) -> Bool {
-        guard isVisionRuntimeSupported else { return false }
+        guard isVisionRuntimeSupported,
+              coordinator.descriptor.supportsImageInput else { return false }
         // A layout with nowhere to put a companion cannot be repaired by
         // downloading one, so do not offer to.
         let status = visionInstallationStatus(for: coordinator)
@@ -761,12 +762,13 @@ public final class AppModel {
     /// offered an Add-images button with no tower behind it, and the failure
     /// only surfaced when the user pressed Generate.
     public var isImageInputAvailable: Bool {
-        isVisionRuntimeSupported && isVisionPackInstalled
+        selectedDescriptor.supportsImageInput
+            && isVisionRuntimeSupported && isVisionPackInstalled
     }
 
     /// Image support is part of this build. Hardware support and companion-pack
     /// availability are separate so the inspector can explain either absence.
-    public var visionRuntimeEnabled: Bool { true }
+    public var visionRuntimeEnabled: Bool { selectedDescriptor.supportsImageInput }
 
     /// Room left for the prompt when working out how many images fit. The
     /// runtime still rejects a combination that does not fit, so this only has

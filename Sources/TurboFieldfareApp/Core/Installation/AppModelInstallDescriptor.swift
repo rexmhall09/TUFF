@@ -64,6 +64,9 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public static let `default` = AppModelInstallDescriptor(
         catalog: TUFFModelCatalog.gemma4_26B_A4B)
 
+    public static let gemma4E4B = AppModelInstallDescriptor(
+        catalog: TUFFModelCatalog.gemma4_E4B)
+
     public static let qwen36 = AppModelInstallDescriptor(
         catalog: TUFFModelCatalog.qwen36_35B_A3B)
 
@@ -102,6 +105,12 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public var family: ModelFamily {
         catalogDescriptor.flatMap { ModelFamily(rawValue: $0.family.rawValue) }
             ?? (self == .qwen36 ? .qwen36 : .gemma4)
+    }
+
+    /// Whether this exact checkpoint has a qualified image companion. Custom
+    /// descriptors retain the v1 behavior for tests and local builds.
+    public var supportsImageInput: Bool {
+        catalogDescriptor?.capabilities.contains(.imageInput) ?? true
     }
 
     /// Every model the app can install, in the order the UI lists them.

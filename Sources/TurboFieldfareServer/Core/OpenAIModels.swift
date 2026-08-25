@@ -154,6 +154,10 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let logprobs: Bool?
     public let presencePenalty: Float?
     public let frequencyPenalty: Float?
+    /// TUFF's model-aware on/off reasoning control for Gemma 4 and Qwen.
+    /// GPT-OSS adds the standard graded `reasoning_effort` field with its
+    /// family integration.
+    public let enableThinking: Bool?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
@@ -167,6 +171,7 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case repetitionPenalty = "repetition_penalty"
         case presencePenalty = "presence_penalty"
         case frequencyPenalty = "frequency_penalty"
+        case enableThinking = "enable_thinking"
     }
 }
 
@@ -266,6 +271,7 @@ public struct ValidatedChatRequest: Sendable {
     public let includeUsage: Bool
     public let generationConfig: GenerationConfig
     public let maximumCompletionTokens: Int
+    public let reasoning: ChatReasoning
     /// Every staging directory this request's image files live in. The parser
     /// and the validator's store each stage under their own lease, and a
     /// request may carry files from both, so dropping either would delete
@@ -281,7 +287,8 @@ public struct ValidatedChatRequest: Sendable {
         stream: Bool,
         includeUsage: Bool,
         generationConfig: GenerationConfig,
-        maximumCompletionTokens: Int
+        maximumCompletionTokens: Int,
+        reasoning: ChatReasoning = .off
     ) {
         self.messages = messages
         self.multimodalMessages = multimodalMessages
@@ -292,6 +299,7 @@ public struct ValidatedChatRequest: Sendable {
         self.includeUsage = includeUsage
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
+        self.reasoning = reasoning
         self.attachmentLeases = []
     }
 
@@ -305,6 +313,7 @@ public struct ValidatedChatRequest: Sendable {
         includeUsage: Bool,
         generationConfig: GenerationConfig,
         maximumCompletionTokens: Int,
+        reasoning: ChatReasoning,
         attachmentLeases: [ServerAttachmentLease]
     ) {
         self.messages = messages
@@ -316,6 +325,7 @@ public struct ValidatedChatRequest: Sendable {
         self.includeUsage = includeUsage
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
+        self.reasoning = reasoning
         self.attachmentLeases = attachmentLeases
     }
 }
@@ -404,6 +414,7 @@ public enum OpenAIRequestValidator {
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
                           "invalid_value")
         }
+        let reasoning: ChatReasoning = request.enableThinking == true ? .on : .off
 
         let includeTools: Bool
         switch request.toolChoice {
@@ -443,6 +454,7 @@ public enum OpenAIRequestValidator {
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
                                     generationConfig: config,
                                     maximumCompletionTokens: maximum,
+                                    reasoning: reasoning,
                                     attachmentLeases: validatedMessages.leases)
     }
 

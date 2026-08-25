@@ -64,6 +64,14 @@ struct ChatMLTemplateTests {
             + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
     }
 
+    @Test("Thinking on leaves the ChatML thought block open")
+    func thinkingOn() throws {
+        let p = try tok.applyChatTemplate(
+            [Message(role: .user, content: "Hi")], reasoning: .on)
+        #expect(p == "<|im_start|>user\nHi<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n")
+    }
+
     @Test("Multi-turn renders roles verbatim with assistant unrenamed")
     func multiTurn() throws {
         let p = try tok.applyChatTemplate([

@@ -30,6 +30,7 @@ struct ServerPromptCacheEntry: Sendable, Equatable {
     /// would compare equal without this.
     let inputImageIdentities: [[String]]
     let tools: [GFTokenizer.FunctionDefinition]
+    let reasoning: ChatReasoning
     let assistantTurn: CachedAssistantTurn
     let kvBackedTokenIDs: [Int32]
     let uncommittedBoundaryTokenIDs: [Int32]
@@ -152,6 +153,7 @@ struct ServerPromptCache: Sendable {
             inputMessages: request.messages,
             inputImageIdentities: identities,
             tools: request.tools,
+            reasoning: request.reasoning,
             assistantTurn: CachedAssistantTurn(
                 message: assistant,
                 rawStopReason: result.reason),
@@ -167,11 +169,13 @@ struct ServerPromptCache: Sendable {
         domain: ServerPromptCacheDomain,
         request: ValidatedChatRequest,
         renderedPromptIDs: [Int32]?,
-        tokenizer: GFTokenizer
+        tokenizer: GFTokenizer,
+        modelVariant: ModelVariant? = nil
     ) -> ServerPromptCacheMatch {
         guard let entry,
               entry.domain == domain,
               entry.tools == request.tools,
+              entry.reasoning == request.reasoning,
               entry.kvPosition == entry.kvBackedTokenIDs.count,
               entry.kvPosition > 0,
               entry.uncommittedBoundaryTokenIDs.count == 1 else {
@@ -229,7 +233,9 @@ struct ServerPromptCache: Sendable {
             return matchTextContinuation(
                 entry: entry,
                 continuation: continuation,
-                tokenizer: tokenizer)
+                tokenizer: tokenizer,
+                modelVariant: modelVariant,
+                reasoning: request.reasoning)
         }
         return matchToolContinuation(
             entry: entry,
@@ -254,6 +260,9 @@ struct ServerPromptCache: Sendable {
         }
         if entry.tools != request.tools {
             return "tool set changed"
+        }
+        if entry.reasoning != request.reasoning {
+            return "reasoning mode changed"
         }
         return "entry inconsistent: kvPosition=\(entry.kvPosition) "
             + "kvBacked=\(entry.kvBackedTokenIDs.count) "
@@ -298,7 +307,9 @@ struct ServerPromptCache: Sendable {
     private func matchTextContinuation(
         entry: ServerPromptCacheEntry,
         continuation: [GFTokenizer.Message],
-        tokenizer: GFTokenizer
+        tokenizer: GFTokenizer,
+        modelVariant: ModelVariant?,
+        reasoning: ChatReasoning
     ) -> ServerPromptCacheMatch {
         guard continuation.count == 1,
               continuation[0].role == .user,
@@ -312,7 +323,10 @@ struct ServerPromptCache: Sendable {
                 + "stop=\(entry.assistantTurn.rawStopReason)")
             return .miss(.unsupportedContinuation)
         }
-        var bridge = tokenizer.encodeTextContinuation(userContent: content)
+        var bridge = tokenizer.encodeTextContinuation(
+            userContent: content,
+            modelVariant: modelVariant,
+            reasoning: reasoning)
         if entry.assistantTurn.rawStopReason == .maxTokens {
             bridge = entry.uncommittedBoundaryTokenIDs + bridge
         } else if bridge.first != entry.uncommittedBoundaryTokenIDs.first {
@@ -354,7 +368,8 @@ struct ServerPromptCache: Sendable {
                 cachedMessages: entry.inputMessages,
                 assistant: entry.assistantTurn.message,
                 incomingMessages: request.messages,
-                tools: request.tools)
+                tools: request.tools,
+                reasoning: request.reasoning)
         } catch {
             // Naming the thrown error is what this flag is for: the encoder
             // rejects for several distinct structural reasons, and the client

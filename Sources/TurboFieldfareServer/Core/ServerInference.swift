@@ -480,6 +480,7 @@ enum ServerRequestImages {
 public actor ServerModelSession: ServerInferenceBackend {
     /// Chat dialect of the loaded tokenizer; drives request-validation rules.
     public nonisolated let chatDialect: ChatDialect
+    public nonisolated let modelVariant: ModelVariant
     /// Registry-derived API model identifier used when --model-id is absent.
     public nonisolated var defaultModelID: String {
         registryModelID
@@ -665,6 +666,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.model = model
         self.tokenizer = tokenizer
         self.chatDialect = tokenizer.dialect
+        self.modelVariant = model.config.variant
         self.registryModelID = Self.registryModelID(
             for: model.config.variant,
             fallback: model.modelID)
@@ -803,7 +805,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         let bridge = try tokenizer.encodeMultimodalUserContinuation(
             textAndImages: parts,
             imageTokenCounts: images.map(\.softTokenCount),
-            family: model.config.family)
+            family: model.config.family,
+            modelVariant: model.config.variant,
+            reasoning: request.reasoning)
         var spans: [MultimodalImageSpan] = []
         for (range, image) in zip(bridge.imageTokenRanges, images) {
             try Task.checkCancellation()
@@ -841,7 +845,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                 featuresByID: features,
                 tokenizer: tokenizer,
                 tools: request.tools,
-                family: model.config.family)
+                family: model.config.family,
+                modelVariant: model.config.variant,
+                reasoning: request.reasoning)
         } catch let error as MultimodalPromptRendererError {
             throw Self.clientError(for: error) ?? error
         }
@@ -907,7 +913,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 domain: promptCacheDomain,
                 request: request,
                 renderedPromptIDs: renderedTextIDs,
-                tokenizer: tokenizer)
+                tokenizer: tokenizer,
+                modelVariant: model.config.variant)
         }
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart
@@ -1118,9 +1125,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         if usesToolTemplate(request) {
             promptIDs = try tokenizer.encodeToolChat(
                 messages: request.messages,
-                tools: request.tools)
+                tools: request.tools,
+                reasoning: request.reasoning)
         } else {
-            let rendered = try tokenizer.applyChatTemplate(request.messages)
+            let rendered = try tokenizer.applyChatTemplate(
+                request.messages,
+                modelVariant: model.config.variant,
+                reasoning: request.reasoning)
             promptIDs = tokenizer.encode(rendered, addBOS: false)
         }
         guard promptIDs.count < maxContext else {

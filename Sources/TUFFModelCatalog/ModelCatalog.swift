@@ -426,8 +426,8 @@ public enum TUFFModelCatalog {
         installedBytes: 19_546_491_213,
         reserveBytes: oneGiB)
 
-    /// The descriptor is public for the installer while E4B qualification is
-    /// underway. It joins `all` only once runtime and ingress support land.
+    /// Small text-only launch model. Image and audio remain intentionally
+    /// absent until separately packaged add-ons pass their own qualification.
     public static let gemma4_E4B = TUFFModelDescriptor(
         id: .gemma4_E4B,
         selector: "gemma4-e4b",
@@ -451,7 +451,9 @@ public enum TUFFModelCatalog {
                 slidingWindowCapacityTokens: 512)),
         runtimeDefaults: TUFFModelRuntimeDefaults(
             contextTokens: 8_192,
-            expertCacheSlots: 0,
+            // Dense execution ignores expert residency, but the shared v1
+            // runtime contract still requires a valid slot count.
+            expertCacheSlots: 16,
             temperature: 1.0,
             topK: 64,
             topP: 0.95),
@@ -531,7 +533,11 @@ public enum TUFFModelCatalog {
                 minimumUnifiedMemoryBytes: eightGiB,
                 minimumAppleSiliconGeneration: 2))])
 
-    public static let all: [TUFFModelDescriptor] = [gemma4_26B_A4B, qwen36_35B_A3B]
+    public static let all: [TUFFModelDescriptor] = [
+        gemma4_E4B,
+        gemma4_26B_A4B,
+        qwen36_35B_A3B,
+    ]
     public static let `default` = gemma4_26B_A4B
 
     public static func model(id: TUFFModelID) -> TUFFModelDescriptor? {

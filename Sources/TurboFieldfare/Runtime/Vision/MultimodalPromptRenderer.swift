@@ -87,7 +87,9 @@ public enum MultimodalPromptRenderer {
         featuresByID: [UUID: VisionFeatures],
         tokenizer: GFTokenizer,
         tools: [GFTokenizer.FunctionDefinition] = [],
-        family: ModelFamily = .gemma4
+        family: ModelFamily = .gemma4,
+        modelVariant: ModelVariant? = nil,
+        reasoning: ChatReasoning = .off
     ) throws -> MultimodalPrefillInput {
         let policy = FamilyPolicy.forFamily(family)
         guard !messages.isEmpty else { throw MultimodalPromptRendererError.emptyMessages }
@@ -138,9 +140,13 @@ public enum MultimodalPromptRenderer {
         if usesToolTemplate {
             templateTokens = try tokenizer.encodeToolChat(
                 messages: tokenizerMessages,
-                tools: tools)
+                tools: tools,
+                reasoning: reasoning)
         } else {
-            let rendered = try tokenizer.applyChatTemplate(tokenizerMessages)
+            let rendered = try tokenizer.applyChatTemplate(
+                tokenizerMessages,
+                modelVariant: modelVariant,
+                reasoning: reasoning)
             templateTokens = tokenizer.encode(rendered, addBOS: false)
         }
         let placeholders = templateTokens.indices.filter {

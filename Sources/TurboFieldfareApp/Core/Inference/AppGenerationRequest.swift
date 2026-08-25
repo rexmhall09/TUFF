@@ -10,6 +10,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var imageAttachments: [AppImageAttachment]
     public var maxNewTokens: Int
     public var maxContextTokens: Int
+    public var reasoning: ChatReasoning
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
@@ -22,6 +23,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 imageAttachments: [AppImageAttachment] = [],
                 maxNewTokens: Int = 4_096,
                 maxContextTokens: Int = 4096,
+                reasoning: ChatReasoning = .off,
                 temperature: Float = 0.2,
                 topK: Int? = 64,
                 topP: Float? = 0.95,
@@ -33,6 +35,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
         self.imageAttachments = imageAttachments
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
+        self.reasoning = reasoning
         self.temperature = temperature
         self.topK = topK
         self.topP = topP

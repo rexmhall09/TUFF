@@ -52,8 +52,9 @@ public func run(args: Args,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
-        let modelFamily = try ManifestReader.resolveArchitecture(
-            directoryURL: modelURL).family
+        let architecture = try ManifestReader.resolveArchitecture(
+            directoryURL: modelURL)
+        let modelFamily = architecture.family
         let input = try parseInput(args: args)
         var selectedDevice: MTLDevice?
         if input.hasImages {
@@ -74,7 +75,11 @@ public func run(args: Args,
         case .messages(let messages):
             multimodalMessages = nil
             promptIds = tokenizer.encode(
-                try tokenizer.applyChatTemplate(messages), addBOS: false)
+                try tokenizer.applyChatTemplate(
+                    messages,
+                    modelVariant: architecture.variant,
+                    reasoning: args.thinking),
+                addBOS: false)
         case .multimodal(let messages, let images):
             multimodalMessages = messages
             imageURLs = images
@@ -113,7 +118,9 @@ public func run(args: Args,
         if args.prefillChunkTokensAuto {
             let promptTokens = try estimatedPromptTokens(
                 input: input, tokenizer: tokenizer, device: device,
-                family: modelFamily)
+                family: modelFamily,
+                modelVariant: architecture.variant,
+                reasoning: args.thinking)
             effectiveArgs.prefillChunkTokens =
                 PrefillRuntimeConfig.autoChunkTokens(promptTokens: promptTokens)
             if !args.quiet {
@@ -230,7 +237,9 @@ public func run(args: Args,
                 messages: multimodalMessages,
                 featuresByID: features,
                 tokenizer: tokenizer,
-                family: model.config.family)
+                family: model.config.family,
+                modelVariant: model.config.variant,
+                reasoning: args.thinking)
             promptIds = rendered.effectiveTokenIDs
             multimodalInput = rendered
             guard promptIds.count < args.maxContext else {
@@ -335,13 +344,18 @@ func estimatedPromptTokens(
     input: PromptInput,
     tokenizer: GFTokenizer,
     device: MTLDevice,
-    family: ModelFamily = .gemma4
+    family: ModelFamily = .gemma4,
+    modelVariant: ModelVariant? = nil,
+    reasoning: ChatReasoning = .off
 ) throws -> Int {
     switch input {
     case .raw(let text):
         return tokenizer.encode(text, addBOS: true).count
     case .messages(let messages):
-        return tokenizer.encode(try tokenizer.applyChatTemplate(messages),
+        return tokenizer.encode(try tokenizer.applyChatTemplate(
+                                    messages,
+                                    modelVariant: modelVariant,
+                                    reasoning: reasoning),
                                 addBOS: false).count
     case .multimodal(let messages, let images):
         var total = 0

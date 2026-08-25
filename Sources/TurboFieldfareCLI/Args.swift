@@ -10,6 +10,7 @@ public struct Args: Equatable, Sendable {
     public var visionResidency: VisionResidencyPolicy
     public var maxNew: Int
     public var maxContext: Int
+    public var thinking: ChatReasoning
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
@@ -35,6 +36,7 @@ public struct Args: Equatable, Sendable {
                 visionResidency: VisionResidencyPolicy = .defaultPolicy,
                 maxNew: Int = 1_024,
                 maxContext: Int = 8192,
+                thinking: ChatReasoning = .off,
                 temperature: Float = 0.2,
                 topK: Int? = 64,
                 topP: Float? = 0.95,
@@ -57,6 +59,7 @@ public struct Args: Equatable, Sendable {
         self.visionResidency = visionResidency
         self.maxNew = maxNew
         self.maxContext = maxContext
+        self.thinking = thinking
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
@@ -103,7 +106,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 
 extension Args {
     public static let usage = """
-    TUFFCLI — Gemma 4 26B-A4B / Qwen3.6 35B-A3B text generation
+    TUFFCLI — Gemma 4 / Qwen3.6 text generation
 
     usage: TUFFCLI --model <dir>
            (--prompt <string> | --chat-prompt <string> | --messages-file <path>) [options]
@@ -122,6 +125,7 @@ extension Args {
     options:
       --max-new <int>            Generated-token limit (default 1024).
       --max-context <int>        Context limit in tokens (default 8192).
+      --thinking <off|on>        Native chat reasoning (default off).
       --temperature <float>      Sampling temperature (default 0.2; 0 = greedy).
       --top-k <int>              Top-k truncation, 1...256 (default 64; 0 = off).
       --top-p <float>            Nucleus truncation (default 0.95).
@@ -190,6 +194,7 @@ extension Args {
         var visionResidency: VisionResidencyPolicy = .defaultPolicy
         var maxNew = 1_024
         var maxContext = 8192
+        var thinking: ChatReasoning = .off
         var temperature: Float = 0.2
         var topK: Int? = 64
         var topP: Float? = 0.95
@@ -244,6 +249,12 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 maxContext = parsed
+            case "--thinking":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = ChatReasoning(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                thinking = parsed
             case "--temperature":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed >= 0 else {
@@ -332,6 +343,9 @@ extension Args {
         if prompt != nil, !images.isEmpty {
             throw ArgsError.mutuallyExclusive("--prompt", "--image")
         }
+        if prompt != nil, thinking != .off {
+            throw ArgsError.mutuallyExclusive("--prompt", "--thinking")
+        }
         let minimumSlots = RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
         if !images.isEmpty, expertCacheSlots < minimumSlots {
             throw ArgsError.imagePromptNeedsExpertCacheSlots(
@@ -362,6 +376,7 @@ extension Args {
                              visionResidency: visionResidency,
                              maxNew: maxNew,
                              maxContext: maxContext,
+                             thinking: thinking,
                              temperature: temperature,
                              topK: topK,
                              topP: topP,

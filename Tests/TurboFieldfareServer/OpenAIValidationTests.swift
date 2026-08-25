@@ -13,6 +13,16 @@ struct OpenAIValidationTests {
         #expect(validated.includeUsage)
         #expect(validated.tools.count == 1)
         #expect(validated.maximumCompletionTokens == 4096)
+        #expect(validated.reasoning == .off)
+    }
+
+    @Test func enableThinkingSelectsNativeReasoning() throws {
+        let data = Data(#"""
+        {"model":"m","messages":[{"role":"user","content":"x"}],"enable_thinking":true}
+        """#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        #expect(validated.reasoning == .on)
     }
 
     @Test func capturedOpenCodeToolResultValidates() throws {

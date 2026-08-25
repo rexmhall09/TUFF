@@ -75,6 +75,11 @@ public struct DecodeChatTurn: Codable, Sendable, Equatable {
     }
 }
 
+public enum DecodeChatReasoning: String, Codable, Sendable, Equatable {
+    case off
+    case on
+}
+
 public struct DecodeGenerationRequest: Codable, Sendable {
     public var prompt: String
     /// Prior turns, oldest first. Decoded as empty when absent, so an older
@@ -83,6 +88,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var imageAttachments: [DecodeImageAttachment]?
     public var maxNewTokens: Int
     public var maxContextTokens: Int
+    /// Decoded as off for compatibility with v1 app clients.
+    public var reasoning: DecodeChatReasoning
     public var temperature: Float
     /// Carried explicitly, and optional because nil means "no cut". Leaving
     /// them off the wire did not fall back to the sender's settings: the
@@ -104,6 +111,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
             [DecodeImageAttachment].self, forKey: .imageAttachments)
         maxNewTokens = try container.decode(Int.self, forKey: .maxNewTokens)
         maxContextTokens = try container.decode(Int.self, forKey: .maxContextTokens)
+        reasoning = try container.decodeIfPresent(
+            DecodeChatReasoning.self, forKey: .reasoning) ?? .off
         temperature = try container.decode(Float.self, forKey: .temperature)
         topK = try container.decodeIfPresent(Int.self, forKey: .topK)
         topP = try container.decodeIfPresent(Float.self, forKey: .topP)
@@ -116,6 +125,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public init(prompt: String, history: [DecodeChatTurn] = [],
                 imageAttachments: [DecodeImageAttachment]? = nil,
                 maxNewTokens: Int, maxContextTokens: Int,
+                reasoning: DecodeChatReasoning = .off,
                 temperature: Float, topK: Int? = nil, topP: Float? = nil,
                 repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
@@ -125,6 +135,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.imageAttachments = imageAttachments
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
+        self.reasoning = reasoning
         self.temperature = temperature
         self.topK = topK
         self.topP = topP

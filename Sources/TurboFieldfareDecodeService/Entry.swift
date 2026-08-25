@@ -145,6 +145,8 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         },
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
+                        reasoning: ChatReasoning(
+                            rawValue: request.reasoning.rawValue) ?? .off,
                         temperature: request.temperature,
                         topK: request.topK,
                         topP: request.topP,

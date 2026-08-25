@@ -102,6 +102,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         },
                         maxNewTokens: request.maxNewTokens,
                         maxContextTokens: request.maxContextTokens,
+                        reasoning: DecodeChatReasoning(
+                            rawValue: request.reasoning.rawValue) ?? .off,
                         temperature: request.temperature,
                         topK: request.topK,
                         topP: request.topP,

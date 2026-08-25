@@ -108,7 +108,8 @@ struct PromptComposerView: View {
                     || model.imageAttachments.count
                         >= model.maximumImageAttachments)
                 .help("Add images")
-            } else if model.isModelInstalled && model.isVisionRuntimeSupported {
+            } else if model.selectedDescriptor.supportsImageInput
+                        && model.isModelInstalled && model.isVisionRuntimeSupported {
                 imageSupportAction
             }
             promptTips

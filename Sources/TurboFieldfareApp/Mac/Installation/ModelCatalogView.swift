@@ -48,7 +48,7 @@ struct ModelCatalogRow: View {
             }
             message
             actions
-            if install.isInstalled {
+            if install.isInstalled && install.descriptor.supportsImageInput {
                 visionSupport
             }
         }

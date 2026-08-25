@@ -838,6 +838,10 @@ struct ServerPromptCacheTests {
         #expect(cache.entryMissReason(domain: domain, request: withTools)
             .contains("tool set changed"))
 
+        let thinking = request(messages: initial.messages, reasoning: .on)
+        #expect(cache.entryMissReason(domain: domain, request: thinking)
+            .contains("reasoning mode changed"))
+
         #expect(cache.historyMissReason(entry: entry, request: initial)
             .contains("history did not extend"))
 
@@ -853,7 +857,8 @@ struct ServerPromptCacheTests {
     private func request(
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition] = [],
-        imageIdentities: [[String]] = []
+        imageIdentities: [[String]] = [],
+        reasoning: ChatReasoning = .off
     ) -> ValidatedChatRequest {
         ValidatedChatRequest(
             messages: messages,
@@ -862,7 +867,8 @@ struct ServerPromptCacheTests {
             stream: false,
             includeUsage: false,
             generationConfig: GenerationConfig(maxNewTokens: 16, temperature: 0),
-            maximumCompletionTokens: 16)
+            maximumCompletionTokens: 16,
+            reasoning: reasoning)
     }
 
     private func rawResult(

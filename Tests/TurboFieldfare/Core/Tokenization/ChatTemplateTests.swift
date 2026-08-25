@@ -25,6 +25,37 @@ struct ChatTemplateTests {
         #expect(p.components(separatedBy: "Hi").count - 1 == 1)
     }
 
+    @Test("E4B thinking off matches the pinned checkpoint suffix")
+    func e4bThinkingOff() throws {
+        let p = try tok.applyChatTemplate(
+            [Message(role: .user, content: "Hi")],
+            modelVariant: .gemma4_E4B,
+            reasoning: .off)
+        #expect(p == "<bos><|turn>user\nHi<turn|>\n<|turn>model\n")
+        #expect(!p.contains("<|think|>"))
+        #expect(!p.contains("<|channel>thought"))
+    }
+
+    @Test("Gemma native thinking control leads the first system turn")
+    func thinkingOn() throws {
+        let p = try tok.applyChatTemplate([
+            Message(role: .system, content: "Be terse."),
+            Message(role: .user, content: "Hi"),
+        ], modelVariant: .gemma4_E4B, reasoning: .on)
+        #expect(p == "<bos><|turn>system\n<|think|>\nBe terse.<turn|>\n"
+            + "<|turn>user\nHi<turn|>\n<|turn>model\n")
+        #expect(p.components(separatedBy: "<|think|>").count - 1 == 1)
+    }
+
+    @Test("Gemma thinking creates a control-only system turn when needed")
+    func thinkingOnWithoutSystemMessage() throws {
+        let p = try tok.applyChatTemplate(
+            [Message(role: .user, content: "Hi")],
+            reasoning: .on)
+        #expect(p.hasPrefix("<bos><|turn>system\n<|think|>\n<turn|>\n"))
+        #expect(p.hasSuffix("<|turn>model\n"))
+    }
+
     @Test("Multi-turn closes prior turns and leaves assistant open")
     func multiTurn() throws {
         let p = try tok.applyChatTemplate([

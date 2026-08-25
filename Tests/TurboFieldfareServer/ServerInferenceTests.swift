@@ -11,6 +11,9 @@ import UniformTypeIdentifiers
 struct ServerVisionCapabilityTests {
     @Test func defaultAPIModelIDsComeFromTheSharedRegistry() {
         #expect(ServerModelSession.registryModelID(
+            for: .gemma4_E4B, fallback: "fallback")
+            == "gemma-4-e4b-it")
+        #expect(ServerModelSession.registryModelID(
             for: .gemma4_26B_A4B, fallback: "fallback")
             == "gemma-4-26b-a4b-it")
         #expect(ServerModelSession.registryModelID(

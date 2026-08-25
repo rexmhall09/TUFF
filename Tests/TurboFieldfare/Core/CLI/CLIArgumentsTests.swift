@@ -12,6 +12,7 @@ import TurboFieldfare
         // 8K as of 2026-08-17, so an image and its prompt fit without anyone
         // passing --max-context.
         #expect(arguments.maxContext == 8192)
+        #expect(arguments.thinking == .off)
         #expect(arguments.temperature == 0.2)
         #expect(arguments.topK == 64)
         #expect(arguments.topP == 0.95)
@@ -69,6 +70,7 @@ import TurboFieldfare
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
+            "--thinking",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--expert-cache-slots",
             "--expert-cache-policy", "--prefill", "--prefill-chunk-tokens",
@@ -78,6 +80,26 @@ import TurboFieldfare
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
         #expect(options == expected)
+    }
+
+    @Test func thinkingParsesForChatAndIsRejectedForRawCompletion() throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--chat-prompt", "hi",
+            "--thinking", "on",
+        ])
+        #expect(arguments.thinking == .on)
+
+        #expect(throws: ArgsError.mutuallyExclusive("--prompt", "--thinking")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi", "--thinking", "on",
+            ])
+        }
+        #expect(throws: ArgsError.invalidValue(flag: "--thinking", value: "medium")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--chat-prompt", "hi",
+                "--thinking", "medium",
+            ])
+        }
     }
 
     @Test func runtimeOptionsReachTypedConfiguration() throws {

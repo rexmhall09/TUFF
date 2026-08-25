@@ -149,6 +149,7 @@ import TurboFieldfareDecodeProtocol
             imageAttachments: [attachment],
             maxNewTokens: 16,
             maxContextTokens: 4096,
+            reasoning: .on,
             temperature: 0)
         let pipe = Pipe()
         try pipe.fileHandleForWriting.write(contentsOf: DecodeFrameCodec.encode(request))
@@ -158,6 +159,7 @@ import TurboFieldfareDecodeProtocol
             DecodeGenerationRequest.self,
             from: pipe.fileHandleForReading)
         #expect(decoded.imageAttachments == [attachment])
+        #expect(decoded.reasoning == .on)
     }
 
 }

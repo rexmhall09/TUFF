@@ -324,7 +324,8 @@ actor RealInferenceSession {
     static func renderConversation(
         request: AppGenerationRequest,
         tokenizer: GFTokenizer,
-        maxContext: Int
+        maxContext: Int,
+        modelVariant: ModelVariant? = nil
     ) throws -> RenderedConversation {
         func encode(_ turns: ArraySlice<AppChatTurn>) throws -> [Int32] {
             var messages: [GFTokenizer.Message] = []
@@ -336,7 +337,11 @@ actor RealInferenceSession {
             }
             messages.append(GFTokenizer.Message(role: .user, content: request.prompt))
             return tokenizer.encode(
-                try tokenizer.applyChatTemplate(messages), addBOS: false)
+                try tokenizer.applyChatTemplate(
+                    messages,
+                    modelVariant: modelVariant,
+                    reasoning: request.reasoning),
+                addBOS: false)
         }
 
         var dropped = 0
@@ -365,7 +370,8 @@ actor RealInferenceSession {
         features: [UUID: VisionFeatures],
         tokenizer: GFTokenizer,
         maxContext: Int,
-        family: ModelFamily = .gemma4
+        family: ModelFamily = .gemma4,
+        modelVariant: ModelVariant? = nil
     ) throws -> RenderedMultimodalConversation {
         var currentContent = request.imageAttachments.map {
             MultimodalContentPart.image(id: $0.id)
@@ -386,7 +392,9 @@ actor RealInferenceSession {
                 messages: messages,
                 featuresByID: features,
                 tokenizer: tokenizer,
-                family: family)
+                family: family,
+                modelVariant: modelVariant,
+                reasoning: request.reasoning)
         }
 
         var dropped = 0
@@ -446,7 +454,7 @@ actor RealInferenceSession {
                 forceLogitsHead: Self.forceLogitsHead(for: request))
             guard let loadedKey else { throw AppInferenceError.modelNotLoaded }
             guard loadedKey == requestKey else { throw AppInferenceError.reloadRequired }
-            guard let runner, let tokenizer, let ctx, let scratch else {
+            guard let runner, let tokenizer, let ctx, let scratch, let model else {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
 
@@ -457,12 +465,13 @@ actor RealInferenceSession {
                 let rendered = try Self.renderConversation(
                     request: request,
                     tokenizer: tokenizer,
-                    maxContext: runner.maxContext)
+                    maxContext: runner.maxContext,
+                    modelVariant: model.config.variant)
                 promptIds = rendered.tokens
                 multimodalInput = nil
                 conversationTrim = rendered.trim
             } else {
-                guard let visionRuntime, let model else {
+                guard let visionRuntime else {
                     throw AppInferenceError.invalidRequest(
                         "Image support is unavailable: "
                             + (visionRuntimeError.map(String.init(describing:))
@@ -491,7 +500,8 @@ actor RealInferenceSession {
                     features: features,
                     tokenizer: tokenizer,
                     maxContext: runner.maxContext,
-                    family: model.config.family)
+                    family: model.config.family,
+                    modelVariant: model.config.variant)
                 promptIds = rendered.input.effectiveTokenIDs
                 multimodalInput = rendered.input
                 conversationTrim = rendered.trim

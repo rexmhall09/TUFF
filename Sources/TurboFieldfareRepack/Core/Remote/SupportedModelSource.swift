@@ -61,8 +61,8 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
-    public static let all: [SupportedModelSource] = [gemma4E4B]
-        + TUFFModelCatalog.all.map(SupportedModelSource.init(catalog:))
+    public static let all: [SupportedModelSource] =
+        TUFFModelCatalog.all.map(SupportedModelSource.init(catalog:))
 
     public static func named(_ name: String) -> SupportedModelSource? {
         all.first { $0.name == name || $0.aliases.contains(name) }
