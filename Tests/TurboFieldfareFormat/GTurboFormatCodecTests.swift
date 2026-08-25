@@ -48,6 +48,33 @@ private enum FormatFixture {
         embedding: quantSlot, attention: quantSlot, router: quantSlot,
         sharedExpert: quantSlot, routedExpert: quantSlot)
 
+    static func denseManifest(minor: Int = GTurboFormatV1.featureVersionMinor)
+        -> GTurboManifestV1 {
+        GTurboManifestV1(
+            versionMinor: minor,
+            flags: ["denseFFN": true],
+            modelID: "fixture/dense",
+            sourceSnapshotHash: "snapshot",
+            arch: GTurboManifestArchV1(
+                hiddenSize: 64, ffnIntermediate: 128, moeIntermediateSize: 0,
+                numHeads: 4, numKVHeads: 2, numFullKVHeads: 1,
+                headDim: 16, fullHeadDim: 32, vocabSize: 1024,
+                slidingWindow: 128, finalLogitSoftcap: 30,
+                ropeTheta: 10_000, fullRopeTheta: 1_000_000,
+                partialRotaryFactor: 0.25, numLayers: 1, numExperts: 0,
+                topKExperts: 0, tieWordEmbeddings: true, attentionKEqV: true,
+                hiddenActivation: "gelu_pytorch_tanh", fullAttentionLayerMask: [0],
+                variant: "fixture-dense", feedForwardKind: "dense"),
+            quant: quant,
+            files: [
+                "model_weights.bin": GTurboManifestFileV1(size: 16_448, sha256: zeroSHA),
+            ],
+            expertsPerLayer: 0,
+            numLayers: 1,
+            expertStride: 0,
+            bitWidthOverridesHonored: 0)
+    }
+
     static func layout(explicitIDs: Bool = true,
                        explicitRanks: Bool = true) -> GTurboPackedExpertsLayoutV1 {
         let tensor = GTurboSubTensorV1(
@@ -122,6 +149,33 @@ private enum FormatFixture {
         root["futureMetadata"] = ["ignored": true]
         let changed = try JSONSerialization.data(withJSONObject: root)
         #expect(try GTurboManifestCodec.decode(changed).versionMinor == 9)
+    }
+
+    @Test func acceptsDenseFFNOnlyWithExplicitV11Layout() throws {
+        let manifest = FormatFixture.denseManifest()
+        #expect(try GTurboManifestCodec.decode(
+            GTurboManifestCodec.encode(manifest)) == manifest)
+        #expect(throws: GTurboFormatError.self) {
+            try GTurboManifestCodec.encode(FormatFixture.denseManifest(minor: 0))
+        }
+    }
+
+    @Test func acceptsMXFP4FeatureFlagAtV11() throws {
+        let base = FormatFixture.manifest(minor: GTurboFormatV1.featureVersionMinor)
+        let manifest = GTurboManifestV1(
+            versionMinor: base.versionMinor,
+            flags: base.flags.merging(["mxfp4Weights": true]) { _, new in new },
+            modelID: base.modelID,
+            sourceSnapshotHash: base.sourceSnapshotHash,
+            arch: base.arch,
+            quant: base.quant,
+            files: base.files,
+            expertsPerLayer: base.expertsPerLayer,
+            numLayers: base.numLayers,
+            expertStride: base.expertStride,
+            bitWidthOverridesHonored: base.bitWidthOverridesHonored)
+        #expect(try GTurboManifestCodec.decode(
+            GTurboManifestCodec.encode(manifest)).flags["mxfp4Weights"] == true)
     }
 
     @Test(arguments: ["sourceSnapshotHash", "quant", "bitWidthOverridesHonored"])

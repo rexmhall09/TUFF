@@ -32,4 +32,18 @@ import Testing
             #expect(addon.source.repoID == model.source.repoID)
         }
     }
+
+    @Test func architectureProfilesAreIndependentFromCheckpointCapabilities() {
+        let gemma = TUFFModelCatalog.gemma4_26B_A4B
+        let qwen = TUFFModelCatalog.qwen36_35B_A3B
+
+        #expect(gemma.architecture.id == .gemma4_26B_A4B)
+        #expect(qwen.architecture.id == .qwen36_35B_A3B)
+        #expect(gemma.architecture.feedForwardKind == .mixtureOfExperts)
+        #expect(qwen.architecture.feedForwardKind == .mixtureOfExperts)
+        #expect(gemma.architecture.weightLayout == .affine)
+        #expect(qwen.architecture.weightLayout == .affine)
+        #expect(gemma.capabilities.contains(.imageInput))
+        #expect(qwen.capabilities.contains(.reasoning))
+    }
 }

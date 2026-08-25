@@ -3,7 +3,10 @@ import Foundation
 package enum GTurboFormatV1 {
     package static let magic = "GTURBO"
     package static let versionMajor = 1
+    /// Legacy Gemma/Qwen writers remain on 1.0. Layout features introduced by
+    /// v2 opt into 1.1 with an explicit flag, preserving existing manifests.
     package static let versionMinor = 0
+    package static let featureVersionMinor = 1
     package static let alignmentBytes: UInt64 = 16_384
     package static let residentHeaderBytes = 24
     package static let residentEntryBytes = 72
@@ -11,6 +14,12 @@ package enum GTurboFormatV1 {
 
     package static let knownFlags: Set<String> = [
         "streamingPresent", "turboQuantKV", "aneSharedExpert",
+        "denseFFN", "mxfp4Weights",
+    ]
+
+    package static let minimumMinorByFlag: [String: Int] = [
+        "denseFFN": featureVersionMinor,
+        "mxfp4Weights": featureVersionMinor,
     ]
 
     package enum DType: UInt8, Sendable {

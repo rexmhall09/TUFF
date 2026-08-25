@@ -11,6 +11,38 @@ public enum TUFFModelFamily: String, Codable, Sendable {
     case qwen36
 }
 
+public enum TUFFArchitectureID: String, Codable, Sendable {
+    case gemma4_26B_A4B = "gemma4-26b-a4b"
+    case qwen36_35B_A3B = "qwen36-35b-a3b"
+}
+
+public enum TUFFFeedForwardKind: String, Codable, Sendable {
+    case dense
+    case mixtureOfExperts = "moe"
+}
+
+public enum TUFFWeightLayout: String, Codable, Sendable {
+    case affine
+    case mxfp4
+}
+
+public struct TUFFArchitectureProfile: Codable, Equatable, Sendable {
+    public let id: TUFFArchitectureID
+    public let family: TUFFModelFamily
+    public let feedForwardKind: TUFFFeedForwardKind
+    public let weightLayout: TUFFWeightLayout
+
+    public init(id: TUFFArchitectureID,
+                family: TUFFModelFamily,
+                feedForwardKind: TUFFFeedForwardKind,
+                weightLayout: TUFFWeightLayout) {
+        self.id = id
+        self.family = family
+        self.feedForwardKind = feedForwardKind
+        self.weightLayout = weightLayout
+    }
+}
+
 public enum TUFFReasoningControl: String, Codable, Sendable {
     case toggle
     case toggleWithPreservation
@@ -251,6 +283,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
     public let shortName: String
     public let summary: String
     public let family: TUFFModelFamily
+    public let architecture: TUFFArchitectureProfile
     public let installDirectoryName: String
     public let source: TUFFModelSource
     public let hardware: TUFFModelHardwareRequirements
@@ -267,6 +300,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
                 shortName: String,
                 summary: String,
                 family: TUFFModelFamily,
+                architecture: TUFFArchitectureProfile,
                 installDirectoryName: String,
                 source: TUFFModelSource,
                 hardware: TUFFModelHardwareRequirements,
@@ -282,6 +316,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         self.shortName = shortName
         self.summary = summary
         self.family = family
+        self.architecture = architecture
         self.installDirectoryName = installDirectoryName
         self.source = source
         self.hardware = hardware
@@ -364,6 +399,11 @@ public enum TUFFModelCatalog {
         summary: "26B total, 3.9B active. The original TurboFieldfare target; "
             + "smallest install and lowest resident footprint.",
         family: .gemma4,
+        architecture: TUFFArchitectureProfile(
+            id: .gemma4_26B_A4B,
+            family: .gemma4,
+            feedForwardKind: .mixtureOfExperts,
+            weightLayout: .affine),
         installDirectoryName: "gemma4.gturbo",
         source: gemmaSource,
         hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),
@@ -400,6 +440,11 @@ public enum TUFFModelCatalog {
         summary: "35B total, 3B active. Hybrid linear/full attention, so its "
             + "KV cache stays small at long context; larger install.",
         family: .qwen36,
+        architecture: TUFFArchitectureProfile(
+            id: .qwen36_35B_A3B,
+            family: .qwen36,
+            feedForwardKind: .mixtureOfExperts,
+            weightLayout: .affine),
         installDirectoryName: "qwen36.gturbo",
         source: qwenSource,
         hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),

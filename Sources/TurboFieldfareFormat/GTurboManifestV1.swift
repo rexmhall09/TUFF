@@ -37,6 +37,8 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     // they stay byte-identical to the pre-family format; a reader treats
     // absence as the Gemma 4 defaults.
     package let family: String?
+    package let variant: String?
+    package let feedForwardKind: String?
     package let attnOutputGate: Bool?
     package let attentionScale: Double?
     package let embeddingScaledBySqrtHidden: Bool?
@@ -59,6 +61,8 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  topKExperts: Int, tieWordEmbeddings: Bool, attentionKEqV: Bool,
                  hiddenActivation: String, fullAttentionLayerMask: [Int],
                  family: String? = nil,
+                 variant: String? = nil,
+                 feedForwardKind: String? = nil,
                  attnOutputGate: Bool? = nil,
                  attentionScale: Double? = nil,
                  embeddingScaledBySqrtHidden: Bool? = nil,
@@ -93,6 +97,8 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.hiddenActivation = hiddenActivation
         self.fullAttentionLayerMask = fullAttentionLayerMask
         self.family = family
+        self.variant = variant
+        self.feedForwardKind = feedForwardKind
         self.attnOutputGate = attnOutputGate
         self.attentionScale = attentionScale
         self.embeddingScaledBySqrtHidden = embeddingScaledBySqrtHidden
@@ -223,20 +229,55 @@ package enum GTurboManifestCodec {
         for flag in manifest.flags.keys where !GTurboFormatV1.knownFlags.contains(flag) {
             throw GTurboFormatError.invalid(field: "manifest.flags.\(flag)", reason: "unknown v1 flag")
         }
+        for (flag, minimumMinor) in GTurboFormatV1.minimumMinorByFlag
+        where manifest.flags[flag] == true && manifest.versionMinor < minimumMinor {
+            throw GTurboFormatError.invalid(
+                field: "manifest.flags.\(flag)",
+                reason: "requires format 1.\(minimumMinor) or newer")
+        }
+        let feedForwardKind = manifest.arch.feedForwardKind ?? "moe"
+        guard feedForwardKind == "moe" || feedForwardKind == "dense" else {
+            throw GTurboFormatError.invalid(
+                field: "manifest.arch.feedForwardKind", reason: "unknown feed-forward kind")
+        }
+        let isDense = feedForwardKind == "dense"
+        guard (manifest.flags["denseFFN"] == true) == isDense else {
+            throw GTurboFormatError.invalid(
+                field: "manifest.flags.denseFFN",
+                reason: "must match manifest.arch.feedForwardKind")
+        }
         guard !manifest.modelID.isEmpty,
-              manifest.numLayers > 0, manifest.expertsPerLayer > 0,
-              manifest.expertStride > 0,
-              manifest.expertStride % GTurboFormatV1.alignmentBytes == 0 else {
+              manifest.numLayers > 0 else {
             throw GTurboFormatError.invalid(field: "manifest", reason: "invalid dimensions or stride")
         }
-        guard manifest.arch.numLayers == manifest.numLayers,
-              manifest.arch.numExperts == manifest.expertsPerLayer else {
+        if isDense {
+            guard manifest.expertsPerLayer == 0,
+                  manifest.expertStride == 0,
+                  manifest.arch.numExperts == 0,
+                  manifest.arch.topKExperts == 0,
+                  manifest.arch.moeIntermediateSize == 0 else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch", reason: "dense FFN carries MoE metadata")
+            }
+        } else {
+            guard manifest.expertsPerLayer > 0,
+                  manifest.expertStride > 0,
+                  manifest.expertStride % GTurboFormatV1.alignmentBytes == 0,
+                  manifest.arch.numExperts == manifest.expertsPerLayer,
+                  manifest.arch.moeIntermediateSize > 0,
+                  manifest.arch.topKExperts > 0,
+                  manifest.arch.topKExperts <= manifest.arch.numExperts else {
+                throw GTurboFormatError.invalid(
+                    field: "manifest.arch", reason: "invalid MoE streaming metadata")
+            }
+        }
+        guard manifest.arch.numLayers == manifest.numLayers else {
             throw GTurboFormatError.invalid(
-                field: "manifest.arch", reason: "dimensions disagree with streaming metadata")
+                field: "manifest.arch", reason: "layer count disagrees with manifest")
         }
         let arch = manifest.arch
         guard arch.hiddenSize > 0, arch.ffnIntermediate > 0,
-              arch.moeIntermediateSize > 0, arch.numHeads > 0,
+              arch.numHeads > 0,
               arch.numKVHeads > 0, arch.numFullKVHeads > 0,
               arch.headDim > 0, arch.fullHeadDim > 0,
               arch.vocabSize > 0,
@@ -244,7 +285,6 @@ package enum GTurboManifestCodec {
               // an all-full/linear graph (Qwen 3.6) declares 0.
               arch.slidingWindow > 0 || !arch.fullAttentionLayerMask.contains(0),
               arch.slidingWindow >= 0,
-              arch.topKExperts > 0, arch.topKExperts <= arch.numExperts,
               arch.finalLogitSoftcap.isFinite,
               arch.ropeTheta.isFinite, arch.ropeTheta > 0,
               arch.fullRopeTheta.isFinite, arch.fullRopeTheta > 0,

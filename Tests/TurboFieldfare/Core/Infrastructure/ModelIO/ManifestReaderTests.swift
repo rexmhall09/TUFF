@@ -250,6 +250,73 @@ import Darwin
         }
     }
 
+    @Test func denseV11ArchitectureDoesNotRequireExpertFiles() throws {
+        let dense = ArchConfig(
+            hiddenSize: 64,
+            intermediateSize: 256,
+            moeIntermediateSize: 0,
+            numHeads: 4,
+            numKVHeads: 2,
+            numFullKVHeads: 1,
+            headDim: 16,
+            fullHeadDim: 32,
+            vocabSize: 1024,
+            slidingWindow: 256,
+            finalLogitSoftcap: 30,
+            ropeTheta: 10_000,
+            fullRopeTheta: 1_000_000,
+            partialRotaryFactor: 0.25,
+            numLayers: 2,
+            numExperts: 0,
+            topKExperts: 0,
+            tieWordEmbeddings: true,
+            attentionKEqV: true,
+            fullAttentionLayerMask: [0, 1],
+            hiddenActivation: "gelu_pytorch_tanh",
+            feedForwardKind: .dense)
+        let files = [
+            "model_weights.bin": [
+                "size": 1024,
+                "sha256": String(repeating: "0", count: 64),
+            ],
+        ]
+        let (dir, config) = try Self.writeToyManifest(
+            [
+                "versionMinor": 1,
+                "expertsPerLayer": 0,
+                "expertStride": 0,
+            ],
+            flags: ["denseFFN": true],
+            archOverrides: [
+                "feedForwardKind": "dense",
+                "numExperts": 0,
+                "topKExperts": 0,
+                "moeIntermediateSize": 0,
+            ],
+            filesOverride: files,
+            config: dense)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manifest = try ManifestReader.load(
+            directoryURL: dir, expecting: config)
+        #expect(manifest.arch.feedForwardKind == "dense")
+        #expect(manifest.files["packed_experts/layout.json"] == nil)
+    }
+
+    @Test func variantMismatchIsRejectedIndependentlyOfFamily() throws {
+        let (dir, toy) = try Self.writeToyManifest(
+            archOverrides: ["variant": ModelVariant.qwen36_35B_A3B.rawValue])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: toy)
+        } throws: { error in
+            guard case let ModelError.archMismatch(field, _, _) = error else {
+                return false
+            }
+            return field == "variant"
+        }
+    }
+
     @Test func nonPageAlignedExpertStrideThrows() throws {
         let (dir, toy) = try Self.writeToyManifest(["expertStride": 1024])
         defer { try? FileManager.default.removeItem(at: dir) }

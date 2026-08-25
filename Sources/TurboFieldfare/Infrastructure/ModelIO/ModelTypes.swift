@@ -10,6 +10,23 @@ public enum ModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
 }
 
+public enum ModelVariant: String, Sendable, Equatable {
+    case gemma4_26B_A4B = "gemma4-26b-a4b"
+    case qwen36_35B_A3B = "qwen36-35b-a3b"
+
+    static func legacyDefault(for family: ModelFamily) -> ModelVariant {
+        switch family {
+        case .gemma4: return .gemma4_26B_A4B
+        case .qwen36: return .qwen36_35B_A3B
+        }
+    }
+}
+
+public enum FeedForwardKind: String, Sendable, Equatable {
+    case dense
+    case mixtureOfExperts = "moe"
+}
+
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
 /// without linear-attention layers.
 public struct LinearAttentionConfig: Sendable, Equatable {
@@ -71,6 +88,10 @@ public struct ArchConfig: Sendable, Equatable {
     // Family-dependent extensions. Defaults describe Gemma 4 so that legacy
     // manifests (which omit them) validate unchanged.
     public let family: ModelFamily
+    /// Checkpoint architecture identity. Unlike `family`, this distinguishes
+    /// dense and MoE variants that share tokenizer and prompt behavior.
+    public let variant: ModelVariant
+    public let feedForwardKind: FeedForwardKind
     /// Full-attention q_proj emits `2 * numHeads * fullHeadDim` rows: per-head
     /// [query ; gate] halves. Attention output is multiplied by sigmoid(gate)
     /// before o_proj.
@@ -119,6 +140,8 @@ public struct ArchConfig: Sendable, Equatable {
         fullAttentionLayerMask: [UInt8],
         hiddenActivation: String,
         family: ModelFamily = .gemma4,
+        variant: ModelVariant? = nil,
+        feedForwardKind: FeedForwardKind = .mixtureOfExperts,
         attnOutputGate: Bool = false,
         attentionScale: Double = 1.0,
         embeddingScaledBySqrtHidden: Bool = true,
@@ -150,6 +173,8 @@ public struct ArchConfig: Sendable, Equatable {
         self.fullAttentionLayerMask = fullAttentionLayerMask
         self.hiddenActivation = hiddenActivation
         self.family = family
+        self.variant = variant ?? ModelVariant.legacyDefault(for: family)
+        self.feedForwardKind = feedForwardKind
         self.attnOutputGate = attnOutputGate
         self.attentionScale = attentionScale
         self.embeddingScaledBySqrtHidden = embeddingScaledBySqrtHidden
@@ -224,6 +249,7 @@ public struct ArchConfig: Sendable, Equatable {
         fullAttentionLayerMask: Self.qwen36LayerMask(),
         hiddenActivation: "silu",
         family: .qwen36,
+        variant: .qwen36_35B_A3B,
         attnOutputGate: true,
         attentionScale: 0.0625,   // 256^-0.5
         embeddingScaledBySqrtHidden: false,
@@ -249,6 +275,13 @@ public struct ArchConfig: Sendable, Equatable {
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
+    ]
+
+    /// Variant registry used by v1.1 manifests. `knownArchitectures` remains
+    /// for legacy 1.0 family-only installs until all call sites route here.
+    public static let registeredArchitectures: [ModelVariant: ArchConfig] = [
+        .gemma4_26B_A4B: .gemma4_26B_A4B,
+        .qwen36_35B_A3B: .qwen36_35B_A3B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for

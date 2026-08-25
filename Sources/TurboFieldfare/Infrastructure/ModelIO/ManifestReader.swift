@@ -32,6 +32,8 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     // Family extensions. Optional so legacy Gemma manifests decode unchanged;
     // absent values validate against the Gemma defaults in `ArchConfig`.
     public let family: String?
+    public let variant: String?
+    public let feedForwardKind: String?
     public let attnOutputGate: Bool?
     public let attentionScale: Double?
     public let embeddingScaledBySqrtHidden: Bool?
@@ -148,7 +150,9 @@ public enum ManifestReader {
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
         }
-        for f in requiredFiles {
+        let required = expected.feedForwardKind == .dense
+            ? ["model_weights.bin"] : requiredFiles
+        for f in required {
             if m.files[f] == nil { throw ModelError.missingFile(name: f) }
         }
     }
@@ -156,7 +160,7 @@ public enum ManifestReader {
     /// A manifest matching one of the shipped production baselines must carry
     /// quantization metadata; toy/synthetic manifests may omit it.
     private static func isProductionArch(_ expected: ArchConfig) -> Bool {
-        for baseline in ArchConfig.knownArchitectures.values {
+        for baseline in ArchConfig.registeredArchitectures.values {
             if expected.numLayers == baseline.numLayers,
                expected.hiddenSize == baseline.hiddenSize {
                 return true
@@ -224,6 +228,14 @@ public enum ManifestReader {
         try check("family",
                   a.family ?? ModelFamily.gemma4.rawValue,
                   e.family.rawValue)
+        let actualFamily = ModelFamily(rawValue: a.family ?? ModelFamily.gemma4.rawValue)
+            ?? .gemma4
+        try check("variant",
+                  a.variant ?? ModelVariant.legacyDefault(for: actualFamily).rawValue,
+                  e.variant.rawValue)
+        try check("feedForwardKind",
+                  a.feedForwardKind ?? FeedForwardKind.mixtureOfExperts.rawValue,
+                  e.feedForwardKind.rawValue)
         try check("attnOutputGate",
                   a.attnOutputGate ?? gemmaDefaults.attnOutputGate,
                   e.attnOutputGate)
@@ -312,6 +324,8 @@ private extension ManifestArch {
                   hiddenActivation: wire.hiddenActivation,
                   fullAttentionLayerMask: wire.fullAttentionLayerMask,
                   family: wire.family,
+                  variant: wire.variant,
+                  feedForwardKind: wire.feedForwardKind,
                   attnOutputGate: wire.attnOutputGate,
                   attentionScale: wire.attentionScale,
                   embeddingScaledBySqrtHidden: wire.embeddingScaledBySqrtHidden,
