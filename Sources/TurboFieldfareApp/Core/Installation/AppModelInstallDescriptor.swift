@@ -1,4 +1,5 @@
 import Foundation
+import TUFFModelCatalog
 import TurboFieldfare
 import TurboFieldfareRepackCore
 
@@ -11,6 +12,32 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let installedBytes: UInt64
     public let rangeStagingBytes: UInt64
     public let reserveBytes: UInt64
+
+    public init(catalog descriptor: TUFFModelDescriptor) {
+        let source = descriptor.source
+        self.init(
+            displayName: descriptor.displayName,
+            repoID: source.repoID,
+            revision: source.revision,
+            sourceIndexSHA256: source.sourceIndexSHA256,
+            approximateDownloadBytes: source.approximateDownloadBytes,
+            installedBytes: source.installedBytes,
+            rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+            reserveBytes: source.reserveBytes)
+    }
+
+    public init(addon: TUFFModelAddonDescriptor) {
+        let source = addon.source
+        self.init(
+            displayName: addon.displayName,
+            repoID: source.repoID,
+            revision: source.revision,
+            sourceIndexSHA256: source.sourceIndexSHA256,
+            approximateDownloadBytes: source.approximateDownloadBytes,
+            installedBytes: source.installedBytes,
+            rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+            reserveBytes: source.reserveBytes)
+    }
 
     public init(displayName: String,
                 repoID: String,
@@ -35,24 +62,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     }
 
     public static let `default` = AppModelInstallDescriptor(
-        displayName: "Gemma 4 26B-A4B IT 4-bit",
-        repoID: "mlx-community/gemma-4-26b-a4b-it-4bit",
-        revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
-        sourceIndexSHA256: "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13",
-        approximateDownloadBytes: 14_620_479_420,
-        installedBytes: 14_291_921_884,
-        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
-        reserveBytes: 1_073_741_824)
+        catalog: TUFFModelCatalog.gemma4_26B_A4B)
 
     public static let qwen36 = AppModelInstallDescriptor(
-        displayName: "Qwen3.6 35B-A3B 4-bit",
-        repoID: "mlx-community/Qwen3.6-35B-A3B-4bit",
-        revision: "38740b847e4cb78f352aba30aa41c76e08e6eb46",
-        sourceIndexSHA256: "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea",
-        approximateDownloadBytes: 19_529_025_048,
-        installedBytes: 19_546_491_213,
-        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
-        reserveBytes: 1_073_741_824)
+        catalog: TUFFModelCatalog.qwen36_35B_A3B)
 
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
@@ -108,24 +121,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     }
 
     public static let visionCompanion = AppModelInstallDescriptor(
-        displayName: "Gemma 4 Image Support",
-        repoID: "mlx-community/gemma-4-26b-a4b-it-4bit",
-        revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
-        sourceIndexSHA256: "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13",
-        approximateDownloadBytes: 1_539_478_890,
-        installedBytes: 1_144_373_248 + 4_194_304,
-        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
-        reserveBytes: 1_073_741_824)
+        addon: TUFFModelCatalog.gemma4_26B_A4B.addons[0])
 
     public static let qwen36VisionCompanion = AppModelInstallDescriptor(
-        displayName: "Qwen3.6 Image Support",
-        repoID: "mlx-community/Qwen3.6-35B-A3B-4bit",
-        revision: "38740b847e4cb78f352aba30aa41c76e08e6eb46",
-        sourceIndexSHA256: "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea",
-        approximateDownloadBytes: 893_142_496,
-        installedBytes: 900_808_704,
-        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
-        reserveBytes: 1_073_741_824)
+        addon: TUFFModelCatalog.qwen36_35B_A3B.addons[0])
 
     public static func visionCompanion(
         for family: ModelFamily

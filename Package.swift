@@ -21,6 +21,10 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "TUFFModelCatalog",
+            path: "Sources/TUFFModelCatalog"
+        ),
+        .target(
             name: "TurboFieldfareFormat",
             path: "Sources/TurboFieldfareFormat"
         ),
@@ -38,7 +42,7 @@ let package = Package(
         ),
         .target(
             name: "TurboFieldfareRepackCore",
-            dependencies: ["TurboFieldfareFormat"],
+            dependencies: ["TUFFModelCatalog", "TurboFieldfareFormat"],
             path: "Sources/TurboFieldfareRepack/Core"
         ),
         .executableTarget(
@@ -59,7 +63,7 @@ let package = Package(
         ),
         .target(
             name: "TurboFieldfareAppCore",
-            dependencies: ["TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol"],
+            dependencies: ["TUFFModelCatalog", "TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol"],
             path: "Sources/TurboFieldfareApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
@@ -106,6 +110,11 @@ let package = Package(
             name: "TurboFieldfareValidationSupport",
             dependencies: ["TurboFieldfare"],
             path: "Sources/TurboFieldfareValidation/Support"
+        ),
+        .testTarget(
+            name: "TUFFModelCatalogTests",
+            dependencies: ["TUFFModelCatalog"],
+            path: "Tests/TUFFModelCatalog"
         ),
         .testTarget(
             name: "TurboFieldfareFormatTests",

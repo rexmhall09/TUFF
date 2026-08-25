@@ -1,0 +1,35 @@
+import Testing
+@testable import TUFFModelCatalog
+
+@Suite struct ModelCatalogTests {
+    @Test func currentCatalogOrderAndSelectorsAreStable() {
+        #expect(TUFFModelCatalog.all.map(\.selector) == ["gemma4", "qwen36"])
+        #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
+        #expect(TUFFModelCatalog.model(selector: "gemma4")?.id == .gemma4_26B_A4B)
+        #expect(TUFFModelCatalog.model(selector: "qwen36")?.id == .qwen36_35B_A3B)
+        #expect(TUFFModelCatalog.model(selector: "unknown") == nil)
+    }
+
+    @Test func sourcesRemainPinnedAndUnique() {
+        #expect(Set(TUFFModelCatalog.all.map(\.source.repoID)).count
+                == TUFFModelCatalog.all.count)
+        for model in TUFFModelCatalog.all {
+            #expect(model.source.revision.count == 40)
+            #expect(model.source.sourceIndexSHA256.count == 64)
+            #expect(model.source.approximateDownloadBytes > 0)
+            #expect(model.source.installedBytes > 0)
+            #expect(model.installDirectoryName.hasSuffix(".gturbo"))
+            #expect(TUFFModelCatalog.model(manifestModelID:
+                    model.source.manifestModelID)?.id == model.id)
+        }
+    }
+
+    @Test func imageAddonsRemainSeparateAndM2Gated() {
+        for model in TUFFModelCatalog.all {
+            let addon = model.addons[0]
+            #expect(addon.kind == .imageInput)
+            #expect(addon.hardware.minimumAppleSiliconGeneration == 2)
+            #expect(addon.source.repoID == model.source.repoID)
+        }
+    }
+}
