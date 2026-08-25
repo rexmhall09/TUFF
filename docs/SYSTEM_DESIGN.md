@@ -540,4 +540,4 @@ Gemma uses its original 3x3 pooling and position-table preprocessing unchanged.
 Qwen follows Transformers `smart_resize`, patch size 16, temporal patch size 2
 (a still is repeated across both temporal frames), 2x2 spatial merge order,
 learned 48x48 position interpolation, and a 2048-wide merger projection. Video
-frames and video timestamps are not implemented in v1.2.0.
+frames and video timestamps are not implemented in v1.1.0.
