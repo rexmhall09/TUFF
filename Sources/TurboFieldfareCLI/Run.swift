@@ -265,6 +265,16 @@ public func run(args: Args,
         }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         let config = makeConfig(maxNewTokens: effectiveMaxNew)
+        let assistantDecoder = StructuredAssistantDecoder(
+            tokenizer: tokenizer, allowedTools: [])
+        var assistantDecodeError: Error?
+        func writeAssistantEvents(_ events: [StructuredAssistantEvent]) {
+            for event in events {
+                if case .content(let text) = event, !text.isEmpty {
+                    stdout.write(Data(text.utf8))
+                }
+            }
+        }
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
@@ -277,12 +287,26 @@ public func run(args: Args,
                 switch progress {
                 case .prefill:
                     break
-                case .token(_, _, let delta):
-                    if !delta.isEmpty { stdout.write(Data(delta.utf8)) }
+                case .token(_, let tokenID, let delta):
+                    guard assistantDecodeError == nil else { break }
+                    do {
+                        writeAssistantEvents(try assistantDecoder.consume(
+                            tokenID: tokenID, delta: delta))
+                    } catch {
+                        assistantDecodeError = error
+                    }
                 case .tail(let tail):
-                    stdout.write(Data(tail.utf8))
+                    guard assistantDecodeError == nil else { break }
+                    do {
+                        writeAssistantEvents(
+                            try assistantDecoder.consumeTail(tail))
+                    } catch {
+                        assistantDecodeError = error
+                    }
                 }
             }
+        if let assistantDecodeError { throw assistantDecodeError }
+        try assistantDecoder.finish()
 
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PHASES"] == "1" {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
