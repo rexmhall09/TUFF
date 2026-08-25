@@ -4,6 +4,7 @@ import SwiftUI
 
 struct RootView: View {
     let model: AppModel
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var destination: AppDestination? = .chat
     @State private var renameTarget: AppConversationRecord?
     @State private var renameText = ""
@@ -11,11 +12,17 @@ struct RootView: View {
     var body: some View {
         NavigationSplitView {
             sidebar
-                .navigationSplitViewColumnWidth(min: 176, ideal: 208, max: 240)
+                .navigationSplitViewColumnWidth(
+                    min: AppWindowLayout.sidebarMinimumWidth,
+                    ideal: AppWindowLayout.sidebarIdealWidth,
+                    max: AppWindowLayout.sidebarMaximumWidth)
         } detail: {
             destinationView
         }
         .navigationSplitViewStyle(.balanced)
+        .focusedSceneValue(
+            \.appNavigationAction,
+            AppNavigationAction { destination = $0 })
         .containerBackground(for: .window) {
             LinearGradient(
                 colors: [
@@ -122,6 +129,19 @@ struct RootView: View {
             .disabled(model.isRunning)
         }
         .accessibilityLabel("\(conversation.title), \(modelName(for: conversation.modelID))")
+        .accessibilityValue(model.conversationStore.selectedConversationID == conversation.id
+                            ? "Selected" : "")
+        .accessibilityHint("Opens this saved chat")
+        .accessibilityAddTraits(
+            model.conversationStore.selectedConversationID == conversation.id
+                ? .isSelected : [])
+        .accessibilityAction(named: "Rename chat") {
+            renameText = conversation.title
+            renameTarget = conversation
+        }
+        .accessibilityAction(named: "Delete chat") {
+            model.deleteConversation(conversation)
+        }
     }
 
     private func modelName(for profileKey: String) -> String {
@@ -143,7 +163,11 @@ struct RootView: View {
             TUFFMarkView()
                 .padding(3)
                 .frame(width: 28, height: 28)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .background(
+                    TurboFieldfareMacTheme.surfaceStyle(
+                        reduceTransparency: reduceTransparency,
+                        material: .thin),
+                    in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 1) {
                 Text("TUFF").font(.headline)
                 Text("Runs on this Mac")
@@ -173,8 +197,12 @@ struct RootView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(.thinMaterial)
-        .accessibilityElement(children: .combine)
+        .background(TurboFieldfareMacTheme.surfaceStyle(
+            reduceTransparency: reduceTransparency,
+            material: .thin))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Current model")
+        .accessibilityValue("\(model.selectedDescriptor.displayName), \(model.presentation.label)")
     }
 
     @ViewBuilder
@@ -198,7 +226,10 @@ private struct ChatWorkspaceView: View {
 
     var body: some View {
         primaryContent
-            .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
+            .frame(
+                minWidth: AppWindowLayout.detailMinimumWidth,
+                maxWidth: .infinity,
+                maxHeight: .infinity)
             .safeAreaInset(edge: .top, spacing: 0) {
                 StatusHUDView(model: model)
             }
@@ -281,6 +312,7 @@ private struct ModelsWorkspaceView: View {
 
 private struct ServerWorkspaceView: View {
     let model: AppModel
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -300,7 +332,11 @@ private struct ServerWorkspaceView: View {
                 Spacer()
             }
             .padding(18)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .background(
+                TurboFieldfareMacTheme.surfaceStyle(
+                    reduceTransparency: reduceTransparency),
+                in: RoundedRectangle(cornerRadius: 16))
+            .accessibilityElement(children: .combine)
             Spacer()
         }
         .padding(28)
@@ -341,12 +377,14 @@ private struct WorkspaceTitle: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.largeTitle.bold())
+            Text(title)
+                .font(.largeTitle.bold())
+                .accessibilityHeading(.h1)
             Text(subtitle)
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 

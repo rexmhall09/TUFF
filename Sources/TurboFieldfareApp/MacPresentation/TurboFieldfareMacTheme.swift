@@ -9,4 +9,14 @@ public enum TurboFieldfareMacTheme {
         alpha: 1)
 
     public static let accentColor = Color(nsColor: accentNSColor)
+
+    public static func surfaceStyle(
+        reduceTransparency: Bool,
+        material: Material = .regular
+    ) -> AnyShapeStyle {
+        if reduceTransparency {
+            return AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+        }
+        return AnyShapeStyle(material)
+    }
 }

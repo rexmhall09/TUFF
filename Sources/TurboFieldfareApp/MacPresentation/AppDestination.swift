@@ -23,4 +23,13 @@ public enum AppDestination: String, CaseIterable, Hashable, Identifiable, Sendab
         case .settings: "gearshape"
         }
     }
+
+    public var keyboardShortcut: String {
+        switch self {
+        case .chat: "1"
+        case .models: "2"
+        case .server: "3"
+        case .settings: "4"
+        }
+    }
 }

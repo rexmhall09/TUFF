@@ -47,7 +47,9 @@ struct TurboFieldfareMacApp: App {
     var body: some Scene {
         Window("TUFF", id: "main") {
             RootView(model: model)
-                .frame(minWidth: 820, minHeight: 560)
+                .frame(
+                    minWidth: AppWindowLayout.minimumWidth,
+                    minHeight: AppWindowLayout.minimumHeight)
                 // Once, when the window first appears: the setting is read
                 // from disk in init, and loadModelAtLaunchIfEnabled ignores a
                 // model that is missing or already busy.
@@ -70,9 +72,12 @@ struct TurboFieldfareMacApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1080, height: 720)
+        .defaultSize(
+            width: AppWindowLayout.defaultWidth,
+            height: AppWindowLayout.defaultHeight)
         .windowResizability(.contentMinSize)
         .commands {
+            AppNavigationCommands()
             CommandGroup(replacing: .appInfo) {
                 Button("About TUFF") {
                     NSApp.orderFrontStandardAboutPanel(

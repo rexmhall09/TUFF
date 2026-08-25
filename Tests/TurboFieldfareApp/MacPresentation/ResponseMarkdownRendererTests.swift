@@ -113,6 +113,21 @@ import Testing
         #expect(abs((color?.blueComponent ?? 0) - 255.0 / 255.0) < 0.000_001)
     }
 
+    @Test func appAccentKeepsWhiteControlLabelsReadable() {
+        let components = [111.0, 77.0, 255.0].map { value in
+            let channel = value / 255.0
+            return channel <= 0.03928
+                ? channel / 12.92
+                : pow((channel + 0.055) / 1.055, 2.4)
+        }
+        let luminance = 0.2126 * components[0]
+            + 0.7152 * components[1]
+            + 0.0722 * components[2]
+        let contrast = 1.05 / (luminance + 0.05)
+
+        #expect(contrast >= 4.5)
+    }
+
     @Test func rebuildsThenAppendsOnlyNewResponseSuffix() {
         let storage = NSMutableAttributedString()
         let controller = InstructionTranscriptDocumentController()

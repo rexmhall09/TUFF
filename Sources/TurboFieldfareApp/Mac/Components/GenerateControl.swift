@@ -33,6 +33,7 @@ struct GenerateControl: View {
         .keyboardShortcut(.return, modifiers: .command)
         .disabled(!model.canRun)
         .opacity(model.canRun ? 1 : 0.62)
+        .accessibilityHint("Sends the prompt to the selected local model")
     }
 
     private var runningPill: some View {
@@ -73,6 +74,9 @@ struct GenerateControl: View {
         .keyboardShortcut(.cancelAction)
         .disabled(!model.canCancel)
         .help("Stop generation")
+        .accessibilityLabel(model.isCancellationPending
+                            ? "Stopping generation" : "Stop generation")
+        .accessibilityValue(model.presentation.label)
         .animation(.smooth(duration: 0.2), value: model.presentation.label)
     }
 }

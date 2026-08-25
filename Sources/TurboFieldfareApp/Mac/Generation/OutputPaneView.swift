@@ -6,6 +6,7 @@ import SwiftUI
 
 struct OutputPaneView: View {
     let model: AppModel
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var responseCopyFeedbackID: UUID?
     @State private var thinkingExpanded = false
 
@@ -114,7 +115,12 @@ struct OutputPaneView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(
+            TurboFieldfareMacTheme.surfaceStyle(
+                reduceTransparency: reduceTransparency,
+                material: .thin),
+            in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityLabel("Model thinking")
         .accessibilityHint("Shows or hides the model's reasoning text")
     }
 
@@ -181,7 +187,10 @@ struct OutputPaneView: View {
                                  : TurboFieldfareMacTheme.accentColor)
                 .frame(width: 28, height: 28)
                 .contentShape(Circle())
-                .background(.regularMaterial, in: Circle())
+                .background(
+                    TurboFieldfareMacTheme.surfaceStyle(
+                        reduceTransparency: reduceTransparency),
+                    in: Circle())
                 .overlay {
                     Circle().stroke(.separator.opacity(0.5), lineWidth: 0.5)
                 }

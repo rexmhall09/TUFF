@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 
 struct PromptComposerView: View {
     @Bindable var model: AppModel
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @FocusState private var promptFocused: Bool
     @State private var showingPromptTips = false
     @State private var showingImagePicker = false
@@ -181,7 +182,10 @@ struct PromptComposerView: View {
                                 Image(systemName: "xmark.circle.fill")
                             }
                             .buttonStyle(.plain)
-                            .background(.regularMaterial, in: Circle())
+                            .background(
+                                TurboFieldfareMacTheme.surfaceStyle(
+                                    reduceTransparency: reduceTransparency),
+                                in: Circle())
                             .offset(x: 5, y: -5)
                             .accessibilityLabel("Remove \(attachment.displayName)")
                         }
