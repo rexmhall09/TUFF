@@ -36,6 +36,12 @@ included for broader design context rather than a line-level claim.
   is the source of the weights, configuration, tokenizer, and chat-template
   sidecars. The repacker preserves its group-64 MLX affine values rather than
   requantizing them.
+- [`mlx-community/gemma-4-e4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-e4b-it-4bit),
+  pinned at
+  [`475b9088`](https://huggingface.co/mlx-community/gemma-4-e4b-it-4bit/tree/475b9088d29754a3379866cf5aeb6b41acd313c2),
+  supplies the dense E4B weights, per-layer embeddings, shared-KV layout,
+  tokenizer, and native thinking template. TUFF preserves its group-64 affine
+  values and streams them directly into the dense `.gturbo` layout.
 - [Hugging Face swift-transformers](https://github.com/huggingface/swift-transformers)
   is the direct tokenizer dependency. TUFF adds bounded streaming
   detokenization around it.

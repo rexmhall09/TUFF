@@ -535,6 +535,15 @@ public actor ServerModelSession: ServerInferenceBackend {
         }?.apiModelID ?? fallback
     }
 
+    static func assistantDecoder(
+        tokenizer: GFTokenizer,
+        tools: [GFTokenizer.FunctionDefinition]
+    ) -> StructuredAssistantDecoder {
+        StructuredAssistantDecoder(
+            tokenizer: tokenizer,
+            allowedTools: Set(tools.map(\.name)))
+    }
+
     public static func load(modelDirectory: URL,
                             maxContext: Int,
                             visionPackURL: URL? = nil,
@@ -980,11 +989,13 @@ public actor ServerModelSession: ServerInferenceBackend {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
-            ? StructuredAssistantDecoder(
-                tokenizer: tokenizer,
-                allowedTools: Set(request.tools.map(\.name)))
-            : nil
+        // Reasoning channels are part of ordinary text generation too. The v1
+        // path only needed structured decoding when tools were present because
+        // thinking-off prompts started after an empty thought channel. Native
+        // thinking opens a real thought channel, so every response must pass
+        // through the same channel-aware decoder.
+        let decoder = Self.assistantDecoder(
+            tokenizer: tokenizer, tools: request.tools)
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""
         var calls: [ParsedToolCall] = []
@@ -1025,22 +1036,15 @@ public actor ServerModelSession: ServerInferenceBackend {
                     case .prefill:
                         break
                     case .token(_, let tokenID, let delta):
-                        let events = if let decoder {
-                            try decoder.consume(tokenID: tokenID, delta: delta)
-                        } else {
-                            delta.isEmpty ? [] : [StructuredAssistantEvent.content(delta)]
-                        }
+                        let events = try decoder.consume(
+                            tokenID: tokenID, delta: delta)
                         handle(events)
                     case .tail(let text):
                         // The flush tail is not tied to a token ID, so it must
                         // go through the decoder's channel state explicitly;
                         // appending it directly would leak text held back
                         // inside the thought channel or a tool call.
-                        let events = if let decoder {
-                            try decoder.consumeTail(text)
-                        } else {
-                            text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
-                        }
+                        let events = try decoder.consumeTail(text)
                         handle(events)
                     }
                 } catch {
@@ -1074,7 +1078,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 cause: .classify(decodingError))
         }
         do {
-            try decoder?.finish()
+            try decoder.finish()
         } catch {
             throw structuredFailure(
                 kind: .decoderFinish,

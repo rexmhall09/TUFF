@@ -442,7 +442,7 @@ public enum TUFFModelCatalog {
         source: gemmaE4BSource,
         hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),
         memory: TUFFModelMemoryProfile(
-            qualifiedDefaultWorkingSetBytes: 6 * oneGiB,
+            qualifiedDefaultWorkingSetBytes: 1_833_438_160,
             defaultExpertCacheSlots: 0,
             expertCacheBytesPerSlot: 0,
             kvCache: TUFFKVCacheProfile(

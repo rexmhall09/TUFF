@@ -47,6 +47,14 @@ import Testing
                                                  expertCacheSlots: 8))
     }
 
+    @Test func e4bUsesTheMeasuredEightKPeak() {
+        let model = TUFFModelCatalog.gemma4_E4B
+        #expect(model.memory.qualifiedDefaultWorkingSetBytes == 1_833_438_160)
+        #expect(model.runtimeDefaults.contextTokens == 8_192)
+        #expect(model.compatibility(
+            with: device(memoryGiB: 8), contextTokens: 8_192).isCompatible)
+    }
+
     @Test func excessiveContextIsRejectedWithoutRejectingTheModel() {
         let model = TUFFModelCatalog.gemma4_26B_A4B
         let host = device(memoryGiB: 8)

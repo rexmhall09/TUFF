@@ -13,10 +13,65 @@ Decode rate excludes model installation, model loading, and prompt prefill.
 
 | Host and runtime | Decode rate | Reported memory |
 | --- | ---: | ---: |
+| 16 GB M2, TUFF, Gemma 4 E4B | 6.82-9.27 tok/s | 0.85-1.71 GiB footprint |
 | 8 GB M2, TUFF | 5.10-6.30 tok/s | ~1.9-2.1 GB footprint |
 | 24 GB M5 Pro, TUFF | 31-35 tok/s | ~2.1 GB footprint |
 | 24 GB M5 Pro, mlx-lm | 76.33-82.07 tok/s | 8.3-9.8 GB RSS; 14.7-15.3 GB GPU allocation |
 | M5, TUFF, Qwen 3.6 35B-A3B | 18.8-23.1 tok/s | ~1.45 GB footprint |
+
+## Gemma 4 E4B qualification
+
+These rows ran on 2026-08-25 on an M2 MacBook Air (`Mac14,2`) with 16 GB of
+memory, macOS 26.5.2, and Swift 6.3.1. The Mac was connected to power and Low
+Power Mode was off for AC power. The installed model came from
+`mlx-community/gemma-4-e4b-it-4bit` revision
+`475b9088d29754a3379866cf5aeb6b41acd313c2`. The measured code was commit
+`ff3fcf3db10b0e81c7b441a9e860a6e8e5ce6028`.
+
+Both rows used a fresh release CLI process, temperature `0.2`, Top-K `64`,
+Top-P `0.95`, the frozen community prompt and seed, and `/usr/bin/time -l`.
+Each response was coherent and reported `stop=endOfTurn`. These are one-run
+qualification measurements, not the three-run medians required by the v2
+benchmark harness in the final release gate.
+
+| Case | Context | Prompt / generated | Prefill | Decode | Peak RSS / footprint |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | 4,096 | 57 / 440 | 3.08 s | 9.267 tok/s | 406.2 / 872.2 MiB |
+| long-synthesis | 8,192 | 3,011 / 369 | 204.40 s | 6.820 tok/s | 582.3 / 1,748.5 MiB |
+
+The 8,192-token configuration is the qualified default. The catalog records
+the measured 1,833,438,160-byte peak footprint. Its 8 GB eligibility is a
+conservative memory calculation using that measured peak and TUFF's 2 GiB
+system reserve; this table is not an 8 GB device benchmark.
+
+The short deterministic smoke also compared chunked prefill with the scalar
+decode reference path. Both rendered 20 prompt tokens, generated the same eight
+tokens (`The capital of France is Paris.`), and stopped at end of turn. Chunked
+prefill reported 2.77 s and 14.402 tok/s decode; `--prefill off` reported 2.95 s
+and 11.732 tok/s. This exact token agreement is the live reference check for
+the installed checkpoint, while the model-free suite supplies the independent
+CPU and toy-forward numerical references.
+
+Native thinking was checked separately with both the CLI and loopback server.
+The model reached a correct final answer and `stop=endOfTurn` after 113 tokens.
+The server returned only `There are 5 balls in the box.` after the structured
+decoder removed the thought channel.
+
+Exact measured commands:
+
+```bash
+/usr/bin/time -l .build/release/TUFFCLI \
+  --model scratch/gemma4-e4b.gturbo \
+  --messages-file docs/benchmark-prompts/real-generation-v1/short-explanation.json \
+  --thinking off --max-new 1024 --max-context 4096 \
+  --temperature 0.2 --top-k 64 --top-p 0.95 --seed 20260721
+
+/usr/bin/time -l .build/release/TUFFCLI \
+  --model scratch/gemma4-e4b.gturbo \
+  --messages-file docs/benchmark-prompts/real-generation-v1/long-synthesis.json \
+  --thinking off --max-new 1024 --max-context 8192 \
+  --temperature 0.2 --top-k 64 --top-p 0.95 --seed 20260723
+```
 
 ## M2 measured decode
 

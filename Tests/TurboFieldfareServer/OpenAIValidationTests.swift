@@ -685,6 +685,10 @@ struct StreamingStopMatcherTests {
 
 @Suite("Server arguments")
 struct ServerArgumentTests {
+    @Test func helpListsTheE4BRegistryModelID() {
+        #expect(ServerArguments.usage.contains("gemma-4-e4b-it"))
+    }
+
     @Test func defaults() throws {
         let arguments = try ServerArguments.parse(["--model", "model.gturbo"])
         #expect(arguments.port == 8080)
