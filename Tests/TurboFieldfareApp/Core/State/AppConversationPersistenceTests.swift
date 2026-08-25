@@ -122,6 +122,8 @@ import Testing
                 .appendingPathComponent("qwen-switch-\(UUID().uuidString).gturbo"),
             client: qwenInstaller)
         let model = AppModel(
+            modelDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("gemma-switch-\(UUID().uuidString).gturbo"),
             installer: MockModelInstallerClient(descriptor: .default),
             otherInstalls: [qwen],
             conversationStore: store)

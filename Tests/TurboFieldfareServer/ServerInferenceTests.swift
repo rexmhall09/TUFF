@@ -21,13 +21,15 @@ struct ServerVisionCapabilityTests {
             == "qwen3.6-35b-a3b")
     }
 
-    @Test func textOnlyRequestsStillSuppressThoughtChannels() async throws {
+    @Test func assistantDecoderKeepsThoughtOutOfVisibleOutput() async throws {
         let tokenizer = try await GFTokenizer.load()
         let decoder = ServerModelSession.assistantDecoder(
             tokenizer: tokenizer, tools: [])
         #expect(try decoder.consume(
             tokenID: tokenizer.channelStartID, delta: "").isEmpty)
-        #expect(try decoder.consume(tokenID: -1, delta: "thought\nsecret").isEmpty)
+        #expect(try decoder.consume(tokenID: -1, delta: "thought\nsecret") == [
+            .thinking("secret"),
+        ])
         #expect(try decoder.consume(
             tokenID: tokenizer.channelEndID, delta: "").isEmpty)
         #expect(try decoder.consume(tokenID: -1, delta: "answer") == [
