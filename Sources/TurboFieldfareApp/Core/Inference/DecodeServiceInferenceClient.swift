@@ -90,7 +90,10 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     let command = DecodeGenerationRequest(
                         prompt: request.prompt,
                         history: request.history.map {
-                            DecodeChatTurn(prompt: $0.prompt, response: $0.response)
+                            DecodeChatTurn(
+                                prompt: $0.prompt,
+                                response: $0.response,
+                                thinking: $0.thinking)
                         },
                         imageAttachments: request.imageAttachments.map {
                             DecodeImageAttachment(
@@ -104,6 +107,9 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         maxContextTokens: request.maxContextTokens,
                         reasoning: DecodeChatReasoning(
                             rawValue: request.reasoning.rawValue) ?? .off,
+                        reasoningEffort: request.reasoningEffort.flatMap {
+                            DecodeGPTOSSReasoningEffort(rawValue: $0.rawValue)
+                        },
                         temperature: request.temperature,
                         topK: request.topK,
                         topP: request.topP,
@@ -149,7 +155,14 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                             continue
                         }
                         if event.kind == .snapshot {
+                            if let thinking = event.thinkingDelta, !thinking.isEmpty {
+                                continuation.yield(.thinking(AppTokenEvent(
+                                    index: max(0, event.tokenCount - 1),
+                                    textDelta: thinking,
+                                    elapsedDecodeSeconds: event.decodeSeconds)))
+                            }
                             generationTranscriptMailbox.append(event.textDelta)
+                            if event.textDelta.isEmpty { continue }
                             let now = Date()
                             let beginsVisibleText = !hasYieldedVisibleText
                                 && event.textDelta.contains { !$0.isWhitespace }

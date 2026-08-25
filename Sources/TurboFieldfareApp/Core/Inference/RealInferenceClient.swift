@@ -327,15 +327,26 @@ actor RealInferenceSession {
         maxContext: Int,
         modelVariant: ModelVariant? = nil
     ) throws -> RenderedConversation {
+        let isHarmony = modelVariant == .gptOss_20B
+            || modelVariant == .gptOss_120B
         func encode(_ turns: ArraySlice<AppChatTurn>) throws -> [Int32] {
             var messages: [GFTokenizer.Message] = []
             messages.reserveCapacity(turns.count * 2 + 1)
             for turn in turns {
                 messages.append(GFTokenizer.Message(role: .user, content: turn.prompt))
                 messages.append(
-                    GFTokenizer.Message(role: .assistant, content: turn.response))
+                    GFTokenizer.Message(
+                        role: .assistant,
+                        content: turn.response,
+                        thinking: isHarmony ? turn.thinking : nil))
             }
             messages.append(GFTokenizer.Message(role: .user, content: request.prompt))
+            if isHarmony {
+                return try tokenizer.encodeHarmonyChat(
+                    messages: messages,
+                    reasoningEffort: request.reasoningEffort ?? .medium,
+                    currentDate: HarmonyPromptRenderer.calendarDate())
+            }
             return tokenizer.encode(
                 try tokenizer.applyChatTemplate(
                     messages,
@@ -519,6 +530,33 @@ actor RealInferenceSession {
             runner.reset()
             progress.prefillStart = Date()
 
+            let assistantDecoder = StructuredAssistantDecoder(
+                tokenizer: tokenizer, allowedTools: [])
+            var assistantDecodeError: Error?
+            func publishAssistantEvents(
+                _ events: [StructuredAssistantEvent],
+                index: Int,
+                elapsed: Double
+            ) {
+                for event in events {
+                    let token = { (text: String) in AppTokenEvent(
+                        index: index,
+                        textDelta: text,
+                        elapsedDecodeSeconds: elapsed)
+                    }
+                    switch event {
+                    case .content(let text):
+                        continuation.yield(.token(token(text)))
+                    case .thinking(let text):
+                        continuation.yield(.thinking(token(text)))
+                    case .toolCall:
+                        // No tools are advertised by Chat. The decoder rejects
+                        // any named call before it can reach this branch.
+                        break
+                    }
+                }
+            }
+
             let result = try await runRawCompletion(
                 producer: runner, tokenizer: tokenizer, promptIds: promptIds,
                 multimodalInput: multimodalInput,
@@ -531,21 +569,34 @@ actor RealInferenceSession {
                         progress.countersAtDecodeStart = RunnerCounterSnapshot(runner)
                     }
                     continuation.yield(.prefillProgress(done: done, total: total))
-                case .token(let index, _, let delta):
+                case .token(let index, let tokenID, let delta):
                     if progress.firstTokenDate == nil { progress.firstTokenDate = Date() }
                     progress.generated = index + 1
                     if index % 8 == 0 { _ = memorySampler.sample() }
-                    continuation.yield(.token(AppTokenEvent(
-                        index: index,
-                        textDelta: delta,
-                        elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                    guard assistantDecodeError == nil else { break }
+                    do {
+                        publishAssistantEvents(
+                            try assistantDecoder.consume(
+                                tokenID: tokenID, delta: delta),
+                            index: index,
+                            elapsed: progress.elapsedDecodeSeconds)
+                    } catch {
+                        assistantDecodeError = error
+                    }
                 case .tail(let text):
-                    continuation.yield(.token(AppTokenEvent(
-                        index: max(progress.generated - 1, 0),
-                        textDelta: text,
-                        elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                    guard assistantDecodeError == nil else { break }
+                    do {
+                        publishAssistantEvents(
+                            try assistantDecoder.consumeTail(text),
+                            index: max(progress.generated - 1, 0),
+                            elapsed: progress.elapsedDecodeSeconds)
+                    } catch {
+                        assistantDecodeError = error
+                    }
                 }
             }
+            if let assistantDecodeError { throw assistantDecodeError }
+            try assistantDecoder.finish()
 
             let diagnostics = makeDiagnostics(request: request,
                                               memorySampler: memorySampler,

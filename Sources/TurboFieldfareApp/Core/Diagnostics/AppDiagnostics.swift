@@ -111,6 +111,7 @@ public enum AppInferenceEvent: Equatable, Sendable {
     case prefillProgress(done: Int, total: Int)
     case memorySample
     case token(AppTokenEvent)
+    case thinking(AppTokenEvent)
     case finished(AppDiagnostics)
     case cancelled(AppDiagnostics)
     case failed(AppInferenceError, partial: AppDiagnostics?)

@@ -9,11 +9,18 @@ public struct AppChatTurn: Equatable, Sendable, Codable, Identifiable {
     public let id: UUID
     public var prompt: String
     public var response: String
+    public var thinking: String?
 
-    public init(id: UUID = UUID(), prompt: String, response: String) {
+    public init(
+        id: UUID = UUID(),
+        prompt: String,
+        response: String,
+        thinking: String? = nil
+    ) {
         self.id = id
         self.prompt = prompt
         self.response = response
+        self.thinking = thinking
     }
 }
 

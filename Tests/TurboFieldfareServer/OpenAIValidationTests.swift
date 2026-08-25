@@ -624,13 +624,15 @@ struct GemmaToolCallTests {
         #expect(parsed.argumentsJSON.contains(#""note":"a\b\f""#))
     }
 
-    @Test func suppressesThoughtBlockAndExposesTextAfterChannelClose() async throws {
+    @Test func separatesThoughtBlockAndExposesTextAfterChannelClose() async throws {
         let tokenizer = try await GFTokenizer.load()
         let decoder = StructuredAssistantDecoder(tokenizer: tokenizer, allowedTools: [])
         #expect(try decoder.consume(tokenID: tokenizer.channelStartID, delta: "").isEmpty)
         #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "thought").isEmpty)
         #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "\n").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "private").isEmpty)
+        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "private") == [
+            .thinking("private"),
+        ])
         #expect(try decoder.consume(tokenID: tokenizer.channelEndID, delta: "").isEmpty)
         #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "visible") == [
             .content("visible"),
@@ -648,17 +650,29 @@ struct GemmaToolCallTests {
         ])
         // The channel switch still happened: this resolves the label.
         #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "thought\n").isEmpty)
-        // In the thought channel the routed delta is correctly dropped.
-        #expect(try decoder.consume(tokenID: tokenizer.channelEndID, delta: "hidden").isEmpty)
+        // In the thought channel the routed delta remains separate.
+        #expect(try decoder.consume(tokenID: tokenizer.channelEndID, delta: "hidden") == [
+            .thinking("hidden"),
+        ])
         #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "ok") == [.content("ok")])
     }
 
-    @Test func tailDuringThoughtChannelIsSuppressed() async throws {
+    @Test func firstThoughtChunkAfterChannelLabelIsPreserved() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let decoder = StructuredAssistantDecoder(tokenizer: tokenizer, allowedTools: [])
+        #expect(try decoder.consume(tokenID: tokenizer.channelStartID, delta: "").isEmpty)
+        #expect(try decoder.consume(tokenID: tokenizer.bosID,
+                                    delta: "thought\nfirst chunk") == [
+            .thinking("first chunk"),
+        ])
+    }
+
+    @Test func tailDuringThoughtChannelRemainsSeparate() async throws {
         let tokenizer = try await GFTokenizer.load()
         let decoder = StructuredAssistantDecoder(tokenizer: tokenizer, allowedTools: [])
         #expect(try decoder.consume(tokenID: tokenizer.channelStartID, delta: "").isEmpty)
         #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "thought\n").isEmpty)
-        #expect(try decoder.consumeTail("secret").isEmpty)
+        #expect(try decoder.consumeTail("secret") == [.thinking("secret")])
         #expect(try decoder.consume(tokenID: tokenizer.channelEndID, delta: "").isEmpty)
         #expect(try decoder.consumeTail("ok") == [.content("ok")])
     }

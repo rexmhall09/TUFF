@@ -24,6 +24,29 @@ import Testing
     }
 
     @MainActor
+    @Test func binaryThinkingControlReachesGenerationRequest() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "think"
+        model.reasoning = .on
+
+        #expect(try model.makeRequest().reasoning == .on)
+        #expect(try model.makeRequest().reasoningEffort == nil)
+    }
+
+    @MainActor
+    @Test func thinkingEventsNeverJoinVisibleAnswer() {
+        let model = AppModel()
+        model.apply(.thinking(AppTokenEvent(
+            index: 0,
+            textDelta: "reasoning",
+            elapsedDecodeSeconds: 0.1)))
+
+        #expect(model.outputThinkingText == "reasoning")
+        #expect(model.outputText.isEmpty)
+    }
+
+    @MainActor
     @Test func runDisabledWhenPromptEmpty() {
         let model = AppModel()
         model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
@@ -291,6 +314,7 @@ import Testing
     @Test func cancelDuringPrefillKeepsPromptSnapshotUntilClear() async throws {
         let client = MockInferenceClient(response: "unused", tokenDelayNanos: 1_000_000)
         client.prefillSteps = 20
+        client.holdsDuringPrefill = true
         let model = readyModel(client: client)
         model.promptText = "prefill prompt"
         model.run()

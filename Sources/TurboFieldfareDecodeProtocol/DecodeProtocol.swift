@@ -68,16 +68,24 @@ public struct DecodeLoadRequest: Codable, Sendable {
 public struct DecodeChatTurn: Codable, Sendable, Equatable {
     public var prompt: String
     public var response: String
+    public var thinking: String?
 
-    public init(prompt: String, response: String) {
+    public init(prompt: String, response: String, thinking: String? = nil) {
         self.prompt = prompt
         self.response = response
+        self.thinking = thinking
     }
 }
 
 public enum DecodeChatReasoning: String, Codable, Sendable, Equatable {
     case off
     case on
+}
+
+public enum DecodeGPTOSSReasoningEffort: String, Codable, Sendable, Equatable {
+    case low
+    case medium
+    case high
 }
 
 public struct DecodeGenerationRequest: Codable, Sendable {
@@ -90,6 +98,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var maxContextTokens: Int
     /// Decoded as off for compatibility with v1 app clients.
     public var reasoning: DecodeChatReasoning
+    public var reasoningEffort: DecodeGPTOSSReasoningEffort?
     public var temperature: Float
     /// Carried explicitly, and optional because nil means "no cut". Leaving
     /// them off the wire did not fall back to the sender's settings: the
@@ -113,6 +122,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         maxContextTokens = try container.decode(Int.self, forKey: .maxContextTokens)
         reasoning = try container.decodeIfPresent(
             DecodeChatReasoning.self, forKey: .reasoning) ?? .off
+        reasoningEffort = try container.decodeIfPresent(
+            DecodeGPTOSSReasoningEffort.self, forKey: .reasoningEffort)
         temperature = try container.decode(Float.self, forKey: .temperature)
         topK = try container.decodeIfPresent(Int.self, forKey: .topK)
         topP = try container.decodeIfPresent(Float.self, forKey: .topP)
@@ -126,6 +137,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 imageAttachments: [DecodeImageAttachment]? = nil,
                 maxNewTokens: Int, maxContextTokens: Int,
                 reasoning: DecodeChatReasoning = .off,
+                reasoningEffort: DecodeGPTOSSReasoningEffort? = nil,
                 temperature: Float, topK: Int? = nil, topP: Float? = nil,
                 repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
@@ -136,6 +148,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
         self.reasoning = reasoning
+        self.reasoningEffort = reasoningEffort
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
@@ -222,6 +235,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var generationID: UUID
     public var sequence: UInt64
     public var textDelta: String
+    public var thinkingDelta: String?
     public var tokenCount: Int
     public var promptTokenCount: Int?
     public var prefillDone: Int?
@@ -242,6 +256,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
 
     public init(kind: DecodeServiceEventKind, generationID: UUID,
                 sequence: UInt64 = 0, textDelta: String = "",
+                thinkingDelta: String? = nil,
                 tokenCount: Int = 0, promptTokenCount: Int? = nil,
                 prefillDone: Int? = nil, prefillTotal: Int? = nil,
                 prefillSeconds: Double? = nil,
@@ -256,6 +271,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.generationID = generationID
         self.sequence = sequence
         self.textDelta = textDelta
+        self.thinkingDelta = thinkingDelta
         self.tokenCount = tokenCount
         self.promptTokenCount = promptTokenCount
         self.prefillDone = prefillDone

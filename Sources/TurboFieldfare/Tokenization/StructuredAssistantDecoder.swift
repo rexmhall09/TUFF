@@ -2,6 +2,7 @@ import Foundation
 
 public enum StructuredAssistantEvent: Equatable, Sendable {
     case content(String)
+    case thinking(String)
     case toolCall(ParsedToolCall)
 }
 
@@ -132,7 +133,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private func routeText(_ delta: String) -> [StructuredAssistantEvent] {
         switch channel {
         case .thought:
-            return []
+            return delta.isEmpty ? [] : [.thinking(delta)]
         case .visible:
             return delta.isEmpty ? [] : [.content(delta)]
         case .label:
@@ -143,14 +144,11 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             let content = String(label[contentStart...])
             channel = name == "final" || name == "answer" ? .visible : .thought
             label = ""
-            if channel == .visible, !content.isEmpty {
-                return [.content(content)]
-            }
-            return []
+            return routeText(content)
         }
     }
 
-    /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
+    /// ChatML transitions: `<think>`…`</think>` separates thought text, and
     /// `<tool_call>`…`</tool_call>` buffer tokens for the Qwen parser. Everything
     /// else streams as visible content.
     private func consumeChatML(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
@@ -196,7 +194,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             channel = .visible
             return []
         }
-        guard channel != .thought else { return [] }
+        if channel == .thought {
+            return delta.isEmpty ? [] : [.thinking(delta)]
+        }
         return delta.isEmpty ? [] : [.content(delta)]
     }
 

@@ -146,6 +146,10 @@ import TurboFieldfareDecodeProtocol
             sha256: String(repeating: "b", count: 64))
         let request = DecodeGenerationRequest(
             prompt: "describe",
+            history: [DecodeChatTurn(
+                prompt: "earlier",
+                response: "answer",
+                thinking: "reasoning")],
             imageAttachments: [attachment],
             maxNewTokens: 16,
             maxContextTokens: 4096,
@@ -160,6 +164,25 @@ import TurboFieldfareDecodeProtocol
             from: pipe.fileHandleForReading)
         #expect(decoded.imageAttachments == [attachment])
         #expect(decoded.reasoning == .on)
+        #expect(decoded.history.first?.thinking == "reasoning")
+    }
+
+    @Test func gptReasoningEffortRoundTrips() throws {
+        let request = DecodeGenerationRequest(
+            prompt: "solve",
+            maxNewTokens: 16,
+            maxContextTokens: 4_096,
+            reasoningEffort: .high,
+            temperature: 0)
+        let encoded = try DecodeFrameCodec.encode(request)
+        let pipe = Pipe()
+        try pipe.fileHandleForWriting.write(contentsOf: encoded)
+        try pipe.fileHandleForWriting.close()
+
+        let decoded = try DecodeFrameCodec.read(
+            DecodeGenerationRequest.self,
+            from: pipe.fileHandleForReading)
+        #expect(decoded.reasoningEffort == .high)
     }
 
 }

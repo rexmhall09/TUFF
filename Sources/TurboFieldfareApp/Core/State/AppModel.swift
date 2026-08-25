@@ -59,6 +59,10 @@ public final class AppModel {
         get { conversationStore.outputText }
         set { conversationStore.outputText = newValue }
     }
+    public private(set) var outputThinkingText: String {
+        get { conversationStore.outputThinkingText }
+        set { conversationStore.outputThinkingText = newValue }
+    }
     /// Completed exchanges, oldest first. The in-flight exchange lives in
     /// `outputPromptText` / `outputText` and only joins this once it finishes.
     public private(set) var conversation: [AppChatTurn] {
@@ -76,6 +80,14 @@ public final class AppModel {
     public var maxNewTokensOverride: Int? {
         get { settingsStore.maxNewTokensOverride }
         set { settingsStore.maxNewTokensOverride = newValue }
+    }
+    public var reasoning: ChatReasoning {
+        get { settingsStore.reasoning }
+        set { settingsStore.reasoning = newValue }
+    }
+    public var reasoningEffort: GPTOSSReasoningEffort {
+        get { settingsStore.reasoningEffort }
+        set { settingsStore.reasoningEffort = newValue }
     }
     public var maxContextTokens: Int {
         get { settingsStore.maxContextTokens }
@@ -770,6 +782,7 @@ public final class AppModel {
     public var hasOutputTranscript: Bool {
         !conversation.isEmpty || !outputPromptText.isEmpty
             || !outputImageAttachments.isEmpty || !outputText.isEmpty
+            || !outputThinkingText.isEmpty
     }
 
     /// Completed turns the next prompt will carry as context.
@@ -1940,6 +1953,7 @@ public final class AppModel {
         releaseTranscriptImages()
         outputImageAttachments = retained
         outputText = ""
+        outputThinkingText = ""
         diagnostics = nil
         error = nil
         hasHandledTerminalEvent = false
@@ -2004,6 +2018,9 @@ public final class AppModel {
             imageAttachments: imageAttachments,
             maxNewTokens: maxNewTokensOverride ?? effective.maxContextTokens,
             maxContextTokens: effective.maxContextTokens,
+            reasoning: selectedDescriptor.family == .gptOss ? .off : reasoning,
+            reasoningEffort: selectedDescriptor.family == .gptOss
+                ? reasoningEffort : nil,
             temperature: Float(temperature),
             topK: topKEnabled ? topK : nil,
             topP: topKEnabled && topPEnabled ? Float(topP) : nil,
@@ -2032,6 +2049,14 @@ public final class AppModel {
             if !token.textDelta.isEmpty {
                 outputText += token.textDelta
             }
+        case .thinking(let token):
+            phase = .decode
+            liveTokenCount = token.index + 1
+            liveElapsedDecodeSeconds = token.elapsedDecodeSeconds
+            sampleLiveMemory()
+            if !token.textDelta.isEmpty {
+                outputThinkingText += token.textDelta
+            }
         case .finished(let diagnostics):
             visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
             finishSuccessfully(diagnostics)
@@ -2055,7 +2080,10 @@ public final class AppModel {
         let response = outputResponsePlainText
         if !outputPromptText.isEmpty, !response.isEmpty {
             conversationStore.recordCompletedTurn(
-                AppChatTurn(prompt: outputPromptText, response: response),
+                AppChatTurn(
+                    prompt: outputPromptText,
+                    response: response,
+                    thinking: outputThinkingText.isEmpty ? nil : outputThinkingText),
                 attachments: outputImageAttachments,
                 modelID: selectedDescriptor.settingsProfileKey)
         }

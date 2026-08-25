@@ -11,6 +11,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var maxNewTokens: Int
     public var maxContextTokens: Int
     public var reasoning: ChatReasoning
+    public var reasoningEffort: GPTOSSReasoningEffort?
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
@@ -24,6 +25,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 maxNewTokens: Int = 4_096,
                 maxContextTokens: Int = 4096,
                 reasoning: ChatReasoning = .off,
+                reasoningEffort: GPTOSSReasoningEffort? = nil,
                 temperature: Float = 0.2,
                 topK: Int? = 64,
                 topP: Float? = 0.95,
@@ -36,6 +38,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
         self.reasoning = reasoning
+        self.reasoningEffort = reasoningEffort
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
@@ -61,6 +64,10 @@ public struct AppGenerationRequest: Equatable, Sendable {
         let family = (try? ManifestReader.resolveArchitecture(
             directoryURL: modelDirectory).family)
             ?? .gemma4
+        try Self.validateReasoning(
+            family: family,
+            reasoning: reasoning,
+            reasoningEffort: reasoningEffort)
         let capacity = VisionImageTokenBudget.capacity(
             maxContext: maxContextTokens, reservedTextTokens: 0,
             family: family)
@@ -116,6 +123,22 @@ public struct AppGenerationRequest: Equatable, Sendable {
                   isDirectory.boolValue else {
                 throw AppInferenceError.modelNotFound(modelDirectory.path)
             }
+        }
+    }
+
+    static func validateReasoning(
+        family: ModelFamily,
+        reasoning: ChatReasoning,
+        reasoningEffort: GPTOSSReasoningEffort?
+    ) throws {
+        if family == .gptOss {
+            guard reasoning == .off else {
+                throw AppInferenceError.invalidRequest(
+                    "GPT-OSS uses graded reasoning effort, not an on/off switch.")
+            }
+        } else if reasoningEffort != nil {
+            throw AppInferenceError.invalidRequest(
+                "Reasoning effort is only supported by GPT-OSS.")
         }
     }
 }

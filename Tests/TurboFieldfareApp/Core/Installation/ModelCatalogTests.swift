@@ -76,6 +76,11 @@ import TurboFieldfareRepackCore
             for: ModelVariant.gptOss_20B)?.settingsProfileKey == "gpt-oss-20b")
         #expect(AppModelInstallDescriptor.descriptor(
             for: ModelVariant.gptOss_120B)?.settingsProfileKey == "gpt-oss-120b")
+        #expect(AppModelInstallDescriptor.gemma4E4B.reasoningControl == .toggle)
+        #expect(AppModelInstallDescriptor.qwen36.reasoningControl
+            == .toggleWithPreservation)
+        #expect(AppModelInstallDescriptor.descriptor(
+            for: ModelVariant.gptOss_20B)?.reasoningControl == .graded)
     }
 
     @MainActor

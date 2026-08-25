@@ -5,6 +5,8 @@ import SwiftUI
 struct RootView: View {
     let model: AppModel
     @State private var destination: AppDestination? = .chat
+    @State private var renameTarget: AppConversationRecord?
+    @State private var renameText = ""
 
     var body: some View {
         NavigationSplitView {
@@ -32,6 +34,17 @@ struct RootView: View {
         .transaction { transaction in
             if model.isRunning { transaction.animation = nil }
         }
+        .alert("Rename Chat", isPresented: renameAlertIsPresented) {
+            TextField("Name", text: $renameText)
+            Button("Cancel", role: .cancel) { renameTarget = nil }
+            Button("Rename") {
+                if let renameTarget {
+                    model.renameConversation(renameTarget, to: renameText)
+                }
+                renameTarget = nil
+            }
+            .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
     }
 
     private var sidebar: some View {
@@ -43,11 +56,86 @@ struct RootView: View {
                         .accessibilityIdentifier("navigation.\(item.rawValue)")
                 }
             }
+            if destination == .chat {
+                Section {
+                    Button {
+                        model.clearOutput()
+                    } label: {
+                        Label("New Chat", systemImage: "square.and.pencil")
+                    }
+                    .disabled(model.isRunning || (!model.hasOutputTranscript
+                        && model.conversationStore.selectedConversation != nil))
+                }
+                Section("Chats") {
+                    if model.conversationStore.conversations.isEmpty {
+                        Text("No saved chats")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(model.conversationStore.conversations) { conversation in
+                            conversationRow(conversation)
+                        }
+                    }
+                }
+            }
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .top, spacing: 0) { brandHeader }
         .safeAreaInset(edge: .bottom, spacing: 0) { selectedModelFooter }
         .navigationTitle("TUFF")
+    }
+
+    private func conversationRow(_ conversation: AppConversationRecord) -> some View {
+        Button {
+            model.selectConversation(conversation)
+        } label: {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(conversation.title)
+                        .lineLimit(1)
+                    Text(modelName(for: conversation.modelID))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                if model.conversationStore.selectedConversationID == conversation.id {
+                    Circle()
+                        .fill(TurboFieldfareMacTheme.accentColor)
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.isRunning || model.loadState.isLoading)
+        .contextMenu {
+            Button("Rename") {
+                renameText = conversation.title
+                renameTarget = conversation
+            }
+            Divider()
+            Button("Delete", role: .destructive) {
+                model.deleteConversation(conversation)
+            }
+            .disabled(model.isRunning)
+        }
+        .accessibilityLabel("\(conversation.title), \(modelName(for: conversation.modelID))")
+    }
+
+    private func modelName(for profileKey: String) -> String {
+        model.installs.first {
+            $0.descriptor.settingsProfileKey == profileKey
+        }?.descriptor.shortName ?? profileKey
+    }
+
+    private var renameAlertIsPresented: Binding<Bool> {
+        Binding {
+            renameTarget != nil
+        } set: { presented in
+            if !presented { renameTarget = nil }
+        }
     }
 
     private var brandHeader: some View {
@@ -160,6 +248,7 @@ private struct ChatWorkspaceView: View {
 
     private var conversationChrome: some View {
         VStack(spacing: 10) {
+            ChatControlsView(model: model)
             ErrorBanner(model: model)
             if model.promptText.isEmpty && model.showPromptExamples && !model.isRunning {
                 PromptExamplesView { preset in model.promptText = preset.prompt }

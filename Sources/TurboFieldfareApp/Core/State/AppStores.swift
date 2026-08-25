@@ -19,6 +19,7 @@ public final class AppConversationStore {
     public var outputPromptText = ""
     public var outputImageAttachments: [AppImageAttachment] = []
     public var outputText = ""
+    public var outputThinkingText = ""
     public var conversation: [AppChatTurn] = []
     public var runIdentity = 0
     public private(set) var conversations: [AppConversationRecord] = []
@@ -69,6 +70,7 @@ public final class AppConversationStore {
         outputPromptText = ""
         outputImageAttachments = []
         outputText = ""
+        outputThinkingText = ""
         persistArchive()
     }
 
@@ -88,6 +90,7 @@ public final class AppConversationStore {
         outputPromptText = ""
         outputImageAttachments = []
         outputText = ""
+        outputThinkingText = ""
         restoreSelectedTurns()
         persistArchive()
     }
@@ -110,6 +113,7 @@ public final class AppConversationStore {
             outputPromptText = ""
             outputImageAttachments = []
             outputText = ""
+            outputThinkingText = ""
             restoreSelectedTurns()
         }
         do {
@@ -156,6 +160,7 @@ public final class AppConversationStore {
             id: turn.id,
             prompt: turn.prompt,
             response: turn.response,
+            thinking: turn.thinking,
             attachments: durableAttachments))
         if conversations[index].title == "New Chat" {
             conversations[index].title = Self.automaticTitle(for: turn.prompt)
@@ -234,6 +239,8 @@ public final class AppModelLibraryStore {
 public final class AppSettingsStore {
     public var runtimeOptions = AppRuntimeOptions()
     public var maxNewTokensOverride: Int?
+    public var reasoning: ChatReasoning = .off
+    public var reasoningEffort: GPTOSSReasoningEffort = .medium
     public var maxContextTokens = 4_096
     public var temperature = 0.2
     public var topKEnabled = true

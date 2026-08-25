@@ -346,8 +346,8 @@ public struct HarmonyToolCallParser: Sendable {
 }
 
 /// Token-driven streaming decoder for Harmony assistant messages. Analysis is
-/// retained in the KV history by the generator but never surfaced as content;
-/// only the final channel and validated function calls become public events.
+/// retained separately from visible content, so clients can hide, collapse, or
+/// omit it without ever mistaking it for the final answer.
 final class HarmonyAssistantDecoder: @unchecked Sendable {
     private enum State: Equatable {
         case header(expectsRole: Bool)
@@ -496,7 +496,7 @@ final class HarmonyAssistantDecoder: @unchecked Sendable {
                 }
                 return []
             }
-            return channel == "final" ? [.content(text)] : []
+            return channel == "final" ? [.content(text)] : [.thinking(text)]
         case .awaitingStart, .completed:
             guard text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw ToolCallParserError.malformed

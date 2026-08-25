@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import TurboFieldfare
 
-/// StructuredAssistantDecoder in ChatML mode: `<think>` suppression and
+/// StructuredAssistantDecoder in ChatML mode: `<think>` separation and
 /// `<tool_call>` buffering driven by the fixture tokenizer's special-token IDs.
 @Suite("ChatML decoder")
 struct ChatMLDecoderTests {
@@ -36,6 +36,12 @@ struct ChatMLDecoderTests {
         }
     }
 
+    private func thinkingText(_ events: [StructuredAssistantEvent]) -> String {
+        events.reduce(into: "") { result, event in
+            if case .thinking(let delta) = event { result += delta }
+        }
+    }
+
     @Test("Visible text streams through unchanged")
     func plainText() throws {
         let d = decoder()
@@ -45,13 +51,14 @@ struct ChatMLDecoderTests {
         #expect(!d.hasToolCalls)
     }
 
-    @Test("Think spans are suppressed, text after them is visible")
-    func thinkSuppression() throws {
+    @Test("Think spans are separated, text after them is visible")
+    func thinkSeparation() throws {
         let d = decoder()
         let events = try feed("<think>\nhidden reasoning\n</think>\n\nvisible answer", into: d)
         let text = visibleText(events)
         #expect(!text.contains("hidden reasoning"))
         #expect(text.contains("visible answer"))
+        #expect(thinkingText(events).contains("hidden reasoning"))
         try d.finish()
     }
 

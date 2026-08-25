@@ -22,7 +22,13 @@ struct HarmonyAssistantDecoderTests {
         }
     }
 
-    @Test("Analysis is hidden and final text streams")
+    private func thinkingText(_ events: [StructuredAssistantEvent]) -> String {
+        events.reduce(into: "") { result, event in
+            if case .thinking(let delta) = event { result += delta }
+        }
+    }
+
+    @Test("Analysis is separate and final text streams")
     func analysisThenFinal() throws {
         let decoder = decoder()
         var events: [StructuredAssistantEvent] = []
@@ -41,6 +47,7 @@ struct HarmonyAssistantDecoderTests {
         events += try decoder.consume(tokenID: tokens.return, delta: "!")
         #expect(visibleText(events) == "Hello there!")
         #expect(!visibleText(events).contains("secret"))
+        #expect(thinkingText(events) == "secret plan")
         try decoder.finish()
     }
 

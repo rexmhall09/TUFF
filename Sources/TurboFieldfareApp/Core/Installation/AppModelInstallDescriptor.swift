@@ -3,6 +3,12 @@ import TUFFModelCatalog
 import TurboFieldfare
 import TurboFieldfareRepackCore
 
+public enum AppReasoningControl: Equatable, Sendable {
+    case toggle
+    case toggleWithPreservation
+    case graded
+}
+
 public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let displayName: String
     public let repoID: String
@@ -113,6 +119,15 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         catalogDescriptor?.capabilities.contains(.imageInput) ?? true
     }
 
+    public var reasoningControl: AppReasoningControl? {
+        switch catalogDescriptor?.reasoningControl {
+        case .toggle: .toggle
+        case .toggleWithPreservation: .toggleWithPreservation
+        case .graded: .graded
+        case nil: nil
+        }
+    }
+
     /// Every model the app can install, in the order the UI lists them.
     public static let catalog: [AppModelInstallDescriptor] =
         TUFFModelCatalog.all.map(AppModelInstallDescriptor.init(catalog:))
@@ -121,6 +136,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// name in the picker.
     public var summary: String {
         catalogDescriptor?.summary ?? displayName
+    }
+
+    public var shortName: String {
+        catalogDescriptor?.shortName ?? displayName
     }
 
     /// The descriptor the app products select at launch. Defaults to Gemma 4.

@@ -1012,6 +1012,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                         onEvent(.content(visible))
                     }
                     if stopMatcher.isStopped { shouldStop = true }
+                case .thinking:
+                    // The Chat Completions endpoint does not expose a thought
+                    // channel. It remains separate from visible content.
+                    break
                 case .toolCall(let call):
                     calls.append(call)
                     onEvent(.toolCall(call))

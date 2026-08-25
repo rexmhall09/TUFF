@@ -131,4 +131,28 @@ import Testing
         try request.validate()
     }
 
+    @Test func reasoningControlsMatchTheModelFamily() throws {
+        try AppGenerationRequest.validateReasoning(
+            family: .gemma4,
+            reasoning: .on,
+            reasoningEffort: nil)
+        try AppGenerationRequest.validateReasoning(
+            family: .gptOss,
+            reasoning: .off,
+            reasoningEffort: .high)
+
+        #expect(throws: AppInferenceError.self) {
+            try AppGenerationRequest.validateReasoning(
+                family: .gptOss,
+                reasoning: .on,
+                reasoningEffort: .medium)
+        }
+        #expect(throws: AppInferenceError.self) {
+            try AppGenerationRequest.validateReasoning(
+                family: .qwen36,
+                reasoning: .off,
+                reasoningEffort: .low)
+        }
+    }
+
 }

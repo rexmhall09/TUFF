@@ -7,6 +7,7 @@ import SwiftUI
 struct OutputPaneView: View {
     let model: AppModel
     @State private var responseCopyFeedbackID: UUID?
+    @State private var thinkingExpanded = false
 
     var body: some View {
         Group {
@@ -24,21 +25,24 @@ struct OutputPaneView: View {
                 responseCopyFeedbackID = nil
             }
         }
+        .onChange(of: model.runIdentity) { _, _ in
+            thinkingExpanded = false
+        }
         .contextMenu {
             Button("Copy response") {
                 copyResponse()
             }
-            .disabled(model.outputResponsePlainText.isEmpty)
+            .disabled(transcriptOutput.isEmpty)
 
             Button("Copy prompt") {
-                copy(model.outputPromptText)
+                copy(transcriptPrompt)
             }
-            .disabled(model.outputPromptText.isEmpty)
+            .disabled(transcriptPrompt.isEmpty)
 
             Button("Copy conversation") {
-                copy(model.outputConversationPlainText)
+                copy(transcriptConversationText)
             }
-            .disabled(model.outputConversationPlainText.isEmpty)
+            .disabled(transcriptConversationText.isEmpty)
 
             Divider()
 
@@ -60,27 +64,107 @@ struct OutputPaneView: View {
     }
 
     private var transcript: some View {
-        IncrementalTranscriptView(
-            history: model.conversation.map {
-                TranscriptTurn(prompt: $0.prompt, response: $0.response)
-            },
-            prompt: model.outputPromptText,
-            images: model.outputImageAttachments,
-            output: model.outputText,
-            mailbox: model.generationTranscriptMailbox,
-            isTerminal: !model.isRunning,
-            showsPrefillPlaceholder: model.isRunning
-                && model.outputResponsePlainText.isEmpty,
-            runIdentity: model.runIdentity)
+        VStack(spacing: 0) {
+            if !transcriptThinking.isEmpty {
+                thinkingDisclosure
+                    .padding(.horizontal, 24)
+                    .padding(.top, 14)
+            }
+            IncrementalTranscriptView(
+                history: transcriptHistory.map {
+                    TranscriptTurn(prompt: $0.prompt, response: $0.response)
+                },
+                prompt: transcriptPrompt,
+                images: transcriptImages,
+                output: transcriptOutput,
+                mailbox: model.outputPromptText.isEmpty
+                    ? nil : model.generationTranscriptMailbox,
+                isTerminal: !model.isRunning,
+                showsPrefillPlaceholder: model.isRunning
+                    && model.outputResponsePlainText.isEmpty,
+                runIdentity: model.runIdentity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) {
-                if !model.isRunning && !model.outputResponsePlainText.isEmpty {
+                if !model.isRunning && !transcriptOutput.isEmpty {
                     copyResponseButton
                         .padding(8)
                 }
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 20)
+        }
+    }
+
+    private var thinkingDisclosure: some View {
+        DisclosureGroup(isExpanded: $thinkingExpanded) {
+            ScrollView {
+                Text(transcriptThinking)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            }
+            .frame(maxHeight: 180)
+        } label: {
+            Label(model.isRunning && transcriptOutput.isEmpty
+                  ? "Thinking…" : "Thinking",
+                  systemImage: "brain")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityHint("Shows or hides the model's reasoning text")
+    }
+
+    private var transcriptHistory: [AppChatTurn] {
+        guard let current = transcriptCurrentTurn else { return model.conversation }
+        if model.outputPromptText.isEmpty {
+            return Array(model.conversation.dropLast())
+        }
+        guard let last = model.conversation.last,
+              last.prompt == current.prompt,
+              last.response == current.response else { return model.conversation }
+        return Array(model.conversation.dropLast())
+    }
+
+    private var transcriptCurrentTurn: AppChatTurn? {
+        if !model.outputPromptText.isEmpty || model.isRunning {
+            return AppChatTurn(
+                prompt: model.outputPromptText,
+                response: model.outputResponsePlainText,
+                thinking: model.outputThinkingText.isEmpty
+                    ? nil : model.outputThinkingText)
+        }
+        return model.conversation.last
+    }
+
+    private var transcriptPrompt: String {
+        transcriptCurrentTurn?.prompt ?? ""
+    }
+
+    private var transcriptOutput: String {
+        transcriptCurrentTurn?.response ?? ""
+    }
+
+    private var transcriptThinking: String {
+        transcriptCurrentTurn?.thinking ?? ""
+    }
+
+    private var transcriptImages: [AppImageAttachment] {
+        guard model.outputPromptText.isEmpty,
+              let id = transcriptCurrentTurn?.id else {
+            return model.outputImageAttachments
+        }
+        return model.conversationStore.attachments(for: id)
+    }
+
+    private var transcriptConversationText: String {
+        let turns = transcriptHistory + (transcriptCurrentTurn.map { [$0] } ?? [])
+        return turns.map { turn in
+            "You:\n\(turn.prompt)\n\nAnswer:\n\(turn.response)"
+        }.joined(separator: "\n\n")
     }
 
     private var copyResponseButton: some View {
@@ -181,7 +265,7 @@ struct OutputPaneView: View {
     }
 
     private func copyResponse() {
-        copy(model.outputResponsePlainText)
+        copy(transcriptOutput)
         withAnimation(.easeIn(duration: 0.15)) {
             responseCopyFeedbackID = UUID()
         }

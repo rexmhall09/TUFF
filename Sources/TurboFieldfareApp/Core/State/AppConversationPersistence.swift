@@ -27,22 +27,25 @@ public struct AppPersistedChatTurn: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public var prompt: String
     public var response: String
+    public var thinking: String?
     public var attachments: [AppConversationAttachment]
 
     public init(
         id: UUID = UUID(),
         prompt: String,
         response: String,
+        thinking: String? = nil,
         attachments: [AppConversationAttachment] = []
     ) {
         self.id = id
         self.prompt = prompt
         self.response = response
+        self.thinking = thinking
         self.attachments = attachments
     }
 
     public var chatTurn: AppChatTurn {
-        AppChatTurn(id: id, prompt: prompt, response: response)
+        AppChatTurn(id: id, prompt: prompt, response: response, thinking: thinking)
     }
 }
 

@@ -52,7 +52,10 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
         let first = AppConversationStore(repository: repository)
         first.recordCompletedTurn(
-            AppChatTurn(prompt: "Explain why local models are useful", response: "Privacy."),
+            AppChatTurn(
+                prompt: "Explain why local models are useful",
+                response: "Privacy.",
+                thinking: "The user asked for one benefit."),
             attachments: [],
             modelID: "gpt-oss-20b",
             now: Date(timeIntervalSince1970: 1_700_000_000))
@@ -67,7 +70,8 @@ import Testing
             AppChatTurn(
                 id: restored.conversation[0].id,
                 prompt: "Explain why local models are useful",
-                response: "Privacy.")
+                response: "Privacy.",
+                thinking: "The user asked for one benefit.")
         ])
 
         let chat = restored.selectedConversation!

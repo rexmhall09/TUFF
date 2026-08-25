@@ -133,7 +133,10 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                     let generation = AppGenerationRequest(
                         modelDirectory: modelDirectory, prompt: request.prompt,
                         history: request.history.map {
-                            AppChatTurn(prompt: $0.prompt, response: $0.response)
+                            AppChatTurn(
+                                prompt: $0.prompt,
+                                response: $0.response,
+                                thinking: $0.thinking)
                         },
                         imageAttachments: (request.imageAttachments ?? []).map {
                             AppImageAttachment(
@@ -147,6 +150,9 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         maxContextTokens: request.maxContextTokens,
                         reasoning: ChatReasoning(
                             rawValue: request.reasoning.rawValue) ?? .off,
+                        reasoningEffort: request.reasoningEffort.flatMap {
+                            GPTOSSReasoningEffort(rawValue: $0.rawValue)
+                        },
                         temperature: request.temperature,
                         topK: request.topK,
                         topP: request.topP,
