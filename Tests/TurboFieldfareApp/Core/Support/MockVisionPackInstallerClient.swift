@@ -16,10 +16,18 @@ final class MockVisionPackInstallerClient: AppVisionPackInstallerClient, Sendabl
     private let task = Mutex<Task<Void, Never>?>(nil)
     private let activations = Mutex(0)
     private let installTargets = Mutex<[URL]>([])
+    private let discardTargets = Mutex<[URL]>([])
+    private let removalTargets = Mutex<[URL]>([])
 
     var activationCount: Int { activations.withLock { $0 } }
     var installedTextModelDirectories: [URL] {
         installTargets.withLock { $0 }
+    }
+    var discardedTextModelDirectories: [URL] {
+        discardTargets.withLock { $0 }
+    }
+    var removedTextModelDirectories: [URL] {
+        removalTargets.withLock { $0 }
     }
 
     init(
@@ -83,8 +91,12 @@ final class MockVisionPackInstallerClient: AppVisionPackInstallerClient, Sendabl
         }
     }
 
-    func discardPartialInstall(textModelDirectory: URL) async throws {}
-    func removeInstalled(textModelDirectory: URL) async throws {}
+    func discardPartialInstall(textModelDirectory: URL) async throws {
+        discardTargets.withLock { $0.append(textModelDirectory.standardizedFileURL) }
+    }
+    func removeInstalled(textModelDirectory: URL) async throws {
+        removalTargets.withLock { $0.append(textModelDirectory.standardizedFileURL) }
+    }
     func preparedInstallIsValid(textModelDirectory: URL) -> Bool { preparedValid }
     func activatePreparedInstall(
         textModelDirectory: URL,

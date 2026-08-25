@@ -397,6 +397,106 @@ import TurboFieldfareRepackCore
     }
 
     @MainActor
+    @Test func textAndAddOnDownloadsReserveDiskAgainstEachOther() async throws {
+        let gemmaDirectory = try makeCompleteModelInstall(
+            "cross-reservation-gemma", stampedAs: .default)
+        defer { try? FileManager.default.removeItem(at: gemmaDirectory) }
+
+        let vision = AppModelInstallDescriptor.visionCompanion
+        let qwen = AppModelInstallDescriptor.qwen36
+        let qwenInstaller = MockModelInstallerClient(
+            requirement: AppModelInstallRequirement(
+                requiredBytes: qwen.requiredFreeBytes,
+                availableBytes: qwen.requiredFreeBytes + vision.installedBytes / 2),
+            descriptor: qwen,
+            holdOpen: true)
+        let qwenCoordinator = ModelInstallCoordinator(
+            descriptor: qwen,
+            directoryURL: temporaryInstallPath("cross-reservation-qwen"),
+            client: qwenInstaller)
+        let visionInstaller = MockVisionPackInstallerClient(
+            requirement: AppModelInstallRequirement(
+                requiredBytes: vision.requiredFreeBytes,
+                availableBytes: vision.requiredFreeBytes + qwen.installedBytes / 2),
+            events: [.copyingPayload(
+                reusedBytes: 0,
+                downloadedThisRunBytes: 0,
+                totalBytes: vision.installedBytes)],
+            holdOpen: true)
+        let model = AppModel(
+            modelDirectory: gemmaDirectory,
+            client: MockLifecycleInferenceClient(),
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [qwenCoordinator],
+            visionInstaller: visionInstaller)
+        let gemma = try #require(model.installs.first { $0.descriptor == .default })
+
+        #expect(qwenCoordinator.canInstall)
+        #expect(model.canInstallVisionPack(for: gemma))
+
+        model.installVisionPack(for: gemma)
+        try await waitUntil("add-on reservation appears") {
+            model.visionInstallOutstandingBytes > 0
+        }
+        qwenCoordinator.refresh()
+        #expect(!qwenCoordinator.canInstall)
+
+        model.cancelVisionInstall()
+        try await waitUntil("add-on cancellation settles") {
+            !model.isInstallingVisionPack
+        }
+        qwenCoordinator.refresh()
+        #expect(qwenCoordinator.canInstall)
+
+        qwenCoordinator.install()
+        try await waitUntil("text download starts") { qwenCoordinator.isInstalling }
+        #expect(model.visionInstallRequirement(for: gemma)?.canInstall == false)
+        #expect(!model.canInstallVisionPack(for: gemma))
+
+        qwenCoordinator.cancel()
+        try await waitUntil("text cancellation settles") {
+            !qwenCoordinator.isInstalling
+        }
+    }
+
+    @MainActor
+    @Test func nonselectedAddOnCanBeRemovedWhileSelectedModelStaysLoaded() async throws {
+        let gemmaDirectory = try makeCompleteModelInstall(
+            "remove-other-gemma", stampedAs: .default)
+        let qwenDirectory = try makeCompleteModelInstall(
+            "remove-other-qwen", stampedAs: .qwen36)
+        try installVisionCompanion(forTextModel: qwenDirectory)
+        defer {
+            try? FileManager.default.removeItem(at: gemmaDirectory)
+            try? FileManager.default.removeItem(at: qwenDirectory)
+        }
+        let qwen = ModelInstallCoordinator(
+            descriptor: .qwen36,
+            directoryURL: qwenDirectory,
+            client: MockModelInstallerClient(descriptor: .qwen36))
+        let visionInstaller = MockVisionPackInstallerClient()
+        let model = AppModel(
+            modelDirectory: gemmaDirectory,
+            client: MockLifecycleInferenceClient(),
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [qwen],
+            visionInstaller: visionInstaller)
+        model.loadState = .ready(modelDirectory: gemmaDirectory, loadSeconds: 0)
+
+        #expect(model.canRemoveVisionPack(for: qwen))
+        model.removeVisionPack(for: qwen)
+        try await waitUntil("nonselected add-on removal runs") {
+            !visionInstaller.removedTextModelDirectories.isEmpty
+        }
+
+        #expect(visionInstaller.removedTextModelDirectories == [
+            qwenDirectory.standardizedFileURL,
+        ])
+        #expect(model.selectedDescriptor == .default)
+        #expect(model.loadState.isReady)
+    }
+
+    @MainActor
     @Test func loadedModelBlocksSelectionWhileGenerating() {
         let model = makeModel(
             selectedDirectory: temporaryInstallPath("busy-gemma"),
@@ -450,4 +550,13 @@ private func waitUntil(_ condition: () -> Bool) async throws {
         try await Task.sleep(for: .milliseconds(5))
     }
     Issue.record("condition did not become true")
+}
+
+@MainActor
+private func waitUntil(_ label: String, _ condition: () -> Bool) async throws {
+    for _ in 0..<200 {
+        if condition() { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    Issue.record("condition did not become true: \(label)")
 }

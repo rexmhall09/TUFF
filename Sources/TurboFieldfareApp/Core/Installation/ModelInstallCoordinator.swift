@@ -133,10 +133,13 @@ public final class ModelInstallCoordinator: Identifiable {
         let generation = self.generation
         let outputDirectory = directoryURL
         state = .checking
-        task = Task { [weak self, client] in
+        // Construct the stream before exposing the consumer task. Its builder
+        // registers the installer's worker synchronously, so an immediate
+        // Cancel cannot arrive in the gap between `.checking` and registration.
+        let stream = client.installDefaultModel(outputDirectory: outputDirectory)
+        task = Task { [weak self] in
             do {
-                for try await event in client.installDefaultModel(
-                    outputDirectory: outputDirectory) {
+                for try await event in stream {
                     guard let self else { return }
                     self.apply(event, generation: generation)
                 }

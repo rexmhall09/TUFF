@@ -377,9 +377,16 @@ public final class AppModel {
             // check has to net out what the others still owe.
             coordinator.reservedByOtherInstalls = { [weak self, weak coordinator] in
                 guard let self, let coordinator else { return 0 }
-                return self.installs
+                let textBytes = self.installs
                     .filter { $0 !== coordinator }
-                    .reduce(0) { $0 + $1.outstandingBytes }
+                    .reduce(UInt64(0)) { partial, install in
+                        let addition = partial.addingReportingOverflow(
+                            install.outstandingBytes)
+                        return addition.overflow ? .max : addition.partialValue
+                    }
+                let addition = textBytes.addingReportingOverflow(
+                    self.visionInstallOutstandingBytes)
+                return addition.overflow ? .max : addition.partialValue
             }
         }
         applySelectedConversationModelBinding()
@@ -583,6 +590,24 @@ public final class AppModel {
 
     public var isInstallingVisionPack: Bool { visionInstallState.isInstalling }
 
+    public var visionInstallOutstandingBytes: UInt64 {
+        guard let targetID = visionInstallTargetModelID,
+              let target = installs.first(where: { $0.id == targetID }),
+              target.descriptor.supportsImageInput else { return 0 }
+        switch visionInstallState {
+        case .checking, .downloadingMetadata, .planning, .reservingOutput,
+             .hashingOutput, .finalizing:
+            return visionInstallDescriptor(for: target).installedBytes
+        case .copyingPayload(let reused, let downloaded, let total):
+            let completed = reused.addingReportingOverflow(downloaded)
+            guard !completed.overflow, total > completed.partialValue else { return 0 }
+            return total - completed.partialValue
+        case .idle, .activating, .cancelling, .discarding, .cancelled,
+             .readyToActivate, .recoverable, .installed, .failed:
+            return 0
+        }
+    }
+
     public var visionInstallDescriptor: AppModelInstallDescriptor {
         visionInstallDescriptor(for: selectedInstall)
     }
@@ -645,7 +670,7 @@ public final class AppModel {
     /// still require an unloaded session below.
     public var canPrepareVisionCompanionOperation: Bool {
         !isRunning && !loadState.isLoading
-            && !isInstallingModel && !isVisionCompanionOperationInProgress
+            && !isVisionCompanionOperationInProgress
     }
 
     /// Activation, discard, and removal mutate companion state and therefore
@@ -662,7 +687,8 @@ public final class AppModel {
         for coordinator: ModelInstallCoordinator
     ) -> Bool {
         guard isVisionRuntimeSupported,
-              coordinator.descriptor.supportsImageInput else { return false }
+              coordinator.descriptor.supportsImageInput,
+              hardwareEligibility(for: coordinator).isCompatible else { return false }
         // A layout with nowhere to put a companion cannot be repaired by
         // downloading one, so do not offer to.
         let status = visionInstallationStatus(for: coordinator)
@@ -672,11 +698,18 @@ public final class AppModel {
            case .readyToActivate = visionInstallState { return false }
         guard canPrepareVisionCompanionOperation else { return false }
         do {
-            return try visionInstaller.checkInstallRequirement(
+            return try checkedVisionInstallRequirement(
                 textModelDirectory: coordinator.directoryURL).canInstall
         } catch {
             return false
         }
+    }
+
+    public func visionInstallRequirement(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelInstallRequirement? {
+        try? checkedVisionInstallRequirement(
+            textModelDirectory: coordinator.directoryURL)
     }
 
     public var canActivateVisionPack: Bool {
@@ -1324,11 +1357,25 @@ public final class AppModel {
     }
 
     public var canDiscardVisionPackDownload: Bool {
-        hasPartialVisionPackDownload && canBeginVisionCompanionOperation
+        canDiscardVisionPackDownload(for: selectedInstall)
     }
 
     public var canRemoveVisionPack: Bool {
-        hasVisionPackDirectory && canBeginVisionCompanionOperation
+        canRemoveVisionPack(for: selectedInstall)
+    }
+
+    public func canDiscardVisionPackDownload(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        hasPartialVisionPackDownload(for: coordinator)
+            && canMutateVisionPack(for: coordinator)
+    }
+
+    public func canRemoveVisionPack(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        hasVisionPackDirectory(for: coordinator)
+            && canMutateVisionPack(for: coordinator)
     }
 
     public var hasVisionPackDirectory: Bool {
@@ -1447,10 +1494,17 @@ public final class AppModel {
     }
 
     public func discardVisionPackDownload() {
-        guard canDiscardVisionPackDownload else { return }
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        discardVisionPackDownload(for: selectedInstall)
+    }
+
+    public func discardVisionPackDownload(
+        for coordinator: ModelInstallCoordinator
+    ) {
+        guard canDiscardVisionPackDownload(for: coordinator) else { return }
+        let directory = coordinator.directoryURL.standardizedFileURL
         visionInstallCancellationRequested = false
+        visionInstallTargetModelID = coordinator.id
+        visionInstallTargetDirectory = directory
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
         visionInstallState = .discarding
@@ -1461,6 +1515,8 @@ public final class AppModel {
                 guard let self, generation == self.visionInstallGeneration else { return }
                 self.visionInstallTask = nil
                 self.visionInstallState = .idle
+                self.visionInstallTargetModelID = nil
+                self.visionInstallTargetDirectory = nil
                 self.refreshVisionInstallReadiness()
             } catch {
                 self?.finishVisionInstallFailure(error, generation: generation)
@@ -1480,10 +1536,15 @@ public final class AppModel {
 
     public func removeVisionPack() {
         isConfirmingVisionPackRemoval = false
-        guard canRemoveVisionPack else { return }
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        removeVisionPack(for: selectedInstall)
+    }
+
+    public func removeVisionPack(for coordinator: ModelInstallCoordinator) {
+        guard canRemoveVisionPack(for: coordinator) else { return }
+        let directory = coordinator.directoryURL.standardizedFileURL
         visionInstallCancellationRequested = false
+        visionInstallTargetModelID = coordinator.id
+        visionInstallTargetDirectory = directory
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
         visionInstallState = .discarding
@@ -1494,7 +1555,11 @@ public final class AppModel {
                 guard let self, generation == self.visionInstallGeneration else { return }
                 self.visionInstallTask = nil
                 self.visionInstallState = .idle
-                self.visionInstallationStatus = .missing
+                if coordinator.id == self.selectedModelID {
+                    self.visionInstallationStatus = .missing
+                }
+                self.visionInstallTargetModelID = nil
+                self.visionInstallTargetDirectory = nil
                 self.refreshVisionInstallReadiness()
             } catch {
                 self?.finishVisionInstallFailure(error, generation: generation)
@@ -1569,7 +1634,7 @@ public final class AppModel {
         }
         visionInstallReadiness = .checking
         do {
-            let requirement = try visionInstaller.checkInstallRequirement(
+            let requirement = try checkedVisionInstallRequirement(
                 textModelDirectory: textModelDirectory)
             visionInstallReadiness = requirement.canInstall
                 ? .ready(requirement)
@@ -1577,6 +1642,33 @@ public final class AppModel {
         } catch {
             visionInstallReadiness = .failed("\(error)")
         }
+    }
+
+    private var textInstallOutstandingBytes: UInt64 {
+        installs.reduce(UInt64(0)) { partial, install in
+            let addition = partial.addingReportingOverflow(install.outstandingBytes)
+            return addition.overflow ? .max : addition.partialValue
+        }
+    }
+
+    private func checkedVisionInstallRequirement(
+        textModelDirectory: URL
+    ) throws -> AppModelInstallRequirement {
+        let measured = try visionInstaller.checkInstallRequirement(
+            textModelDirectory: textModelDirectory)
+        let reserved = textInstallOutstandingBytes
+        return AppModelInstallRequirement(
+            probePath: measured.probePath,
+            requiredBytes: measured.requiredBytes,
+            availableBytes: measured.availableBytes > reserved
+                ? measured.availableBytes - reserved : 0)
+    }
+
+    private func canMutateVisionPack(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        canPrepareVisionCompanionOperation
+            && (coordinator.id != selectedModelID || !loadState.isReady)
     }
 
     private func applyVisionInstallEvent(
