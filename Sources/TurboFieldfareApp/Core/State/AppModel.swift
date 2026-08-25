@@ -7,93 +7,231 @@ import Observation
 @MainActor
 @Observable
 public final class AppModel {
-    public enum RunState: Equatable {
-        case idle
-        case running
-    }
+    public typealias RunState = AppRunState
 
-    public var modelPathText: String
-    public var promptText: String = ""
-    public private(set) var imageAttachments: [AppImageAttachment] = []
-    public private(set) var imageAttachmentError: String?
+    public let conversationStore = AppConversationStore()
+    public let modelLibraryStore = AppModelLibraryStore()
+    public let settingsStore = AppSettingsStore()
+    public let serverStore = AppServerStore()
+    public let inferenceStore = AppSharedInferenceStore()
+
+    public var modelPathText: String {
+        get { modelLibraryStore.modelPathText }
+        set { modelLibraryStore.modelPathText = newValue }
+    }
+    public var promptText: String {
+        get { conversationStore.promptText }
+        set { conversationStore.promptText = newValue }
+    }
+    public private(set) var imageAttachments: [AppImageAttachment] {
+        get { conversationStore.imageAttachments }
+        set { conversationStore.imageAttachments = newValue }
+    }
+    public private(set) var imageAttachmentError: String? {
+        get { conversationStore.imageAttachmentError }
+        set { conversationStore.imageAttachmentError = newValue }
+    }
     /// A count, not a flag. The picker and a drop can both be staging at once,
     /// and whichever finished first cleared a shared Bool — reopening `canRun`
     /// while the other was still copying, so Generate ran against a partial set
     /// and the remaining images were appended after the run had snapshotted its
     /// own, where `removeImage` and `clearImages` are no-ops.
-    private var addingImagesCount = 0
+    private var addingImagesCount: Int {
+        get { conversationStore.addingImagesCount }
+        set { conversationStore.addingImagesCount = newValue }
+    }
     public var isAddingImages: Bool { addingImagesCount > 0 }
     /// Set by the Model menu's Remove Image Support item; the window presents
     /// the confirmation.
-    public var isConfirmingVisionPackRemoval = false
-    public private(set) var outputPromptText: String = ""
-    public private(set) var outputImageAttachments: [AppImageAttachment] = []
-    public var outputText: String = ""
+    public var isConfirmingVisionPackRemoval: Bool {
+        get { modelLibraryStore.isConfirmingVisionPackRemoval }
+        set { modelLibraryStore.isConfirmingVisionPackRemoval = newValue }
+    }
+    public private(set) var outputPromptText: String {
+        get { conversationStore.outputPromptText }
+        set { conversationStore.outputPromptText = newValue }
+    }
+    public private(set) var outputImageAttachments: [AppImageAttachment] {
+        get { conversationStore.outputImageAttachments }
+        set { conversationStore.outputImageAttachments = newValue }
+    }
+    public var outputText: String {
+        get { conversationStore.outputText }
+        set { conversationStore.outputText = newValue }
+    }
     /// Completed exchanges, oldest first. The in-flight exchange lives in
     /// `outputPromptText` / `outputText` and only joins this once it finishes.
-    public private(set) var conversation: [AppChatTurn] = []
-    public var runState: RunState = .idle
-    public var runtimeOptions = AppRuntimeOptions()
-    public var maxNewTokensOverride: Int?
-    public var maxContextTokens: Int = 4096
-    public var temperature: Double = 0.2
-    public var topKEnabled: Bool = true
-    public var topK: Int = 64
-    public var topPEnabled: Bool = true
-    public var topP: Double = 0.95
-    public private(set) var newlineShortcut: AppNewlineShortcut = .return
-    public private(set) var showPromptExamples: Bool = true
-    public private(set) var sentPromptBehavior: AppSentPromptBehavior = .keep
-    public private(set) var loadModelOnLaunch: Bool = false
+    public private(set) var conversation: [AppChatTurn] {
+        get { conversationStore.conversation }
+        set { conversationStore.conversation = newValue }
+    }
+    public var runState: RunState {
+        get { inferenceStore.runState }
+        set { inferenceStore.runState = newValue }
+    }
+    public var runtimeOptions: AppRuntimeOptions {
+        get { settingsStore.runtimeOptions }
+        set { settingsStore.runtimeOptions = newValue }
+    }
+    public var maxNewTokensOverride: Int? {
+        get { settingsStore.maxNewTokensOverride }
+        set { settingsStore.maxNewTokensOverride = newValue }
+    }
+    public var maxContextTokens: Int {
+        get { settingsStore.maxContextTokens }
+        set { settingsStore.maxContextTokens = newValue }
+    }
+    public var temperature: Double {
+        get { settingsStore.temperature }
+        set { settingsStore.temperature = newValue }
+    }
+    public var topKEnabled: Bool {
+        get { settingsStore.topKEnabled }
+        set { settingsStore.topKEnabled = newValue }
+    }
+    public var topK: Int {
+        get { settingsStore.topK }
+        set { settingsStore.topK = newValue }
+    }
+    public var topPEnabled: Bool {
+        get { settingsStore.topPEnabled }
+        set { settingsStore.topPEnabled = newValue }
+    }
+    public var topP: Double {
+        get { settingsStore.topP }
+        set { settingsStore.topP = newValue }
+    }
+    public private(set) var newlineShortcut: AppNewlineShortcut {
+        get { settingsStore.newlineShortcut }
+        set { settingsStore.newlineShortcut = newValue }
+    }
+    public private(set) var showPromptExamples: Bool {
+        get { settingsStore.showPromptExamples }
+        set { settingsStore.showPromptExamples = newValue }
+    }
+    public private(set) var sentPromptBehavior: AppSentPromptBehavior {
+        get { settingsStore.sentPromptBehavior }
+        set { settingsStore.sentPromptBehavior = newValue }
+    }
+    public private(set) var loadModelOnLaunch: Bool {
+        get { settingsStore.loadModelOnLaunch }
+        set { settingsStore.loadModelOnLaunch = newValue }
+    }
     /// Whether launching the app should load the model straight away. Off by
     /// default, because loading takes minutes and holds gigabytes.
-    public var diagnostics: AppDiagnostics?
-    public var error: AppInferenceError?
+    public var diagnostics: AppDiagnostics? {
+        get { inferenceStore.diagnostics }
+        set { inferenceStore.diagnostics = newValue }
+    }
+    public var error: AppInferenceError? {
+        get { inferenceStore.error }
+        set { inferenceStore.error = newValue }
+    }
     /// One coordinator per catalog model. Each owns its own directory,
     /// installer, and progress, so their downloads run independently of each
     /// other and of whichever model is selected.
-    public private(set) var installs: [ModelInstallCoordinator]
+    public private(set) var installs: [ModelInstallCoordinator] {
+        get { modelLibraryStore.installs }
+        set { modelLibraryStore.installs = newValue }
+    }
     /// `AppModelInstallDescriptor.id` of the model the app is focused on: the
     /// one it will load, and the one the single-model properties below report.
-    public private(set) var selectedModelID: String
+    public private(set) var selectedModelID: String {
+        get { modelLibraryStore.selectedModelID }
+        set { modelLibraryStore.selectedModelID = newValue }
+    }
     /// The companion download is 1.5 GB and deserves the same answer to "how
     /// long is this going to take" as the model download. Kept separate because
     /// both can be in flight in principle and an estimator holds per-download
     /// rate state.
-    public private(set) var visionInstallETAPresentation: DownloadETAPresentation = .hidden
-    public private(set) var visionInstallETAText: String?
-    public var visionInstallState: AppModelInstallState = .idle
+    public private(set) var visionInstallETAPresentation: DownloadETAPresentation {
+        get { modelLibraryStore.visionInstallETAPresentation }
+        set { modelLibraryStore.visionInstallETAPresentation = newValue }
+    }
+    public private(set) var visionInstallETAText: String? {
+        get { modelLibraryStore.visionInstallETAText }
+        set { modelLibraryStore.visionInstallETAText = newValue }
+    }
+    public var visionInstallState: AppModelInstallState {
+        get { modelLibraryStore.visionInstallState }
+        set { modelLibraryStore.visionInstallState = newValue }
+    }
     /// How far activation's hash of the companion weights has got, 0 to 1.
     /// Activation reads about 1.5 GB, which was a bare spinner with no way to
     /// tell a slow verify from a stuck one.
-    public private(set) var visionActivationProgress: Double?
-    public private(set) var visionInstallReadiness: AppModelInstallReadiness = .checking
-    public private(set) var visionInstallationStatus: AppVisionPackInstallationStatus
+    public private(set) var visionActivationProgress: Double? {
+        get { modelLibraryStore.visionActivationProgress }
+        set { modelLibraryStore.visionActivationProgress = newValue }
+    }
+    public private(set) var visionInstallReadiness: AppModelInstallReadiness {
+        get { modelLibraryStore.visionInstallReadiness }
+        set { modelLibraryStore.visionInstallReadiness = newValue }
+    }
+    public private(set) var visionInstallationStatus: AppVisionPackInstallationStatus {
+        get { modelLibraryStore.visionInstallationStatus }
+        set { modelLibraryStore.visionInstallationStatus = newValue }
+    }
 
-    public var loadState: AppModelLoadState = .notLoaded
-    public private(set) var loadedRuntimeKey: AppLoadedRuntimeKey?
-    public private(set) var phase: AppGenerationPhase = .idle
-    public private(set) var liveTokenCount: Int = 0
-    public private(set) var liveElapsedDecodeSeconds: Double = 0
-    public private(set) var livePrefillDone: Int = 0
-    public private(set) var livePrefillTotal: Int = 0
-    public private(set) var liveMemoryBytes: UInt64?
+    public var loadState: AppModelLoadState {
+        get { inferenceStore.loadState }
+        set { inferenceStore.loadState = newValue }
+    }
+    public private(set) var loadedRuntimeKey: AppLoadedRuntimeKey? {
+        get { inferenceStore.loadedRuntimeKey }
+        set { inferenceStore.loadedRuntimeKey = newValue }
+    }
+    public private(set) var phase: AppGenerationPhase {
+        get { inferenceStore.phase }
+        set { inferenceStore.phase = newValue }
+    }
+    public private(set) var liveTokenCount: Int {
+        get { inferenceStore.liveTokenCount }
+        set { inferenceStore.liveTokenCount = newValue }
+    }
+    public private(set) var liveElapsedDecodeSeconds: Double {
+        get { inferenceStore.liveElapsedDecodeSeconds }
+        set { inferenceStore.liveElapsedDecodeSeconds = newValue }
+    }
+    public private(set) var livePrefillDone: Int {
+        get { inferenceStore.livePrefillDone }
+        set { inferenceStore.livePrefillDone = newValue }
+    }
+    public private(set) var livePrefillTotal: Int {
+        get { inferenceStore.livePrefillTotal }
+        set { inferenceStore.livePrefillTotal = newValue }
+    }
+    public private(set) var liveMemoryBytes: UInt64? {
+        get { inferenceStore.liveMemoryBytes }
+        set { inferenceStore.liveMemoryBytes = newValue }
+    }
     /// Resident bytes of the inference process. The footprint above is what
     /// the system counts against the process; this is what it actually holds,
     /// including the mapped weights the footprint omits. A 26B model reports
     /// about 160 MB of footprint right after loading, which is true and reads
     /// as nonsense without this beside it.
-    public private(set) var liveResidentBytes: UInt64?
+    public private(set) var liveResidentBytes: UInt64? {
+        get { inferenceStore.liveResidentBytes }
+        set { inferenceStore.liveResidentBytes = newValue }
+    }
     /// Tower weights the inference process is holding mapped, reported
     /// separately because no per-process counter attributes them.
-    public private(set) var visionTowerMappedBytes: UInt64?
-    public private(set) var isCancellationPending: Bool = false
+    public private(set) var visionTowerMappedBytes: UInt64? {
+        get { inferenceStore.visionTowerMappedBytes }
+        set { inferenceStore.visionTowerMappedBytes = newValue }
+    }
+    public private(set) var isCancellationPending: Bool {
+        get { inferenceStore.isCancellationPending }
+        set { inferenceStore.isCancellationPending = newValue }
+    }
     /// Increments when a generation starts. The transcript watches it to put
     /// the newest turn on screen: with several images attached, the prompt and
     /// its thumbnails are tall enough to push the answer out of view, so
     /// scrolling only when the reader was already at the bottom left them
     /// looking at their own attachments while the model worked.
-    public private(set) var runIdentity: Int = 0
+    public private(set) var runIdentity: Int {
+        get { conversationStore.runIdentity }
+        set { conversationStore.runIdentity = newValue }
+    }
 
     private let client: any AppInferenceClient
     private let visionInstaller: any AppVisionPackInstallerClient
@@ -115,7 +253,10 @@ public final class AppModel {
     /// transaction. This is deliberately separate from `selectedModelID`:
     /// downloading Qwen image support must not silently switch away from a
     /// loaded Gemma text session (or vice versa).
-    public private(set) var visionInstallTargetModelID: String?
+    public private(set) var visionInstallTargetModelID: String? {
+        get { modelLibraryStore.visionInstallTargetModelID }
+        set { modelLibraryStore.visionInstallTargetModelID = newValue }
+    }
     private var visionInstallTargetDirectory: URL?
     private var pendingExplicitLoadRuntimeKey: AppLoadedRuntimeKey?
     private var activeRunRuntimeKey: AppLoadedRuntimeKey?
@@ -156,6 +297,18 @@ public final class AppModel {
                 settingsProfileKey: .defaults(for: settingsProfileKey)
             ])
         let modelSettings = settings.profile(for: settingsProfileKey)
+        // Initialize AppModel's stored dependencies before writing through the
+        // domain-store proxy properties below. Swift treats those computed
+        // properties as accesses to self even though each store already has a
+        // default value.
+        self.client = client
+        self.visionInstaller = visionInstaller
+        self.memorySampler = memorySampler
+        self.attachmentStore = attachmentStore
+        self.isVisionRuntimeSupported = visionRuntimeSupported
+        self.settingsPersistenceEnabled = settingsPersistenceEnabled
+        self.installETAClock = installETAClock
+        self.installETAOrigin = installETAClock.now
         self.modelPathText = directory.path
         // The app always releases the image tower after each image. Keeping it
         // resident saves a few hundred milliseconds on a run of images and
@@ -178,15 +331,7 @@ public final class AppModel {
         self.showPromptExamples = settings.showPromptExamples
         self.sentPromptBehavior = settings.sentPromptBehavior
         self.loadModelOnLaunch = settings.loadModelOnLaunch
-        self.client = client
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
-        self.visionInstaller = visionInstaller
-        self.memorySampler = memorySampler
-        self.attachmentStore = attachmentStore
-        self.isVisionRuntimeSupported = visionRuntimeSupported
-        self.settingsPersistenceEnabled = settingsPersistenceEnabled
-        self.installETAClock = installETAClock
-        self.installETAOrigin = installETAClock.now
 
         // The injected installer owns the passed-in directory and becomes the
         // selected model; the rest of the catalog gets shipped coordinators at

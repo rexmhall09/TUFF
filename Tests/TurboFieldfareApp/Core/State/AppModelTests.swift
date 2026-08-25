@@ -237,7 +237,10 @@ import Testing
         let client = MockLifecycleInferenceClient()
         let directory = try makeCompleteModelInstall("stale-runtime")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = AppModel(
+            modelDirectory: directory,
+            client: client,
+            installer: MockModelInstallerClient(descriptor: .default))
         model.promptText = "go"
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
