@@ -31,6 +31,8 @@ kernel void mxfp4_gemv_simd(
     device half* output           [[buffer(3)]],
     constant uint& rows           [[buffer(4)]],
     constant uint& columns        [[buffer(5)]],
+    device const bfloat* bias     [[buffer(6)]],
+    constant uint& has_bias       [[buffer(7)]],
     uint threadgroupIndex         [[threadgroup_position_in_grid]],
     uint simdgroupIndex           [[simdgroup_index_in_threadgroup]],
     uint lane                     [[thread_index_in_simdgroup]])
@@ -55,5 +57,7 @@ kernel void mxfp4_gemv_simd(
         sum = fma(weight, float(input[group * kMXFP4GroupSize + lane]), sum);
     }
     sum = simd_sum(sum);
-    if (lane == 0u) output[row] = half(sum);
+    if (lane == 0u) {
+        output[row] = half(sum + (has_bias != 0u ? float(bias[row]) : 0.0f));
+    }
 }

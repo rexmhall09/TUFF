@@ -87,6 +87,45 @@ kernel void gptoss_capped_swiglu(
     output[gid] = half(silu * (l + 1.0f));
 }
 
+kernel void gptoss_capped_swiglu_interleaved(
+    device const half* gate_linear [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant float& limit [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) return;
+    const float g = min(float(gate_linear[gid * 2u]), limit);
+    const float l = clamp(float(gate_linear[gid * 2u + 1u]), -limit, limit);
+    const float silu = g / (1.0f + exp(-1.702f * g));
+    output[gid] = half(silu * (l + 1.0f));
+}
+
+kernel void gptoss_route_reduce(
+    device const half* route_partials [[buffer(0)]],
+    device const half* route_weights [[buffer(1)]],
+    device const half* residual [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& query_count [[buffer(4)]],
+    constant uint& hidden_size [[buffer(5)]],
+    constant uint& top_k [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = query_count * hidden_size;
+    if (gid >= total) return;
+    const uint token = gid / hidden_size;
+    const uint dimension = gid - token * hidden_size;
+    float value = float(residual[gid]);
+    const uint route_base = token * top_k;
+    for (uint slot = 0u; slot < top_k; ++slot) {
+        const uint route = route_base + slot;
+        value = fma(float(route_weights[route]),
+                    float(route_partials[route * hidden_size + dimension]),
+                    value);
+    }
+    output[gid] = half(value);
+}
+
 // GPT-OSS router selection: stable top-4 followed by a softmax over only the
 // selected logits. Ties prefer the lower expert index, matching the CPU and
 // official reference implementations.

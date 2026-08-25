@@ -24,6 +24,8 @@ final class MXFP4GEMV {
         inputOffset: Int = 0,
         output: MTLBuffer,
         outputOffset: Int = 0,
+        bias: MTLBuffer? = nil,
+        biasOffset: Int = 0,
         rows: UInt32,
         columns: UInt32
     ) {
@@ -42,6 +44,11 @@ final class MXFP4GEMV {
         var columnCount = columns
         encoder.setBytes(&rowCount, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&columnCount, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBuffer(bias ?? scales,
+                          offset: bias == nil ? scalesOffset : biasOffset,
+                          index: 6)
+        var hasBias: UInt32 = bias == nil ? 0 : 1
+        encoder.setBytes(&hasBias, length: MemoryLayout<UInt32>.size, index: 7)
         encoder.dispatchThreadgroups(
             MTLSize(
                 width: (Int(rows) + Self.rowsPerThreadgroup - 1)

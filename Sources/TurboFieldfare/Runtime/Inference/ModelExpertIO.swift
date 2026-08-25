@@ -18,6 +18,40 @@ public struct RoutedExpertFetchPlan: Sendable {
 }
 
 extension Model {
+    func gptOssRoutedExpertOffsets(layer: Int) throws -> GPTOSSExpertOffsets {
+        let experts = packedExpertsLayout.layers[layer].experts
+        guard let first = experts.first else {
+            throw ModelError.indexCorrupt(detail: "GPT-OSS layer has no routed experts")
+        }
+        let names = [
+            "mlp1", "mlp1_scales", "mlp1_bias",
+            "mlp2", "mlp2_scales", "mlp2_bias",
+        ]
+        var resolved: [String: Int] = [:]
+        for name in names {
+            guard let tensor = first.subTensors[name],
+                  let offset = Int(exactly: tensor.offset) else {
+                throw ModelError.indexCorrupt(
+                    detail: "GPT-OSS routed expert is missing \(name)")
+            }
+            resolved[name] = offset
+        }
+        for expert in experts.dropFirst() {
+            for name in names where expert.subTensors[name]?.offset
+                != first.subTensors[name]?.offset {
+                throw ModelError.indexCorrupt(
+                    detail: "GPT-OSS routed expert \(name) offsets differ within layer")
+            }
+        }
+        return GPTOSSExpertOffsets(
+            mlp1Weights: resolved["mlp1"]!,
+            mlp1Scales: resolved["mlp1_scales"]!,
+            mlp1Bias: resolved["mlp1_bias"]!,
+            mlp2Weights: resolved["mlp2"]!,
+            mlp2Scales: resolved["mlp2_scales"]!,
+            mlp2Bias: resolved["mlp2_bias"]!)
+    }
+
     public func routedExpertOffsets(layer: Int) -> MoEExpertOffsets {
         let expert = packedExpertsLayout.expert(layer: layer, expert: 0)
         func offset(_ role: String) -> UInt32 {

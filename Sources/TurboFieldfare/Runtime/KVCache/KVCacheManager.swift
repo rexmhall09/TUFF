@@ -8,7 +8,52 @@ import Metal
 /// 10 full-attention layers; linear layers keep a fixed-size recurrent state
 /// (owned by `GDNStateManager`) instead of per-token K/V rows. Sourced from
 /// `ArchConfig.fullAttentionLayerMask` (0 = swa, 1 = full, 2 = linear).
-public enum LayerKind: Sendable { case swa, full, linear }
+public enum LayerKind: Sendable, Equatable { case swa, full, linear }
+
+struct KVCacheMemoryPlan: Sendable, Equatable {
+    let capacities: [Int]
+    let strides: [Int]
+    let totalBytes: UInt64
+
+    init(config: ArchConfig,
+         maxContext: Int,
+         fp16RingEnabled: Bool,
+         slidingWindow: Int? = nil,
+         maxPrefillChunkTokens: Int = 128,
+         fp16RingCapacityOverride: Int? = nil) {
+        precondition(maxContext > 0 && maxPrefillChunkTokens > 0)
+        let swaStride = config.numKVHeads * config.headDim * 2
+        let fullStride = config.numFullKVHeads * config.fullHeadDim * 2
+        let swaCapacity = min(maxContext, max(1, fp16RingCapacityOverride
+            ?? ((slidingWindow ?? config.slidingWindow) + maxPrefillChunkTokens)))
+        var resolvedCapacities: [Int] = []
+        var resolvedStrides: [Int] = []
+        var bytes: UInt64 = 0
+        for kind in config.fullAttentionLayerMask {
+            if kind == 2 {
+                resolvedCapacities.append(0)
+                resolvedStrides.append(0)
+                continue
+            }
+            let full = kind != 0
+            let capacity = fp16RingEnabled && !full ? swaCapacity : maxContext
+            let stride = full ? fullStride : swaStride
+            resolvedCapacities.append(capacity)
+            resolvedStrides.append(stride)
+            let layerBytes = UInt64(capacity)
+                .multipliedReportingOverflow(by: UInt64(stride * 2))
+            if layerBytes.overflow {
+                bytes = .max
+            } else if bytes != .max {
+                let sum = bytes.addingReportingOverflow(layerBytes.partialValue)
+                bytes = sum.overflow ? .max : sum.partialValue
+            }
+        }
+        capacities = resolvedCapacities
+        strides = resolvedStrides
+        totalBytes = bytes
+    }
+}
 
 /// A read view the attention kernels bind. `offset` stays 0; ring-enabled SWA
 /// layers expose the physical start slot for diagnostics while kernels map
@@ -63,8 +108,6 @@ public final class KVCacheManager {
 
     public private(set) var position: Int = 0
 
-    private static let fp16Size = 2
-
     public init(device: MTLDevice,
                 config: ArchConfig,
                 maxContext: Int,
@@ -79,11 +122,13 @@ public final class KVCacheManager {
         let ringEnabled = fp16RingEnabled
         self.fp16RingEnabled = ringEnabled
 
-        let swaStride  = config.numKVHeads     * config.headDim     * Self.fp16Size
-        let fullStride = config.numFullKVHeads * config.fullHeadDim  * Self.fp16Size
-        let swaCapacity = min(maxContext,
-                              max(1, fp16RingCapacityOverride
-                                  ?? ((slidingWindow ?? config.slidingWindow) + maxPrefillChunkTokens)))
+        let memoryPlan = KVCacheMemoryPlan(
+            config: config,
+            maxContext: maxContext,
+            fp16RingEnabled: ringEnabled,
+            slidingWindow: slidingWindow,
+            maxPrefillChunkTokens: maxPrefillChunkTokens,
+            fp16RingCapacityOverride: fp16RingCapacityOverride)
 
         var ks: [MTLBuffer] = []
         var vs: [MTLBuffer] = []
@@ -123,8 +168,8 @@ public final class KVCacheManager {
                 continue
             }
             let isFull = maskValue != 0
-            let stride = isFull ? fullStride : swaStride
-            let capacity = ringEnabled && !isFull ? swaCapacity : maxContext
+            let stride = memoryPlan.strides[layer]
+            let capacity = memoryPlan.capacities[layer]
             let length = capacity * stride
 
             guard let kBuf = device.makeBuffer(length: length, options: .storageModeShared) else {

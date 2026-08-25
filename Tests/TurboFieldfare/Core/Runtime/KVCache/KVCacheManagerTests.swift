@@ -160,4 +160,40 @@ import Metal
         #expect(kv.position == 1)
     }
 
+    @Test func gptOssAlternatingKVUsesRingOnlyForSlidingLayers() throws {
+        let ctx = try MetalContext()
+        let config = ArchConfig.gptOss_20B
+        let kv = try KVCacheManager(
+            device: ctx.device,
+            config: config,
+            maxContext: 257,
+            fp16RingEnabled: true,
+            slidingWindow: 128,
+            maxPrefillChunkTokens: 32,
+            fp16RingCapacityOverride: 128)
+        #expect(kv.layerKind(0) == .swa)
+        #expect(kv.layerKind(1) == .full)
+        #expect(kv.stride(layer: 0) == 8 * 64 * 2)
+        #expect(kv.stride(layer: 1) == 8 * 64 * 2)
+        #expect(kv.capacity(layer: 0) == 128)
+        #expect(kv.capacity(layer: 1) == 257)
+        #expect(kv.kSlot(layer: 0, position: 128).offset == 0)
+        #expect(kv.kSlot(layer: 1, position: 128).offset == 128 * 1_024)
+        #expect(kv.keyBuffer(layer: 1, validTokenCount: 0)
+                !== kv.valueBuffer(layer: 1, validTokenCount: 0))
+    }
+
+    @Test func gptOssMaximumContextMemoryPlanIsExplicit() {
+        let plan = KVCacheMemoryPlan(
+            config: .gptOss_20B,
+            maxContext: 131_072,
+            fp16RingEnabled: true,
+            slidingWindow: 128,
+            maxPrefillChunkTokens: 256)
+        #expect(plan.capacities[0] == 384)
+        #expect(plan.capacities[1] == 131_072)
+        #expect(plan.strides.allSatisfy { $0 == 1_024 })
+        #expect(plan.totalBytes == 3_230_662_656)
+    }
+
 }
