@@ -108,9 +108,9 @@ import Testing
         let color = TurboFieldfareMacTheme.accentNSColor
             .usingColorSpace(.sRGB)
         #expect(color != nil)
-        #expect(abs((color?.redComponent ?? 0) - 106.0 / 255.0) < 0.000_001)
-        #expect(abs((color?.greenComponent ?? 0) - 186.0 / 255.0) < 0.000_001)
-        #expect(abs((color?.blueComponent ?? 0) - 113.0 / 255.0) < 0.000_001)
+        #expect(abs((color?.redComponent ?? 0) - 111.0 / 255.0) < 0.000_001)
+        #expect(abs((color?.greenComponent ?? 0) - 77.0 / 255.0) < 0.000_001)
+        #expect(abs((color?.blueComponent ?? 0) - 255.0 / 255.0) < 0.000_001)
     }
 
     @Test func rebuildsThenAppendsOnlyNewResponseSuffix() {

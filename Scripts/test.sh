@@ -9,6 +9,8 @@ fi
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_directory/.."
 
+ruby Scripts/check_brand_assets.rb
+
 # SwiftPM does not add the developer Frameworks directory to the compiler's
 # import search paths when the active toolchain is Command Line Tools. Tests
 # use the system Testing framework, so supply the path for both compilation

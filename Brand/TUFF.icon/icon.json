@@ -1,0 +1,58 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.09412,0.09412,0.10588,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "01-left-facet.svg",
+          "name" : "Left Facet"
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.42
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.18
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "02-right-facet.svg",
+          "name" : "Right Facet"
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.36
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.14
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "03-bottom-facet.svg",
+          "name" : "Bottom Facet"
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.46
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.24
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}

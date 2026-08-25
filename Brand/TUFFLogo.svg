@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">TUFF</title>
+  <desc id="description">Three triangular facets form a larger downward-pointing mark.</desc>
+  <path fill="#111113" d="M168 196h344L340 496Z"/>
+  <path fill="#6F4DFF" d="M512 196h344L684 496Z"/>
+  <path fill="#111113" d="M340 496h344L512 796Z"/>
+</svg>

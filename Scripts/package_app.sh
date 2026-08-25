@@ -26,6 +26,7 @@ temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/tuff-package.XXXXXX")"
 trap 'rm -rf "$temporary_directory"' EXIT
 
 cd "$repository_root"
+ruby Scripts/check_brand_assets.rb
 swift build -c release
 binary_directory="$(swift build -c release --show-bin-path)"
 

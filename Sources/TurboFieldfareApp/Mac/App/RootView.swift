@@ -140,12 +140,10 @@ struct RootView: View {
 
     private var brandHeader: some View {
         HStack(spacing: 10) {
-            Image(systemName: "triangle.fill")
-                .font(.title3)
-                .foregroundStyle(TurboFieldfareMacTheme.accentColor)
+            TUFFMarkView()
+                .padding(3)
                 .frame(width: 28, height: 28)
                 .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text("TUFF").font(.headline)
                 Text("Runs on this Mac")
