@@ -114,15 +114,26 @@ import Darwin
     }
 
     static func mxfp4Quant() -> [String: Any] {
-        var result = quant()
-        result["routedExpert"] = [
-            "weightBits": 4,
-            "scheme": "mxfp4",
-            "scaleType": "ue8m0",
+        let resident: [String: Any] = [
+            "weightBits": 16,
+            "scheme": "bf16",
+            "scaleType": "none",
             "biasType": "none",
-            "groupSize": Quantization.mxfp4GroupSize,
+            "groupSize": 1,
         ]
-        return result
+        return [
+            "embedding": resident,
+            "attention": resident,
+            "router": resident,
+            "sharedExpert": resident,
+            "routedExpert": [
+                "weightBits": 4,
+                "scheme": "mxfp4",
+                "scaleType": "ue8m0",
+                "biasType": "none",
+                "groupSize": Quantization.mxfp4GroupSize,
+            ],
+        ]
     }
 
     @Test func loadsValidManifest() throws {
@@ -272,6 +283,7 @@ import Darwin
             flags: ["streamingPresent": true, "mxfp4Weights": true])
         defer { try? FileManager.default.removeItem(at: dir) }
         let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
+        #expect(manifest.quant?.embedding.scheme == "bf16")
         #expect(manifest.quant?.routedExpert.scheme == "mxfp4")
         #expect(manifest.quant?.routedExpert.groupSize
                 == Quantization.mxfp4GroupSize)
