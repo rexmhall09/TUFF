@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TurboFieldfare
 @testable import TurboFieldfareAppCore
 
 @Suite struct MacAppSettingsTests {
@@ -160,6 +161,122 @@ import Testing
         #expect(decoded.profile(for: qwenKey).temperature == 0.7)
     }
 
+    @Test func versionThreeProfilesUpgradeWithoutBeingCollapsed() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
+        try Data("""
+        {
+          "version": 3,
+          "modelProfiles": {
+            "gemma4-26b-a4b": {
+              "contextTokens": 8192,
+              "expertCacheSlots": 16,
+              "temperature": 0.1,
+              "topKEnabled": true,
+              "topK": 64,
+              "topPEnabled": true,
+              "topP": 0.95,
+              "prefillEnabled": true,
+              "visionResidencyPolicy": "on-demand",
+              "rdadvisePolicy": "off"
+            },
+            "qwen36-35b-a3b": {
+              "contextTokens": 16384,
+              "expertCacheSlots": 24,
+              "temperature": 0.7,
+              "topKEnabled": false,
+              "topK": 32,
+              "topPEnabled": false,
+              "topP": 0.8,
+              "prefillEnabled": false,
+              "visionResidencyPolicy": "on-demand",
+              "rdadvisePolicy": "bounded"
+            }
+          }
+        }
+        """.utf8).write(to: fileURL)
+
+        let settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: model)
+
+        #expect(settings.version == 4)
+        #expect(settings.modelProfiles.count == 2)
+        #expect(settings.profile(for: "gemma4-26b-a4b").temperature == 0.1)
+        #expect(settings.profile(for: "qwen36-35b-a3b").contextTokens == 16_384)
+        #expect(settings.profile(for: "qwen36-35b-a3b").defaultReasoning == .off)
+        #expect(settings.profile(for: "qwen36-35b-a3b").defaultReasoningEffort == .medium)
+        #expect(!settings.profile(for: "qwen36-35b-a3b").preserveThinking)
+    }
+
+    @Test func versionThreeLowSlotPrefillMigratesToAValidProfile() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
+        try Data("""
+        {
+          "version": 3,
+          "modelProfiles": {
+            "gemma4-26b-a4b": {
+              "contextTokens": 8192,
+              "expertCacheSlots": 8,
+              "temperature": 0.2,
+              "topKEnabled": true,
+              "topK": 64,
+              "topPEnabled": true,
+              "topP": 0.95,
+              "prefillEnabled": true,
+              "visionResidencyPolicy": "on-demand",
+              "rdadvisePolicy": "off"
+            }
+          }
+        }
+        """.utf8).write(to: fileURL)
+
+        let settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: model)
+
+        #expect(settings.version == 4)
+        #expect(settings.profile(for: "gemma4-26b-a4b").expertCacheSlots == 8)
+        #expect(!settings.profile(for: "gemma4-26b-a4b").prefillEnabled)
+        #expect(settings.isValid())
+    }
+
+    @Test func reasoningDefaultsRoundTripPerModel() throws {
+        let qwenKey = AppModelInstallDescriptor.qwen36.settingsProfileKey
+        let gptKey = AppModelInstallDescriptor.descriptor(
+            for: ModelVariant.gptOss_20B)!.settingsProfileKey
+        var settings = MacAppSettings()
+        settings.setProfile(AppModelSettingsProfile(
+            defaultReasoning: .on,
+            preserveThinking: true), for: qwenKey)
+        settings.setProfile(AppModelSettingsProfile(
+            contextTokens: 4_096,
+            expertCacheSlots: 4,
+            topKEnabled: false,
+            defaultReasoningEffort: .high), for: gptKey)
+
+        let decoded = try JSONDecoder().decode(
+            MacAppSettings.self,
+            from: JSONEncoder().encode(settings))
+
+        #expect(decoded.profile(for: qwenKey).defaultReasoning == .on)
+        #expect(decoded.profile(for: qwenKey).preserveThinking)
+        #expect(decoded.profile(for: gptKey).defaultReasoningEffort == .high)
+    }
+
+    @Test func gptDefaultsRepresentDisabledTopKWithAValidStoredValue() throws {
+        let key = try #require(AppModelInstallDescriptor.descriptor(
+            for: ModelVariant.gptOss_20B)?.settingsProfileKey)
+        let profile = AppModelSettingsProfile.defaults(for: key)
+
+        #expect(!profile.topKEnabled)
+        #expect(profile.topK == 1)
+        #expect(profile.isValid())
+    }
+
     @MainActor
     @Test func selectingModelsSavesAndLoadsTheirOwnProfiles() throws {
         let root = try makeTemporaryRoot()
@@ -200,6 +317,41 @@ import Testing
             profileKey: gemmaKey)
         #expect(saved.profile(for: gemmaKey).temperature == 0.55)
         #expect(saved.profile(for: qwenKey).temperature == 0.7)
+    }
+
+    @MainActor
+    @Test func editingANonselectedProfileDoesNotChangeTheActiveModel() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gemmaDirectory = root.appendingPathComponent(
+            "gemma4.gturbo", isDirectory: true)
+        let qwenDirectory = root.appendingPathComponent(
+            "qwen36.gturbo", isDirectory: true)
+        let qwen = ModelInstallCoordinator(
+            descriptor: .qwen36,
+            directoryURL: qwenDirectory,
+            client: MockModelInstallerClient(descriptor: .qwen36))
+        let model = AppModel(
+            modelDirectory: gemmaDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [qwen],
+            settingsPersistenceEnabled: true)
+        var qwenProfile = model.settingsProfile(for: qwen)
+        qwenProfile.contextTokens = 32_768
+        qwenProfile.temperature = 0.65
+        qwenProfile.defaultReasoning = .on
+        qwenProfile.preserveThinking = true
+
+        model.updateSettingsProfile(qwenProfile, for: qwen)
+
+        #expect(model.selectedModelID != qwen.id)
+        #expect(model.maxContextTokens == 8_192)
+        #expect(model.temperature == 0.2)
+        let saved = model.settingsProfile(for: qwen)
+        #expect(saved.contextTokens == 32_768)
+        #expect(saved.temperature == 0.65)
+        #expect(saved.defaultReasoning == .on)
+        #expect(saved.preserveThinking)
     }
 
     @Test(arguments: AppNewlineShortcut.allCases)
@@ -412,10 +564,10 @@ import Testing
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: modelDirectory)
 
-        // A plausible version 4 with a schema this build does not understand.
+        // A plausible future version with a schema this build does not understand.
         let newer = """
         {
-          "version": 4,
+          "version": 5,
           "profilesByModel": {}
         }
         """

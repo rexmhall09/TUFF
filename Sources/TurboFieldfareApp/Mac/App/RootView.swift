@@ -365,7 +365,7 @@ private struct SettingsWorkspaceView: View {
                 .padding(.horizontal, 28)
                 .padding(.top, 24)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            InspectorView(model: model)
+            AppSettingsView(model: model)
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }

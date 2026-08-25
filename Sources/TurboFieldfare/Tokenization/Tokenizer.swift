@@ -597,12 +597,28 @@ public struct GFTokenizer: @unchecked Sendable {
         modelVariant: ModelVariant? = nil,
         reasoning: ChatReasoning = .off
     ) throws -> String {
+        try applyChatTemplate(
+            messages,
+            modelVariant: modelVariant,
+            reasoning: reasoning,
+            preserveThinking: false)
+    }
+
+    public func applyChatTemplate(
+        _ messages: [Message],
+        modelVariant: ModelVariant? = nil,
+        reasoning: ChatReasoning = .off,
+        preserveThinking: Bool
+    ) throws -> String {
         switch dialect {
         case .gemma:
             return try gemmaChatTemplate(
                 messages, modelVariant: modelVariant, reasoning: reasoning)
         case .chatml:
-            return try chatMLChatTemplate(messages, reasoning: reasoning)
+            return try chatMLChatTemplate(
+                messages,
+                reasoning: reasoning,
+                preserveThinking: preserveThinking)
         case .harmony:
             throw GFTokenizerError.unsupportedForDialect(
                 "binary reasoning control for Harmony")
@@ -693,16 +709,24 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     private func chatMLChatTemplate(
-        _ messages: [Message], reasoning: ChatReasoning
+        _ messages: [Message],
+        reasoning: ChatReasoning,
+        preserveThinking: Bool
     ) throws -> String {
         var s = ""
         for (index, message) in messages.enumerated() {
             guard let rawContent = message.content else {
                 throw GFTokenizerError.invalidChatTemplate("text-only messages require content")
             }
-            let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+            var content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
             if message.role == .system && index != 0 {
                 throw GFTokenizerError.invalidChatTemplate("system message must be first")
+            }
+            if preserveThinking, message.role == .assistant,
+               let thinking = message.thinking?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !thinking.isEmpty {
+                content = "<think>\n\(thinking)\n</think>\n\n" + content
             }
             s += Self.imStartMark + message.role.rawValue + "\n" + content + Self.imEndMark + "\n"
         }
@@ -715,6 +739,17 @@ public struct GFTokenizer: @unchecked Sendable {
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition],
                                reasoning: ChatReasoning = .off) throws -> [Int32] {
+        try encodeToolChat(
+            messages: messages,
+            tools: tools,
+            reasoning: reasoning,
+            preserveThinking: false)
+    }
+
+    public func encodeToolChat(messages: [Message],
+                               tools: [FunctionDefinition],
+                               reasoning: ChatReasoning = .off,
+                               preserveThinking: Bool) throws -> [Int32] {
         guard dialect != .harmony else {
             throw GFTokenizerError.unsupportedForDialect(
                 "binary reasoning control for Harmony tool chat")
@@ -741,6 +776,9 @@ public struct GFTokenizer: @unchecked Sendable {
             }
             if let toolCallID = message.toolCallID { value["tool_call_id"] = toolCallID }
             if let name = message.name { value["name"] = name }
+            if let thinking = message.thinking {
+                value["reasoning_content"] = thinking
+            }
             return value
         }
         let upstreamTools: [ToolSpec] = try tools.map { tool in
@@ -760,7 +798,10 @@ public struct GFTokenizer: @unchecked Sendable {
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
-            additionalContext: ["enable_thinking": reasoning == .on]
+            additionalContext: [
+                "enable_thinking": reasoning == .on,
+                "preserve_thinking": preserveThinking,
+            ]
         ).map(Int32.init)
     }
 

@@ -153,6 +153,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         reasoningEffort: request.reasoningEffort.flatMap {
                             GPTOSSReasoningEffort(rawValue: $0.rawValue)
                         },
+                        preserveThinking: request.preserveThinking,
                         temperature: request.temperature,
                         topK: request.topK,
                         topP: request.topP,

@@ -12,6 +12,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var maxContextTokens: Int
     public var reasoning: ChatReasoning
     public var reasoningEffort: GPTOSSReasoningEffort?
+    public var preserveThinking: Bool
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
@@ -26,6 +27,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 maxContextTokens: Int = 4096,
                 reasoning: ChatReasoning = .off,
                 reasoningEffort: GPTOSSReasoningEffort? = nil,
+                preserveThinking: Bool = false,
                 temperature: Float = 0.2,
                 topK: Int? = 64,
                 topP: Float? = 0.95,
@@ -39,6 +41,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
         self.maxContextTokens = maxContextTokens
         self.reasoning = reasoning
         self.reasoningEffort = reasoningEffort
+        self.preserveThinking = preserveThinking
         self.temperature = temperature
         self.topK = topK
         self.topP = topP

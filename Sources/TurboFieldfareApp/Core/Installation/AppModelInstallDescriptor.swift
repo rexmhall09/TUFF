@@ -51,6 +51,29 @@ public struct AppModelHardwareEligibility: Equatable, Sendable {
     }
 }
 
+public struct AppModelContextEligibility: Equatable, Sendable {
+    public let estimatedWorkingSetBytes: UInt64
+    public let safeBudgetBytes: UInt64
+
+    public init(estimatedWorkingSetBytes: UInt64, safeBudgetBytes: UInt64) {
+        self.estimatedWorkingSetBytes = estimatedWorkingSetBytes
+        self.safeBudgetBytes = safeBudgetBytes
+    }
+
+    public var isCompatible: Bool { estimatedWorkingSetBytes <= safeBudgetBytes }
+
+    public var explanation: String? {
+        guard !isCompatible else { return nil }
+        return "Estimated memory is \(Self.memoryLabel(estimatedWorkingSetBytes)); "
+            + "this Mac's safe app budget is \(Self.memoryLabel(safeBudgetBytes))."
+    }
+
+    private static func memoryLabel(_ bytes: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes),
+                                  countStyle: .memory)
+    }
+}
+
 public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let displayName: String
     public let repoID: String
@@ -165,6 +188,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         catalogID == TUFFModelCatalog.default.id
     }
 
+    public var usesExpertCache: Bool {
+        catalogDescriptor?.architecture.feedForwardKind == .mixtureOfExperts
+    }
+
     public func hardwareEligibility(
         on device: TUFFDeviceCapabilities
     ) -> AppModelHardwareEligibility {
@@ -194,6 +221,28 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
             minimumUnifiedMemoryBytes: catalogDescriptor.hardware.minimumUnifiedMemoryBytes,
             actualUnifiedMemoryBytes: device.unifiedMemoryBytes,
             issues: issues)
+    }
+
+    public func contextEligibility(
+        contextTokens: Int,
+        expertCacheSlots: Int,
+        on device: TUFFDeviceCapabilities
+    ) -> AppModelContextEligibility {
+        guard let catalogDescriptor else {
+            return AppModelContextEligibility(
+                estimatedWorkingSetBytes: 0,
+                safeBudgetBytes: device.unifiedMemoryBytes)
+        }
+        let estimate = catalogDescriptor.memory.estimatedWorkingSetBytes(
+            contextTokens: contextTokens,
+            expertCacheSlots: expertCacheSlots)
+        let reserve = max(2 * TUFFModelCatalog.oneGiB,
+                          device.unifiedMemoryBytes / 5)
+        let budget = device.unifiedMemoryBytes > reserve
+            ? device.unifiedMemoryBytes - reserve : 0
+        return AppModelContextEligibility(
+            estimatedWorkingSetBytes: estimate,
+            safeBudgetBytes: budget)
     }
 
     public var reasoningControl: AppReasoningControl? {

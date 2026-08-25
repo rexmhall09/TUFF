@@ -22,6 +22,7 @@ public struct MultimodalContinuationTokens: Sendable, Equatable {
 public struct MultimodalMessage: Sendable, Equatable {
     public let role: GFTokenizer.Role
     public let content: [MultimodalContentPart]
+    public let thinking: String?
     public let toolCalls: [GFTokenizer.HistoricalToolCall]
     public let toolCallID: String?
     public let name: String?
@@ -31,8 +32,24 @@ public struct MultimodalMessage: Sendable, Equatable {
                 toolCalls: [GFTokenizer.HistoricalToolCall] = [],
                 toolCallID: String? = nil,
                 name: String? = nil) {
+        self.init(
+            role: role,
+            content: content,
+            thinking: nil,
+            toolCalls: toolCalls,
+            toolCallID: toolCallID,
+            name: name)
+    }
+
+    public init(role: GFTokenizer.Role,
+                content: [MultimodalContentPart],
+                thinking: String?,
+                toolCalls: [GFTokenizer.HistoricalToolCall] = [],
+                toolCallID: String? = nil,
+                name: String? = nil) {
         self.role = role
         self.content = content
+        self.thinking = thinking
         self.toolCalls = toolCalls
         self.toolCallID = toolCallID
         self.name = name
@@ -96,6 +113,27 @@ public enum MultimodalPromptRenderer {
         modelVariant: ModelVariant? = nil,
         reasoning: ChatReasoning = .off
     ) throws -> MultimodalPrefillInput {
+        try render(
+            messages: messages,
+            featuresByID: featuresByID,
+            tokenizer: tokenizer,
+            tools: tools,
+            family: family,
+            modelVariant: modelVariant,
+            reasoning: reasoning,
+            preserveThinking: false)
+    }
+
+    public static func render(
+        messages: [MultimodalMessage],
+        featuresByID: [UUID: VisionFeatures],
+        tokenizer: GFTokenizer,
+        tools: [GFTokenizer.FunctionDefinition] = [],
+        family: ModelFamily = .gemma4,
+        modelVariant: ModelVariant? = nil,
+        reasoning: ChatReasoning = .off,
+        preserveThinking: Bool
+    ) throws -> MultimodalPrefillInput {
         let policy = FamilyPolicy.forFamily(family)
         guard !messages.isEmpty else { throw MultimodalPromptRendererError.emptyMessages }
         var orderedImages: [(UUID, VisionFeatures)] = []
@@ -128,6 +166,7 @@ public enum MultimodalPromptRenderer {
             return GFTokenizer.Message(
                 role: message.role,
                 content: text,
+                thinking: message.thinking,
                 toolCalls: message.toolCalls,
                 toolCallID: message.toolCallID,
                 name: message.name)
@@ -146,12 +185,14 @@ public enum MultimodalPromptRenderer {
             templateTokens = try tokenizer.encodeToolChat(
                 messages: tokenizerMessages,
                 tools: tools,
-                reasoning: reasoning)
+                reasoning: reasoning,
+                preserveThinking: preserveThinking)
         } else {
             let rendered = try tokenizer.applyChatTemplate(
                 tokenizerMessages,
                 modelVariant: modelVariant,
-                reasoning: reasoning)
+                reasoning: reasoning,
+                preserveThinking: preserveThinking)
             templateTokens = tokenizer.encode(rendered, addBOS: false)
         }
         let placeholders = templateTokens.indices.filter {

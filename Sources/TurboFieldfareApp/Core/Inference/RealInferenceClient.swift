@@ -329,6 +329,8 @@ actor RealInferenceSession {
     ) throws -> RenderedConversation {
         let isHarmony = modelVariant == .gptOss_20B
             || modelVariant == .gptOss_120B
+        let preservesChatMLThinking = modelVariant == .qwen36_35B_A3B
+            && request.preserveThinking
         func encode(_ turns: ArraySlice<AppChatTurn>) throws -> [Int32] {
             var messages: [GFTokenizer.Message] = []
             messages.reserveCapacity(turns.count * 2 + 1)
@@ -338,7 +340,8 @@ actor RealInferenceSession {
                     GFTokenizer.Message(
                         role: .assistant,
                         content: turn.response,
-                        thinking: isHarmony ? turn.thinking : nil))
+                        thinking: isHarmony || preservesChatMLThinking
+                            ? turn.thinking : nil))
             }
             messages.append(GFTokenizer.Message(role: .user, content: request.prompt))
             if isHarmony {
@@ -351,7 +354,8 @@ actor RealInferenceSession {
                 try tokenizer.applyChatTemplate(
                     messages,
                     modelVariant: modelVariant,
-                    reasoning: request.reasoning),
+                    reasoning: request.reasoning,
+                    preserveThinking: preservesChatMLThinking),
                 addBOS: false)
         }
 
@@ -388,6 +392,7 @@ actor RealInferenceSession {
             MultimodalContentPart.image(id: $0.id)
         }
         if !request.prompt.isEmpty { currentContent.append(.text(request.prompt)) }
+        let preservesChatMLThinking = family == .qwen36 && request.preserveThinking
 
         func render(_ turns: ArraySlice<AppChatTurn>) throws -> MultimodalPrefillInput {
             var messages: [MultimodalMessage] = []
@@ -396,7 +401,9 @@ actor RealInferenceSession {
                 messages.append(MultimodalMessage(
                     role: .user, content: [.text(turn.prompt)]))
                 messages.append(MultimodalMessage(
-                    role: .assistant, content: [.text(turn.response)]))
+                    role: .assistant,
+                    content: [.text(turn.response)],
+                    thinking: preservesChatMLThinking ? turn.thinking : nil))
             }
             messages.append(MultimodalMessage(role: .user, content: currentContent))
             return try MultimodalPromptRenderer.render(
@@ -405,7 +412,8 @@ actor RealInferenceSession {
                 tokenizer: tokenizer,
                 family: family,
                 modelVariant: modelVariant,
-                reasoning: request.reasoning)
+                reasoning: request.reasoning,
+                preserveThinking: preservesChatMLThinking)
         }
 
         var dropped = 0

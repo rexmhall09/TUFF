@@ -241,6 +241,7 @@ public final class AppSettingsStore {
     public var maxNewTokensOverride: Int?
     public var reasoning: ChatReasoning = .off
     public var reasoningEffort: GPTOSSReasoningEffort = .medium
+    public var preserveThinking = false
     public var maxContextTokens = 4_096
     public var temperature = 0.2
     public var topKEnabled = true

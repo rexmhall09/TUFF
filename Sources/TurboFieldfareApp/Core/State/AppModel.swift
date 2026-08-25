@@ -91,6 +91,10 @@ public final class AppModel {
         get { settingsStore.reasoningEffort }
         set { settingsStore.reasoningEffort = newValue }
     }
+    public var preserveThinking: Bool {
+        get { settingsStore.preserveThinking }
+        set { settingsStore.preserveThinking = newValue }
+    }
     public var maxContextTokens: Int {
         get { settingsStore.maxContextTokens }
         set { settingsStore.maxContextTokens = newValue }
@@ -345,6 +349,9 @@ public final class AppModel {
         self.topK = modelSettings.topK
         self.topPEnabled = modelSettings.topPEnabled
         self.topP = modelSettings.topP
+        self.reasoning = modelSettings.defaultReasoning
+        self.reasoningEffort = modelSettings.defaultReasoningEffort
+        self.preserveThinking = modelSettings.preserveThinking
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.sentPromptBehavior = settings.sentPromptBehavior
@@ -514,6 +521,7 @@ public final class AppModel {
 
     public var canLoadModel: Bool {
         isModelInstalled && selectedModelHardwareEligibility.isCompatible
+            && selectedContextHardwareEligibility.isCompatible
             && !isRunning && !isVisionCompanionOperationInProgress
             && (loadState == .notLoaded || loadState.isFailed)
     }
@@ -525,6 +533,7 @@ public final class AppModel {
 
     public var canReloadModel: Bool {
         isModelInstalled && selectedModelHardwareEligibility.isCompatible
+            && selectedContextHardwareEligibility.isCompatible
             && !isRunning && !isVisionCompanionOperationInProgress
             && loadState.isReady && hasStaleLoadedRuntime
     }
@@ -570,10 +579,28 @@ public final class AppModel {
         hardwareEligibility(for: selectedInstall)
     }
 
+    public var selectedContextHardwareEligibility: AppModelContextEligibility {
+        contextEligibility(
+            for: selectedInstall,
+            contextTokens: maxContextTokens,
+            expertCacheSlots: runtimeOptions.expertCacheSlots)
+    }
+
     public func hardwareEligibility(
         for coordinator: ModelInstallCoordinator
     ) -> AppModelHardwareEligibility {
         coordinator.descriptor.hardwareEligibility(on: deviceCapabilities)
+    }
+
+    public func contextEligibility(
+        for coordinator: ModelInstallCoordinator,
+        contextTokens: Int,
+        expertCacheSlots: Int
+    ) -> AppModelContextEligibility {
+        coordinator.descriptor.contextEligibility(
+            contextTokens: contextTokens,
+            expertCacheSlots: expertCacheSlots,
+            on: deviceCapabilities)
     }
 
     public func canInstallModel(_ coordinator: ModelInstallCoordinator) -> Bool {
@@ -1012,6 +1039,42 @@ public final class AppModel {
         guard loadModelOnLaunch != enabled else { return }
         loadModelOnLaunch = enabled
         persistSettings()
+    }
+
+    public func settingsProfile(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelSettingsProfile {
+        if coordinator.id == selectedModelID {
+            return currentSettingsProfile
+        }
+        guard settingsPersistenceEnabled else {
+            return .defaults(for: coordinator.descriptor.settingsProfileKey)
+        }
+        return MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: coordinator.directoryURL,
+            profileKey: coordinator.descriptor.settingsProfileKey)
+            .profile(for: coordinator.descriptor.settingsProfileKey)
+    }
+
+    public func updateSettingsProfile(
+        _ profile: AppModelSettingsProfile,
+        for coordinator: ModelInstallCoordinator
+    ) {
+        guard profile.isValid() else { return }
+        if coordinator.id == selectedModelID {
+            applySettingsProfile(profile)
+            persistSettings()
+            return
+        }
+        guard settingsPersistenceEnabled else { return }
+        let profileKey = coordinator.descriptor.settingsProfileKey
+        var settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: coordinator.directoryURL,
+            profileKey: profileKey)
+        settings.setProfile(profile, for: profileKey)
+        try? MacAppSettingsFileStore.save(
+            settings,
+            forModelDirectory: coordinator.directoryURL)
     }
 
     /// Starts the launch load if it is switched on and the model can be loaded.
@@ -1863,35 +1926,15 @@ public final class AppModel {
             forModelDirectory: modelDirectory,
             profileKey: profileKey)
         let modelSettings = settings.profile(for: profileKey)
-        runtimeOptions = AppRuntimeOptions(
-            expertCacheSlots: modelSettings.expertCacheSlots,
-            prefillEnabled: modelSettings.prefillEnabled,
-            rdadvisePolicy: modelSettings.rdadvisePolicy,
-            // Pinned for the same reason as `init`: the app always releases the
-            // image tower. Reading the persisted value here would let a
-            // `keepReady` written by an older build resurrect ~1 GB of resident
-            // tower on a machine with no control that shows or clears it.
-            visionResidencyPolicy: .onDemand)
-        maxContextTokens = modelSettings.contextTokens
-        temperature = modelSettings.temperature
-        topKEnabled = modelSettings.topKEnabled
-        topK = modelSettings.topK
-        topPEnabled = modelSettings.topPEnabled
-        topP = modelSettings.topP
+        applySettingsProfile(modelSettings)
         newlineShortcut = settings.newlineShortcut
         showPromptExamples = settings.showPromptExamples
         sentPromptBehavior = settings.sentPromptBehavior
         loadModelOnLaunch = settings.loadModelOnLaunch
     }
 
-    private func persistSettings() {
-        guard settingsPersistenceEnabled else { return }
-        let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-        let profileKey = selectedDescriptor.settingsProfileKey
-        var settings = MacAppSettingsFileStore.loadOrCreate(
-            forModelDirectory: modelDirectory,
-            profileKey: profileKey)
-        settings.setProfile(MacModelSettings(
+    private var currentSettingsProfile: AppModelSettingsProfile {
+        AppModelSettingsProfile(
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
             temperature: temperature,
@@ -1901,7 +1944,41 @@ public final class AppModel {
             topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
             visionResidencyPolicy: runtimeOptions.visionResidencyPolicy,
-            rdadvisePolicy: runtimeOptions.rdadvisePolicy), for: profileKey)
+            rdadvisePolicy: runtimeOptions.rdadvisePolicy,
+            defaultReasoning: reasoning,
+            defaultReasoningEffort: reasoningEffort,
+            preserveThinking: preserveThinking)
+    }
+
+    private func applySettingsProfile(_ profile: AppModelSettingsProfile) {
+        runtimeOptions = AppRuntimeOptions(
+            expertCacheSlots: profile.expertCacheSlots,
+            prefillEnabled: profile.prefillEnabled,
+            rdadvisePolicy: profile.rdadvisePolicy,
+            // Pinned for the same reason as `init`: the app always releases the
+            // image tower. Reading the persisted value here would let a
+            // `keepReady` written by an older build resurrect ~1 GB of resident
+            // tower on a machine with no control that shows or clears it.
+            visionResidencyPolicy: .onDemand)
+        maxContextTokens = profile.contextTokens
+        temperature = profile.temperature
+        topKEnabled = profile.topKEnabled
+        topK = profile.topK
+        topPEnabled = profile.topPEnabled
+        topP = profile.topP
+        reasoning = profile.defaultReasoning
+        reasoningEffort = profile.defaultReasoningEffort
+        preserveThinking = profile.preserveThinking
+    }
+
+    private func persistSettings() {
+        guard settingsPersistenceEnabled else { return }
+        let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
+        let profileKey = selectedDescriptor.settingsProfileKey
+        var settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory,
+            profileKey: profileKey)
+        settings.setProfile(currentSettingsProfile, for: profileKey)
         settings.newlineShortcut = newlineShortcut
         settings.showPromptExamples = showPromptExamples
         settings.sentPromptBehavior = sentPromptBehavior
@@ -2139,6 +2216,8 @@ public final class AppModel {
             reasoning: selectedDescriptor.family == .gptOss ? .off : reasoning,
             reasoningEffort: selectedDescriptor.family == .gptOss
                 ? reasoningEffort : nil,
+            preserveThinking: selectedDescriptor.family == .qwen36
+                && preserveThinking,
             temperature: Float(temperature),
             topK: topKEnabled ? topK : nil,
             topP: topKEnabled && topPEnabled ? Float(topP) : nil,

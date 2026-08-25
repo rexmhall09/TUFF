@@ -87,6 +87,21 @@ struct ChatMLTemplateTests {
             + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
     }
 
+    @Test("Thinking history is preserved only when requested")
+    func thinkingHistoryPreservation() throws {
+        let messages = [
+            Message(role: .user, content: "A"),
+            Message(role: .assistant, content: "B", thinking: "private chain"),
+            Message(role: .user, content: "C"),
+        ]
+        let normal = try tok.applyChatTemplate(messages)
+        let preserved = try tok.applyChatTemplate(messages, preserveThinking: true)
+
+        #expect(!normal.contains("private chain"))
+        #expect(preserved.contains(
+            "<|im_start|>assistant\n<think>\nprivate chain\n</think>\n\nB<|im_end|>"))
+    }
+
     @Test("Message content is trimmed like the Gemma path")
     func contentTrimming() throws {
         let p = try tok.applyChatTemplate([Message(role: .user, content: "  Hi \n")])

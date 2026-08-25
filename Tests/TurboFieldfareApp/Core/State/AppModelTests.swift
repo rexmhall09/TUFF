@@ -35,6 +35,22 @@ import Testing
     }
 
     @MainActor
+    @Test func thinkingHistoryPreservationOnlyReachesQwenRequests() throws {
+        let qwen = AppModel(
+            modelDirectory: FileManager.default.temporaryDirectory,
+            installer: MockModelInstallerClient(descriptor: .qwen36))
+        qwen.promptText = "continue"
+        qwen.preserveThinking = true
+        #expect(try qwen.makeRequest().preserveThinking)
+
+        let gemma = AppModel()
+        gemma.modelPathText = FileManager.default.temporaryDirectory.path
+        gemma.promptText = "continue"
+        gemma.preserveThinking = true
+        #expect(try !gemma.makeRequest().preserveThinking)
+    }
+
+    @MainActor
     @Test func thinkingEventsNeverJoinVisibleAnswer() {
         let model = AppModel()
         model.apply(.thinking(AppTokenEvent(

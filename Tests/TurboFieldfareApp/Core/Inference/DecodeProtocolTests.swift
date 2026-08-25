@@ -185,4 +185,31 @@ import TurboFieldfareDecodeProtocol
         #expect(decoded.reasoningEffort == .high)
     }
 
+    @Test func thinkingPreservationRoundTripsAndDefaultsOff() throws {
+        let request = DecodeGenerationRequest(
+            prompt: "continue",
+            maxNewTokens: 16,
+            maxContextTokens: 4_096,
+            preserveThinking: true,
+            temperature: 0)
+        let encoded = try DecodeFrameCodec.encode(request)
+        let pipe = Pipe()
+        try pipe.fileHandleForWriting.write(contentsOf: encoded)
+        try pipe.fileHandleForWriting.close()
+
+        let decoded = try DecodeFrameCodec.read(
+            DecodeGenerationRequest.self,
+            from: pipe.fileHandleForReading)
+        #expect(decoded.preserveThinking)
+
+        var legacyObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(request))
+                as? [String: Any])
+        legacyObject.removeValue(forKey: "preserveThinking")
+        let legacy = try JSONDecoder().decode(
+            DecodeGenerationRequest.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject))
+        #expect(!legacy.preserveThinking)
+    }
+
 }

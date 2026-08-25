@@ -2,28 +2,34 @@ import Foundation
 import TUFFModelCatalog
 import TurboFieldfare
 
-struct MacModelSettings: Codable, Equatable, Sendable {
-    var contextTokens: Int
-    var expertCacheSlots: Int
-    var temperature: Double
-    var topKEnabled: Bool
-    var topK: Int
-    var topPEnabled: Bool
-    var topP: Double
-    var prefillEnabled: Bool
-    var visionResidencyPolicy: VisionResidencyPolicy
-    var rdadvisePolicy: AppRDAdvicePolicy
+public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
+    public var contextTokens: Int
+    public var expertCacheSlots: Int
+    public var temperature: Double
+    public var topKEnabled: Bool
+    public var topK: Int
+    public var topPEnabled: Bool
+    public var topP: Double
+    public var prefillEnabled: Bool
+    public var visionResidencyPolicy: VisionResidencyPolicy
+    public var rdadvisePolicy: AppRDAdvicePolicy
+    public var defaultReasoning: ChatReasoning
+    public var defaultReasoningEffort: GPTOSSReasoningEffort
+    public var preserveThinking: Bool
 
-    init(contextTokens: Int = AppContextLengthOption.eightK.tokens,
-         expertCacheSlots: Int = 16,
-         temperature: Double = 0.2,
-         topKEnabled: Bool = true,
-         topK: Int = 64,
-         topPEnabled: Bool = true,
-         topP: Double = 0.95,
-         prefillEnabled: Bool = true,
-         visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
-         rdadvisePolicy: AppRDAdvicePolicy = .off) {
+    public init(contextTokens: Int = AppContextLengthOption.eightK.tokens,
+                expertCacheSlots: Int = 16,
+                temperature: Double = 0.2,
+                topKEnabled: Bool = true,
+                topK: Int = 64,
+                topPEnabled: Bool = true,
+                topP: Double = 0.95,
+                prefillEnabled: Bool = true,
+                visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
+                rdadvisePolicy: AppRDAdvicePolicy = .off,
+                defaultReasoning: ChatReasoning = .off,
+                defaultReasoningEffort: GPTOSSReasoningEffort = .medium,
+                preserveThinking: Bool = false) {
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
         self.temperature = temperature
@@ -34,20 +40,26 @@ struct MacModelSettings: Codable, Equatable, Sendable {
         self.prefillEnabled = prefillEnabled
         self.visionResidencyPolicy = visionResidencyPolicy
         self.rdadvisePolicy = rdadvisePolicy
+        self.defaultReasoning = defaultReasoning
+        self.defaultReasoningEffort = defaultReasoningEffort
+        self.preserveThinking = preserveThinking
     }
 
-    static func defaults(for profileKey: String) -> MacModelSettings {
+    static func defaults(for profileKey: String) -> AppModelSettingsProfile {
         guard let id = TUFFModelID(rawValue: profileKey),
               let descriptor = TUFFModelCatalog.model(id: id) else {
-            return MacModelSettings()
+            return AppModelSettingsProfile()
         }
         let defaults = descriptor.runtimeDefaults
-        return MacModelSettings(
+        return AppModelSettingsProfile(
             contextTokens: defaults.contextTokens,
             expertCacheSlots: defaults.expertCacheSlots,
             temperature: defaults.temperature,
-            topK: defaults.topK,
-            topP: defaults.topP)
+            topKEnabled: defaults.topK > 0,
+            topK: max(1, defaults.topK),
+            topP: defaults.topP,
+            prefillEnabled: defaults.expertCacheSlots
+                >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
     }
 
     func isValid() -> Bool {
@@ -56,16 +68,58 @@ struct MacModelSettings: Codable, Equatable, Sendable {
             && temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)
             && topP.isFinite && (0.01...1).contains(topP)
+            && (!prefillEnabled || expertCacheSlots
+                >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case contextTokens
+        case expertCacheSlots
+        case temperature
+        case topKEnabled
+        case topK
+        case topPEnabled
+        case topP
+        case prefillEnabled
+        case visionResidencyPolicy
+        case rdadvisePolicy
+        case defaultReasoning
+        case defaultReasoningEffort
+        case preserveThinking
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        contextTokens = try container.decode(Int.self, forKey: .contextTokens)
+        expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
+        temperature = try container.decode(Double.self, forKey: .temperature)
+        topKEnabled = try container.decode(Bool.self, forKey: .topKEnabled)
+        topK = try container.decode(Int.self, forKey: .topK)
+        topPEnabled = try container.decode(Bool.self, forKey: .topPEnabled)
+        topP = try container.decode(Double.self, forKey: .topP)
+        prefillEnabled = try container.decode(Bool.self, forKey: .prefillEnabled)
+        visionResidencyPolicy = try container.decodeIfPresent(
+            VisionResidencyPolicy.self, forKey: .visionResidencyPolicy) ?? .onDemand
+        rdadvisePolicy = try container.decodeIfPresent(
+            AppRDAdvicePolicy.self, forKey: .rdadvisePolicy) ?? .off
+        defaultReasoning = try container.decodeIfPresent(
+            ChatReasoning.self, forKey: .defaultReasoning) ?? .off
+        defaultReasoningEffort = try container.decodeIfPresent(
+            GPTOSSReasoningEffort.self, forKey: .defaultReasoningEffort) ?? .medium
+        preserveThinking = try container.decodeIfPresent(
+            Bool.self, forKey: .preserveThinking) ?? false
     }
 }
 
+typealias MacModelSettings = AppModelSettingsProfile
+
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 3
+    static let currentVersion = 4
     static let defaultProfileKey = TUFFModelCatalog.default.id.rawValue
 
     var version: Int = currentVersion
-    var modelProfiles: [String: MacModelSettings]
+    var modelProfiles: [String: AppModelSettingsProfile]
     var newlineShortcut: AppNewlineShortcut = .return
     var showPromptExamples: Bool = true
     var sentPromptBehavior: AppSentPromptBehavior = .keep
@@ -156,9 +210,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
          rdadvisePolicy: AppRDAdvicePolicy = .off,
          loadModelOnLaunch: Bool = false,
-         modelProfiles: [String: MacModelSettings]? = nil) {
+         modelProfiles: [String: AppModelSettingsProfile]? = nil) {
         self.version = version
-        self.modelProfiles = modelProfiles ?? [Self.defaultProfileKey: MacModelSettings(
+        self.modelProfiles = modelProfiles ?? [Self.defaultProfileKey: AppModelSettingsProfile(
             contextTokens: contextTokens,
             expertCacheSlots: expertCacheSlots,
             temperature: temperature,
@@ -178,10 +232,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let stamp = try decoder.container(keyedBy: LegacyCodingKeys.self)
         version = try stamp.decode(Int.self, forKey: .version)
-        if version >= Self.currentVersion {
+        if version >= 3 {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             modelProfiles = try container.decode(
-                [String: MacModelSettings].self, forKey: .modelProfiles)
+                [String: AppModelSettingsProfile].self, forKey: .modelProfiles)
             newlineShortcut = try container.decodeIfPresent(
                 AppNewlineShortcut.self, forKey: .newlineShortcut) ?? .return
             showPromptExamples = try container.decodeIfPresent(
@@ -193,7 +247,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             return
         }
 
-        modelProfiles = [Self.defaultProfileKey: MacModelSettings(
+        modelProfiles = [Self.defaultProfileKey: AppModelSettingsProfile(
             contextTokens: try stamp.decode(Int.self, forKey: .contextTokens),
             expertCacheSlots: try stamp.decode(Int.self, forKey: .expertCacheSlots),
             temperature: try stamp.decode(Double.self, forKey: .temperature),
@@ -216,11 +270,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             Bool.self, forKey: .loadModelOnLaunch) ?? false
     }
 
-    func profile(for key: String) -> MacModelSettings {
+    func profile(for key: String) -> AppModelSettingsProfile {
         modelProfiles[key] ?? .defaults(for: key)
     }
 
-    mutating func setProfile(_ profile: MacModelSettings, for key: String) {
+    mutating func setProfile(_ profile: AppModelSettingsProfile, for key: String) {
         modelProfiles[key] = profile
     }
 
@@ -232,7 +286,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     }
 
     private mutating func updateDefaultProfile(
-        _ update: (inout MacModelSettings) -> Void
+        _ update: (inout AppModelSettingsProfile) -> Void
     ) {
         var value = profile(for: Self.defaultProfileKey)
         update(&value)
@@ -277,13 +331,29 @@ enum MacAppSettingsFileStore {
                     ])
                 }
                 var settings = try JSONDecoder().decode(MacAppSettings.self, from: data)
+                let needsLegacyProfileMigration = settings.version < 3
                 let needsMigration = settings.version < MacAppSettings.currentVersion
-                if needsMigration {
+                if needsLegacyProfileMigration {
                     // v1/v2 had one global runtime profile. Move it to the model
                     // active during the first v3 launch, preserving every
                     // deliberate value and leaving other models on defaults.
                     let legacy = settings.profile(for: MacAppSettings.defaultProfileKey)
                     settings.modelProfiles = [profileKey: legacy]
+                }
+                if settings.version < 4 {
+                    for key in Array(settings.modelProfiles.keys) {
+                        guard var profile = settings.modelProfiles[key],
+                              profile.prefillEnabled,
+                              profile.expertCacheSlots
+                                < RuntimeConfiguration
+                                    .minimumExpertCacheSlotsForChunkedPrefill else {
+                            continue
+                        }
+                        profile.prefillEnabled = false
+                        settings.modelProfiles[key] = profile
+                    }
+                }
+                if needsMigration {
                     settings.version = MacAppSettings.currentVersion
                 }
                 guard settings.isValid() else { throw InvalidSettings() }

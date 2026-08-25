@@ -110,6 +110,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         reasoningEffort: request.reasoningEffort.flatMap {
                             DecodeGPTOSSReasoningEffort(rawValue: $0.rawValue)
                         },
+                        preserveThinking: request.preserveThinking,
                         temperature: request.temperature,
                         topK: request.topK,
                         topP: request.topP,

@@ -99,6 +99,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     /// Decoded as off for compatibility with v1 app clients.
     public var reasoning: DecodeChatReasoning
     public var reasoningEffort: DecodeGPTOSSReasoningEffort?
+    public var preserveThinking: Bool
     public var temperature: Float
     /// Carried explicitly, and optional because nil means "no cut". Leaving
     /// them off the wire did not fall back to the sender's settings: the
@@ -124,6 +125,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
             DecodeChatReasoning.self, forKey: .reasoning) ?? .off
         reasoningEffort = try container.decodeIfPresent(
             DecodeGPTOSSReasoningEffort.self, forKey: .reasoningEffort)
+        preserveThinking = try container.decodeIfPresent(
+            Bool.self, forKey: .preserveThinking) ?? false
         temperature = try container.decode(Float.self, forKey: .temperature)
         topK = try container.decodeIfPresent(Int.self, forKey: .topK)
         topP = try container.decodeIfPresent(Float.self, forKey: .topP)
@@ -138,6 +141,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 maxNewTokens: Int, maxContextTokens: Int,
                 reasoning: DecodeChatReasoning = .off,
                 reasoningEffort: DecodeGPTOSSReasoningEffort? = nil,
+                preserveThinking: Bool = false,
                 temperature: Float, topK: Int? = nil, topP: Float? = nil,
                 repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
@@ -149,6 +153,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.maxContextTokens = maxContextTokens
         self.reasoning = reasoning
         self.reasoningEffort = reasoningEffort
+        self.preserveThinking = preserveThinking
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
