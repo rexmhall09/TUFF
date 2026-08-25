@@ -144,7 +144,8 @@ public enum RangeCopyPlanner {
             layoutMode: layoutMode,
             layoutOrderSha256: layoutOrderSha256,
             residentIndexSha256: indexSha,
-            expectedOutputs: expectedOutputs)
+            expectedOutputs: expectedOutputs,
+            formatVersionMinor: GTurboJSON.versionMinor(for: repackPlan))
         let downloaded = coalesced.reduce(UInt64(0)) { $0 + $1.size }
         let copied = copies.reduce(UInt64(0)) { $0 + $1.size }
         return RangeCopyPlan(scalarCopies: copies,
@@ -290,11 +291,12 @@ public enum RangeCopyPlanner {
         layoutMode: String,
         layoutOrderSha256: String?,
         residentIndexSha256: String,
-        expectedOutputs: [RemoteExpectedOutput]
+        expectedOutputs: [RemoteExpectedOutput],
+        formatVersionMinor: Int = GTurboJSON.versionMinor
     ) throws -> String {
         var writer = FingerprintWriter(domain: domain)
         writer.append(UInt64(GTurboJSON.versionMajor))
-        writer.append(UInt64(GTurboJSON.versionMinor))
+        writer.append(UInt64(formatVersionMinor))
         writer.append(UInt64(rangeChunkBytes))
         writer.append(layoutMode)
         writer.append(layoutOrderSha256 ?? "")

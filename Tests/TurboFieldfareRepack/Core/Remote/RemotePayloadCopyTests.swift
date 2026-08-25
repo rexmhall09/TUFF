@@ -195,7 +195,8 @@ func remoteFiles(snapshotDir: String,
             (snapshotDir as NSString).appendingPathComponent("config.json"))),
         "model.safetensors.index.json": try Data(contentsOf: URL(fileURLWithPath:
             (snapshotDir as NSString).appendingPathComponent("model.safetensors.index.json"))),
-        "model-00001-of-00001.safetensors": try Data(contentsOf: URL(fileURLWithPath: snap.shardPath)),
+        (snap.shardPath as NSString).lastPathComponent:
+            try Data(contentsOf: URL(fileURLWithPath: snap.shardPath)),
     ]
     if includeRequiredTokenizer {
         files["tokenizer.json"] = remoteTokenizerJSON

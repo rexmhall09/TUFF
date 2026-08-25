@@ -37,26 +37,30 @@ public enum VerifiedInstallTool {
         let manifest = try loadManifest(data: manifestData)
 
         let layoutRelativePath = "packed_experts/layout.json"
-        guard let layoutManifestEntry = manifest.files[layoutRelativePath] else {
-            throw RepackError.configurationInvalid(
-                detail: "manifest missing \(layoutRelativePath)")
-        }
-        let layoutFD = try access.openFile(layoutRelativePath)
-        defer { close(layoutFD) }
-        _ = fcntl(layoutFD, F_NOCACHE, 1)
-        let layoutData = try access.readMetadata(
-            fileDescriptor: layoutFD, relativePath: layoutRelativePath,
-            maxBytes: layoutMaxBytes)
-        let layoutSize = UInt64(layoutData.count)
-        let layoutSha = hashMetadata(layoutData)
-        let layout = try loadLayout(data: layoutData)
-        try validatePackedExpertLayout(manifest: manifest, layout: layout)
-        guard layoutSize == layoutManifestEntry.size else {
-            throw RepackError.configurationInvalid(
-                detail: "\(layoutRelativePath) size \(layoutSize) != manifest \(layoutManifestEntry.size)")
-        }
-        guard layoutSha.lowercased() == layoutManifestEntry.sha256.lowercased() else {
-            throw RepackError.configurationInvalid(detail: "\(layoutRelativePath) SHA mismatch")
+        var verifiedLayout: (size: UInt64, sha: String)?
+        if manifest.arch.feedForwardKind != "dense" {
+            guard let layoutManifestEntry = manifest.files[layoutRelativePath] else {
+                throw RepackError.configurationInvalid(
+                    detail: "manifest missing \(layoutRelativePath)")
+            }
+            let layoutFD = try access.openFile(layoutRelativePath)
+            defer { close(layoutFD) }
+            _ = fcntl(layoutFD, F_NOCACHE, 1)
+            let layoutData = try access.readMetadata(
+                fileDescriptor: layoutFD, relativePath: layoutRelativePath,
+                maxBytes: layoutMaxBytes)
+            let layoutSize = UInt64(layoutData.count)
+            let layoutSha = hashMetadata(layoutData)
+            let layout = try loadLayout(data: layoutData)
+            try validatePackedExpertLayout(manifest: manifest, layout: layout)
+            guard layoutSize == layoutManifestEntry.size else {
+                throw RepackError.configurationInvalid(
+                    detail: "\(layoutRelativePath) size \(layoutSize) != manifest \(layoutManifestEntry.size)")
+            }
+            guard layoutSha.lowercased() == layoutManifestEntry.sha256.lowercased() else {
+                throw RepackError.configurationInvalid(detail: "\(layoutRelativePath) SHA mismatch")
+            }
+            verifiedLayout = (layoutSize, layoutSha)
         }
 
         var files: [RepackAudit.OutputFile] = []
@@ -66,9 +70,9 @@ public enum VerifiedInstallTool {
             guard let entry = manifest.files[relativePath] else { continue }
             let actualSize: UInt64
             let actualSha: String
-            if relativePath == layoutRelativePath {
-                actualSize = layoutSize
-                actualSha = layoutSha
+            if relativePath == layoutRelativePath, let verifiedLayout {
+                actualSize = verifiedLayout.size
+                actualSha = verifiedLayout.sha
             } else {
                 (actualSize, actualSha) = try inspectFile(
                     access: access, relativePath: relativePath)

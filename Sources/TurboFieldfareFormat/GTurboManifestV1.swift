@@ -32,6 +32,9 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let attentionKEqV: Bool
     package let hiddenActivation: String
     package let fullAttentionLayerMask: [Int]
+    package let hiddenSizePerLayerInput: Int?
+    package let vocabSizePerLayerInput: Int?
+    package let numKVSharedLayers: Int?
 
     // Family extension fields. Gemma 4 manifests omit every one of them, so
     // they stay byte-identical to the pre-family format; a reader treats
@@ -60,6 +63,9 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  partialRotaryFactor: Double, numLayers: Int, numExperts: Int,
                  topKExperts: Int, tieWordEmbeddings: Bool, attentionKEqV: Bool,
                  hiddenActivation: String, fullAttentionLayerMask: [Int],
+                 hiddenSizePerLayerInput: Int? = nil,
+                 vocabSizePerLayerInput: Int? = nil,
+                 numKVSharedLayers: Int? = nil,
                  family: String? = nil,
                  variant: String? = nil,
                  feedForwardKind: String? = nil,
@@ -96,6 +102,9 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.attentionKEqV = attentionKEqV
         self.hiddenActivation = hiddenActivation
         self.fullAttentionLayerMask = fullAttentionLayerMask
+        self.hiddenSizePerLayerInput = hiddenSizePerLayerInput
+        self.vocabSizePerLayerInput = vocabSizePerLayerInput
+        self.numKVSharedLayers = numKVSharedLayers
         self.family = family
         self.variant = variant
         self.feedForwardKind = feedForwardKind
@@ -255,7 +264,11 @@ package enum GTurboManifestCodec {
                   manifest.expertStride == 0,
                   manifest.arch.numExperts == 0,
                   manifest.arch.topKExperts == 0,
-                  manifest.arch.moeIntermediateSize == 0 else {
+                  manifest.arch.moeIntermediateSize == 0,
+                  manifest.flags["streamingPresent"] != true,
+                  !manifest.files.keys.contains(where: {
+                      $0.hasPrefix("packed_experts/")
+                  }) else {
                 throw GTurboFormatError.invalid(
                     field: "manifest.arch", reason: "dense FFN carries MoE metadata")
             }
@@ -297,6 +310,15 @@ package enum GTurboManifestCodec {
               arch.fullAttentionLayerMask.allSatisfy({ (0...2).contains($0) }) else {
             throw GTurboFormatError.invalid(
                 field: "manifest.arch", reason: "invalid architecture values")
+        }
+        let perLayerHidden = arch.hiddenSizePerLayerInput ?? 0
+        let perLayerVocab = arch.vocabSizePerLayerInput ?? 0
+        let sharedKVLayers = arch.numKVSharedLayers ?? 0
+        guard perLayerHidden >= 0, perLayerVocab >= 0,
+              (perLayerHidden == 0) == (perLayerVocab == 0),
+              sharedKVLayers >= 0, sharedKVLayers < arch.numLayers else {
+            throw GTurboFormatError.invalid(
+                field: "manifest.arch", reason: "invalid PLE or shared-KV values")
         }
         if let quant = manifest.quant {
             for (name, slot) in [

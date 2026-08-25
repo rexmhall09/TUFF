@@ -10,6 +10,11 @@ enum GTurboJSON {
     static let versionMajor = GTurboFormatV1.versionMajor
     static let versionMinor = GTurboFormatV1.versionMinor
 
+    static func versionMinor(for plan: RepackPlan) -> Int {
+        plan.arch.feedForwardKind == .dense
+            ? GTurboFormatV1.featureVersionMinor : versionMinor
+    }
+
     struct FileEntry {
         let size: UInt64
         let sha256: String
@@ -33,6 +38,7 @@ enum GTurboJSON {
                                       bitWidths: QuantBitWidths) throws -> Data {
         let arch = plan.arch
         let isGemma = arch.family == .gemma4
+        let isDense = arch.feedForwardKind == .dense
         let bitWidthsByQuantSlot = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -62,9 +68,17 @@ enum GTurboJSON {
             attentionKEqV: arch.attentionKEqV,
             hiddenActivation: arch.hiddenActivation,
             fullAttentionLayerMask: arch.fullAttentionLayerMask.map(Int.init),
+            hiddenSizePerLayerInput: arch.hiddenSizePerLayerInput == 0
+                ? nil : arch.hiddenSizePerLayerInput,
+            vocabSizePerLayerInput: arch.vocabSizePerLayerInput == 0
+                ? nil : arch.vocabSizePerLayerInput,
+            numKVSharedLayers: arch.numKVSharedLayers == 0
+                ? nil : arch.numKVSharedLayers,
             // Gemma 4 omits every family extension field, so its manifests stay
             // byte-identical to the pre-family format.
             family: isGemma ? nil : arch.family.rawValue,
+            variant: isDense ? arch.variant.rawValue : nil,
+            feedForwardKind: isDense ? arch.feedForwardKind.rawValue : nil,
             attnOutputGate: isGemma ? nil : arch.attnOutputGate,
             attentionScale: isGemma ? nil : arch.attentionScale,
             embeddingScaledBySqrtHidden: isGemma ? nil : arch.embeddingScaledBySqrtHidden,
@@ -105,12 +119,15 @@ enum GTurboJSON {
                     detail: "duplicate manifest file entry \(file.relativePath)")
             }
         }
+        var flags = [
+            "streamingPresent": !isDense,
+            "turboQuantKV": false,
+            "aneSharedExpert": false,
+        ]
+        if isDense { flags["denseFFN"] = true }
         return try GTurboManifestCodec.encode(GTurboManifestV1(
-            flags: [
-                "streamingPresent": true,
-                "turboQuantKV": false,
-                "aneSharedExpert": false,
-            ],
+            versionMinor: versionMinor(for: plan),
+            flags: flags,
             modelID: modelID,
             sourceSnapshotHash: sourceSnapshotHash,
             arch: wireArch,

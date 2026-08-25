@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 
 public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
+    case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
 }
@@ -405,6 +406,16 @@ public enum TUFFModelCatalog {
         installedBytes: 14_291_921_884,
         reserveBytes: oneGiB)
 
+    private static let gemmaE4BSource = TUFFModelSource(
+        repoID: "mlx-community/gemma-4-e4b-it-4bit",
+        revision: "475b9088d29754a3379866cf5aeb6b41acd313c2",
+        sourceIndexSHA256:
+            "f8accac59ee7efe87e0c298c854610b262c3cadd477407503147c71209ff0093",
+        manifestModelID: "mlx-community/gemma-4-e4b-it-4bit",
+        approximateDownloadBytes: 4_231_600_000,
+        installedBytes: 4_231_300_000,
+        reserveBytes: oneGiB)
+
     private static let qwenSource = TUFFModelSource(
         repoID: "mlx-community/Qwen3.6-35B-A3B-4bit",
         revision: "38740b847e4cb78f352aba30aa41c76e08e6eb46",
@@ -414,6 +425,38 @@ public enum TUFFModelCatalog {
         approximateDownloadBytes: 19_529_025_048,
         installedBytes: 19_546_491_213,
         reserveBytes: oneGiB)
+
+    /// The descriptor is public for the installer while E4B qualification is
+    /// underway. It joins `all` only once runtime and ingress support land.
+    public static let gemma4_E4B = TUFFModelDescriptor(
+        id: .gemma4_E4B,
+        selector: "gemma4-e4b",
+        aliases: ["e4b"],
+        apiModelID: "gemma-4-e4b-it",
+        displayName: "Gemma 4 E4B IT 4-bit",
+        shortName: "Gemma 4 E4B",
+        summary: "Small dense Gemma with per-layer embeddings and shared KV projections.",
+        family: .gemma4,
+        architecture: .gemma4E4B,
+        installDirectoryName: "gemma4-e4b.gturbo",
+        source: gemmaE4BSource,
+        hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 6 * oneGiB,
+            defaultExpertCacheSlots: 0,
+            expertCacheBytesPerSlot: 0,
+            kvCache: TUFFKVCacheProfile(
+                fullAttentionBytesPerToken: 16_384,
+                slidingAttentionBytesPerToken: 40_960,
+                slidingWindowCapacityTokens: 512)),
+        runtimeDefaults: TUFFModelRuntimeDefaults(
+            contextTokens: 8_192,
+            expertCacheSlots: 0,
+            temperature: 1.0,
+            topK: 64,
+            topP: 0.95),
+        capabilities: [.textGeneration, .reasoning],
+        reasoningControl: .toggle)
 
     public static let gemma4_26B_A4B = TUFFModelDescriptor(
         id: .gemma4_26B_A4B,

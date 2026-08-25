@@ -309,30 +309,39 @@ enum RepackPlanner {
                                             baseNames: lmResidentBases,
                                             registry: registry, meta: meta)
 
-        let layersDir = (outputDir as NSString).appendingPathComponent("packed_experts")
         var layerPlans: [LayerFilePlan] = []
-        layerPlans.reserveCapacity(arch.numLayers)
-        for layer in 0..<arch.numLayers {
-            let bundle = routedByLayerAndRole[layer] ?? [:]
-            // Synthetic snapshots may legitimately have no routed experts.
-            guard let gName = bundle["gate"], let uName = bundle["up"], let dName = bundle["down"] else {
-                if bundle.isEmpty {
-                    layerPlans.append(LayerFilePlan(layerIndex: layer,
-                                                    path: (layersDir as NSString).appendingPathComponent("layer_\(String(format: "%02d", layer)).bin"),
-                                                    expertsPerLayer: 0,
-                                                    expertStride: 0,
-                                                    subTensors: []))
-                    continue
+        if arch.feedForwardKind == .mixtureOfExperts {
+            let layersDir = (outputDir as NSString).appendingPathComponent("packed_experts")
+            layerPlans.reserveCapacity(arch.numLayers)
+            for layer in 0..<arch.numLayers {
+                let bundle = routedByLayerAndRole[layer] ?? [:]
+                // Synthetic snapshots may legitimately have no routed experts.
+                guard let gName = bundle["gate"], let uName = bundle["up"],
+                      let dName = bundle["down"] else {
+                    if bundle.isEmpty {
+                        let name = "layer_\(String(format: "%02d", layer)).bin"
+                        layerPlans.append(LayerFilePlan(
+                            layerIndex: layer,
+                            path: (layersDir as NSString).appendingPathComponent(name),
+                            expertsPerLayer: 0,
+                            expertStride: 0,
+                            subTensors: []))
+                        continue
+                    }
+                    throw RepackError.configurationInvalid(detail:
+                        "layer \(layer) routed-expert bundle incomplete: \(bundle)")
                 }
-                throw RepackError.configurationInvalid(detail:
-                    "layer \(layer) routed-expert bundle incomplete: \(bundle)")
+                let path = (layersDir as NSString)
+                    .appendingPathComponent("layer_\(String(format: "%02d", layer)).bin")
+                let lp = try planLayerFile(
+                    path: path, layer: layer,
+                    gateName: gName, upName: uName, downName: dName,
+                    registry: registry, meta: meta, arch: arch)
+                layerPlans.append(lp)
             }
-            let path = (layersDir as NSString)
-                .appendingPathComponent("layer_\(String(format: "%02d", layer)).bin")
-            let lp = try planLayerFile(path: path, layer: layer,
-                                       gateName: gName, upName: uName, downName: dName,
-                                       registry: registry, meta: meta, arch: arch)
-            layerPlans.append(lp)
+        } else if !routedByLayerAndRole.isEmpty {
+            throw RepackError.configurationInvalid(
+                detail: "dense architecture contains routed-expert tensors")
         }
 
         let matched = SourceFingerprint.modelID(forIndexSha256: meta.indexSha256Hex)
@@ -350,7 +359,9 @@ enum RepackPlanner {
     private static func isMultimodalTensorName(_ name: String) -> Bool {
         name.hasPrefix("vision_tower.") ||
             name.hasPrefix("embed_vision.") ||
-            name.hasPrefix("audio_tower.")
+            name.hasPrefix("audio_tower.") ||
+            name.hasPrefix("embed_audio.") ||
+            name.hasPrefix("embed_video.")
     }
 
     // MARK: - Resident planning
@@ -559,6 +570,7 @@ enum RepackPlanner {
         // Compute a sort key per name; we order by (group rank, layer, slot rank, name).
         func key(_ n: String) -> (Int, Int, Int, String) {
             if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
+            if n == "language_model.model.embed_tokens_per_layer.weight" { return (0, 0, 1, n) }
             if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
             if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
             if let li = layerIndex(in: n) {
@@ -624,14 +636,17 @@ enum RepackPlanner {
         if n.contains(".mlp.gate_proj.weight")    { return 9 }
         if n.contains(".mlp.up_proj.weight")      { return 10 }
         if n.contains(".mlp.down_proj.weight")    { return 11 }
-        if n.hasSuffix(".input_layernorm.weight") { return 12 }
-        if n.hasSuffix(".post_attention_layernorm.weight") { return 13 }
-        if n.hasSuffix(".pre_feedforward_layernorm.weight") { return 14 }
-        if n.hasSuffix(".pre_feedforward_layernorm_2.weight") { return 15 }
-        if n.hasSuffix(".post_feedforward_layernorm.weight") { return 16 }
-        if n.hasSuffix(".post_feedforward_layernorm_1.weight") { return 17 }
-        if n.hasSuffix(".post_feedforward_layernorm_2.weight") { return 18 }
-        if n.hasSuffix(".layer_scalar")           { return 19 }
+        if n.contains(".per_layer_input_gate.weight") { return 12 }
+        if n.contains(".per_layer_projection.weight") { return 13 }
+        if n.hasSuffix(".input_layernorm.weight") { return 14 }
+        if n.hasSuffix(".post_attention_layernorm.weight") { return 15 }
+        if n.hasSuffix(".pre_feedforward_layernorm.weight") { return 16 }
+        if n.hasSuffix(".pre_feedforward_layernorm_2.weight") { return 17 }
+        if n.hasSuffix(".post_feedforward_layernorm.weight") { return 18 }
+        if n.hasSuffix(".post_feedforward_layernorm_1.weight") { return 19 }
+        if n.hasSuffix(".post_feedforward_layernorm_2.weight") { return 20 }
+        if n.hasSuffix(".post_per_layer_input_norm.weight") { return 21 }
+        if n.hasSuffix(".layer_scalar")           { return 22 }
         return 100
     }
 }

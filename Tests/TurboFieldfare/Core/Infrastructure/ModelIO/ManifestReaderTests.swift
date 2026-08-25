@@ -345,6 +345,64 @@ import Darwin
         }
     }
 
+    @Test func denseE4BExtensionRoundTripsPLEAndSharedKVMetadata() throws {
+        let dense = ArchConfig(
+            hiddenSize: 128,
+            intermediateSize: 256,
+            moeIntermediateSize: 0,
+            numHeads: 2,
+            numKVHeads: 1,
+            numFullKVHeads: 1,
+            headDim: 32,
+            fullHeadDim: 64,
+            vocabSize: 256,
+            slidingWindow: 128,
+            finalLogitSoftcap: 30,
+            ropeTheta: 10_000,
+            fullRopeTheta: 1_000_000,
+            partialRotaryFactor: 0.25,
+            numLayers: 4,
+            numExperts: 0,
+            topKExperts: 0,
+            tieWordEmbeddings: true,
+            attentionKEqV: false,
+            fullAttentionLayerMask: [0, 1, 0, 1],
+            hiddenActivation: "gelu_pytorch_tanh",
+            hiddenSizePerLayerInput: 64,
+            vocabSizePerLayerInput: 256,
+            numKVSharedLayers: 2,
+            variant: .gemma4_E4B,
+            feedForwardKind: .dense)
+        let files = [
+            "model_weights.bin": [
+                "size": 1024,
+                "sha256": String(repeating: "0", count: 64),
+            ],
+        ]
+        let (dir, config) = try Self.writeToyManifest(
+            ["versionMinor": 1, "expertsPerLayer": 0, "expertStride": 0],
+            flags: ["denseFFN": true],
+            archOverrides: [
+                "variant": ModelVariant.gemma4_E4B.rawValue,
+                "feedForwardKind": "dense",
+                "numExperts": 0,
+                "topKExperts": 0,
+                "moeIntermediateSize": 0,
+                "hiddenSizePerLayerInput": 64,
+                "vocabSizePerLayerInput": 256,
+                "numKVSharedLayers": 2,
+            ],
+            filesOverride: files,
+            config: dense)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
+        #expect(manifest.arch.variant == "gemma4-e4b")
+        #expect(manifest.arch.hiddenSizePerLayerInput == 64)
+        #expect(manifest.arch.vocabSizePerLayerInput == 256)
+        #expect(manifest.arch.numKVSharedLayers == 2)
+    }
+
     @Test func nonPageAlignedExpertStrideThrows() throws {
         let (dir, toy) = try Self.writeToyManifest(["expertStride": 1024])
         defer { try? FileManager.default.removeItem(at: dir) }

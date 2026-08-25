@@ -319,16 +319,24 @@ public final class RemoteStreamingRepacker {
             try recordOutputFile(relativePath: rel, path: layer.path, progress: progress)
         }
 
-        let layoutPath = ((paths.partialDirectory as NSString)
-            .appendingPathComponent("packed_experts") as NSString)
-            .appendingPathComponent("layout.json")
-        let expertStride = plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertStride ?? 0
-        let layoutData = try GTurboJSON.encodeLayout(plan: plan, expertStride: expertStride)
-        try writeSmall(path: layoutPath, data: layoutData)
-        try GTurboLayoutValidator.validate(path: layoutPath, plan: plan)
-        try recordOutputFile(relativePath: "packed_experts/layout.json",
-                             path: layoutPath,
-                             progress: progress)
+        let expertStride: UInt64
+        if plan.arch.feedForwardKind == .mixtureOfExperts {
+            let layoutPath = ((paths.partialDirectory as NSString)
+                .appendingPathComponent("packed_experts") as NSString)
+                .appendingPathComponent("layout.json")
+            expertStride = plan.layers.first(where: {
+                $0.expertsPerLayer > 0
+            })?.expertStride ?? 0
+            let layoutData = try GTurboJSON.encodeLayout(
+                plan: plan, expertStride: expertStride)
+            try writeSmall(path: layoutPath, data: layoutData)
+            try GTurboLayoutValidator.validate(path: layoutPath, plan: plan)
+            try recordOutputFile(relativePath: "packed_experts/layout.json",
+                                 path: layoutPath,
+                                 progress: progress)
+        } else {
+            expertStride = 0
+        }
 
         try Task.checkCancellation()
         try await copyRemoteMetadataSidecars(snapshot: snapshot,
@@ -394,8 +402,11 @@ public final class RemoteStreamingRepacker {
 
     private func createOutputFiles(plan: RepackPlan,
                                    paths: RemoteInstallPaths) throws {
-        try Posix.mkdirP((paths.partialDirectory as NSString)
-            .appendingPathComponent("packed_experts"))
+        try Posix.mkdirP(paths.partialDirectory)
+        if plan.arch.feedForwardKind == .mixtureOfExperts {
+            try Posix.mkdirP((paths.partialDirectory as NSString)
+                .appendingPathComponent("packed_experts"))
+        }
         let resident = try ResidentWriter.createAndWriteIndex(
             plan: plan.resident,
             audit: audit)

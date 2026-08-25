@@ -8,6 +8,17 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
 }
 
+enum RepackModelVariant: String, Sendable, Equatable {
+    case gemma4_E4B = "gemma4-e4b"
+    case gemma4_26B_A4B = "gemma4-26b-a4b"
+    case qwen36_35B_A3B = "qwen36-35b-a3b"
+}
+
+enum RepackFeedForwardKind: String, Sendable, Equatable {
+    case dense
+    case mixtureOfExperts = "moe"
+}
+
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
 /// the runtime loader at startup.
 ///
@@ -41,6 +52,11 @@ struct ArchInfo: Sendable, Equatable {
     // path (and its manifest output) is unchanged, and so a caller that
     // predates the family split still builds the architecture it meant to.
     var family: RepackModelFamily = .gemma4
+    var variant: RepackModelVariant = .gemma4_26B_A4B
+    var feedForwardKind: RepackFeedForwardKind = .mixtureOfExperts
+    var hiddenSizePerLayerInput: Int = 0
+    var vocabSizePerLayerInput: Int = 0
+    var numKVSharedLayers: Int = 0
     var attnOutputGate: Bool = false
     var attentionScale: Double = 1.0
     var embeddingScaledBySqrtHidden: Bool = true
@@ -84,6 +100,9 @@ struct ArchInfo: Sendable, Equatable {
             }
             return n
         }
+        func optionalInt(_ k: String) -> Int? {
+            (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue
+        }
         let layerTypes = (tc["layer_types"] as? [String]) ?? []
         let mask = layerTypes.map { UInt8($0 == "full_attention" ? 1 : 0) }
         let rope = (tc["rope_parameters"] as? [String: Any]) ?? [:]
@@ -98,13 +117,16 @@ struct ArchInfo: Sendable, Equatable {
         let kEqV = (tc["attention_k_eq_v"] as? Bool) ?? false
         let tie = (tc["tie_word_embeddings"] as? Bool) ?? false
         let act = (tc["hidden_activation"] as? String) ?? "gelu_pytorch_tanh"
-        return ArchInfo(
+        let dense = (tc["enable_moe_block"] as? Bool) == false
+            || optionalInt("num_experts") == nil
+        let numKVHeads = try i("num_key_value_heads")
+        let arch = ArchInfo(
             hiddenSize: try i("hidden_size"),
             intermediateSize: try i("intermediate_size"),
-            moeIntermediateSize: try i("moe_intermediate_size"),
+            moeIntermediateSize: dense ? 0 : try i("moe_intermediate_size"),
             numHeads: try i("num_attention_heads"),
-            numKVHeads: try i("num_key_value_heads"),
-            numFullKVHeads: try i("num_global_key_value_heads"),
+            numKVHeads: numKVHeads,
+            numFullKVHeads: optionalInt("num_global_key_value_heads") ?? numKVHeads,
             headDim: try i("head_dim"),
             fullHeadDim: try i("global_head_dim"),
             vocabSize: try i("vocab_size"),
@@ -114,13 +136,18 @@ struct ArchInfo: Sendable, Equatable {
             fullRopeTheta: fullTheta,
             partialRotaryFactor: prf,
             numLayers: try i("num_hidden_layers"),
-            numExperts: try i("num_experts"),
-            topKExperts: try i("top_k_experts"),
+            numExperts: dense ? 0 : try i("num_experts"),
+            topKExperts: dense ? 0 : try i("top_k_experts"),
             tieWordEmbeddings: tie,
             attentionKEqV: kEqV,
             fullAttentionLayerMask: mask,
             hiddenActivation: act,
             family: .gemma4,
+            variant: dense ? .gemma4_E4B : .gemma4_26B_A4B,
+            feedForwardKind: dense ? .dense : .mixtureOfExperts,
+            hiddenSizePerLayerInput: optionalInt("hidden_size_per_layer_input") ?? 0,
+            vocabSizePerLayerInput: optionalInt("vocab_size_per_layer_input") ?? 0,
+            numKVSharedLayers: optionalInt("num_kv_shared_layers") ?? 0,
             attnOutputGate: false,
             attentionScale: 1.0,
             embeddingScaledBySqrtHidden: true,
@@ -133,6 +160,38 @@ struct ArchInfo: Sendable, Equatable {
             linearKeyHeadDim: 0,
             linearValueHeadDim: 0,
             linearConvKernelSize: 0)
+        try crossCheckProductionGemma4(arch, configPath: configPath)
+        return arch
+    }
+
+    private static func crossCheckProductionGemma4(_ arch: ArchInfo,
+                                                    configPath: String) throws {
+        guard arch.variant == .gemma4_E4B,
+              arch.hiddenSize == 2_560,
+              arch.numLayers == 42 else { return }
+        var expectedMask = [UInt8](repeating: 0, count: 42)
+        for layer in stride(from: 5, to: 42, by: 6) { expectedMask[layer] = 1 }
+        guard arch.intermediateSize == 10_240,
+              arch.moeIntermediateSize == 0,
+              arch.numHeads == 8,
+              arch.numKVHeads == 2,
+              arch.numFullKVHeads == 2,
+              arch.headDim == 256,
+              arch.fullHeadDim == 512,
+              arch.vocabSize == 262_144,
+              arch.slidingWindow == 512,
+              arch.numExperts == 0,
+              arch.topKExperts == 0,
+              arch.fullAttentionLayerMask == expectedMask,
+              arch.hiddenSizePerLayerInput == 256,
+              arch.vocabSizePerLayerInput == 262_144,
+              arch.numKVSharedLayers == 18,
+              arch.tieWordEmbeddings,
+              !arch.attentionKEqV else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "gemma4 dense config does not match the pinned E4B architecture baseline")
+        }
     }
 
     // MARK: - Qwen 3.6 MoE (`model_type == "qwen3_5_moe"`)
@@ -198,6 +257,7 @@ struct ArchInfo: Sendable, Equatable {
             fullAttentionLayerMask: mask,
             hiddenActivation: act,
             family: .qwen36,
+            variant: .qwen36_35B_A3B,
             attnOutputGate: gate,
             attentionScale: 1.0 / Double(headDim).squareRoot(),
             embeddingScaledBySqrtHidden: false,
@@ -247,6 +307,7 @@ struct ArchInfo: Sendable, Equatable {
             fullAttentionLayerMask: expectedMask,
             hiddenActivation: "silu",
             family: .qwen36,
+            variant: .qwen36_35B_A3B,
             attnOutputGate: true,
             attentionScale: 0.0625,
             embeddingScaledBySqrtHidden: false,

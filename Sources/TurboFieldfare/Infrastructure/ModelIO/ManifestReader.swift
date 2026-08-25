@@ -28,6 +28,9 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let attentionKEqV: Bool
     public let hiddenActivation: String
     public let fullAttentionLayerMask: [Int]
+    public let hiddenSizePerLayerInput: Int?
+    public let vocabSizePerLayerInput: Int?
+    public let numKVSharedLayers: Int?
 
     // Family extensions. Optional so legacy Gemma manifests decode unchanged;
     // absent values validate against the Gemma defaults in `ArchConfig`.
@@ -218,6 +221,12 @@ public enum ManifestReader {
         try check("tieWordEmbeddings",   a.tieWordEmbeddings,   e.tieWordEmbeddings)
         try check("attentionKEqV",       a.attentionKEqV,       e.attentionKEqV)
         try check("hiddenActivation",    a.hiddenActivation,    e.hiddenActivation)
+        try check("hiddenSizePerLayerInput",
+                  a.hiddenSizePerLayerInput ?? 0, e.hiddenSizePerLayerInput)
+        try check("vocabSizePerLayerInput",
+                  a.vocabSizePerLayerInput ?? 0, e.vocabSizePerLayerInput)
+        try check("numKVSharedLayers",
+                  a.numKVSharedLayers ?? 0, e.numKVSharedLayers)
         let actualMask = a.fullAttentionLayerMask.map { UInt8($0) }
         try check("fullAttentionLayerMask",
                   actualMask.description,
@@ -351,6 +360,9 @@ private extension ManifestArch {
                   attentionKEqV: wire.attentionKEqV,
                   hiddenActivation: wire.hiddenActivation,
                   fullAttentionLayerMask: wire.fullAttentionLayerMask,
+                  hiddenSizePerLayerInput: wire.hiddenSizePerLayerInput,
+                  vocabSizePerLayerInput: wire.vocabSizePerLayerInput,
+                  numKVSharedLayers: wire.numKVSharedLayers,
                   family: wire.family,
                   variant: wire.variant,
                   feedForwardKind: wire.feedForwardKind,

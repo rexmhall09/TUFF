@@ -204,6 +204,170 @@ enum SyntheticSnapshot {
         return Snapshot(shardPath: shardPath)
     }
 
+    // MARK: - Dense Gemma 4 E4B variant
+
+    static func buildDenseGemmaE4B(
+        at dir: String,
+        seed: UInt64 = 0xE4B0_0004_2026_0402
+    ) throws -> Snapshot {
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+
+        let hidden = 128
+        let intermediate = 256
+        let perLayerHidden = 64
+        let vocab = 256
+        let layers = 4
+        let heads = 2
+        let kvHeads = 1
+        let headDim = 32
+        let fullHeadDim = 64
+        let sharedKVLayers = 2
+        let group = 64
+        let layerTypes = ["sliding_attention", "full_attention",
+                          "sliding_attention", "full_attention"]
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+
+        appendQuantizedWeight(
+            name: "language_model.model.embed_tokens",
+            outerShape: [vocab], innerLogical: hidden, bits: 4,
+            groupSize: group, into: &tensors, rng: &rng)
+        appendQuantizedWeight(
+            name: "language_model.model.embed_tokens_per_layer",
+            outerShape: [vocab], innerLogical: layers * perLayerHidden, bits: 4,
+            groupSize: group, into: &tensors, rng: &rng)
+        appendQuantizedWeight(
+            name: "language_model.model.per_layer_model_projection",
+            outerShape: [layers * perLayerHidden], innerLogical: hidden, bits: 4,
+            groupSize: group, into: &tensors, rng: &rng)
+        appendUnquantizedBF16(
+            name: "language_model.model.per_layer_projection_norm.weight",
+            shape: [perLayerHidden], into: &tensors, rng: &rng)
+
+        for layer in 0..<layers {
+            let prefix = "language_model.model.layers.\(layer)"
+            let isFull = layerTypes[layer] == "full_attention"
+            let dimension = isFull ? fullHeadDim : headDim
+            let qRows = heads * dimension
+            let kvRows = kvHeads * dimension
+            appendQuantizedWeight(
+                name: prefix + ".self_attn.q_proj",
+                outerShape: [qRows], innerLogical: hidden, bits: 4,
+                groupSize: group, into: &tensors, rng: &rng)
+            if layer < layers - sharedKVLayers {
+                appendQuantizedWeight(
+                    name: prefix + ".self_attn.k_proj",
+                    outerShape: [kvRows], innerLogical: hidden, bits: 4,
+                    groupSize: group, into: &tensors, rng: &rng)
+                appendQuantizedWeight(
+                    name: prefix + ".self_attn.v_proj",
+                    outerShape: [kvRows], innerLogical: hidden, bits: 4,
+                    groupSize: group, into: &tensors, rng: &rng)
+                appendUnquantizedBF16(
+                    name: prefix + ".self_attn.k_norm.weight",
+                    shape: [dimension], into: &tensors, rng: &rng)
+            }
+            appendQuantizedWeight(
+                name: prefix + ".self_attn.o_proj",
+                outerShape: [hidden], innerLogical: qRows, bits: 4,
+                groupSize: group, into: &tensors, rng: &rng)
+            appendUnquantizedBF16(
+                name: prefix + ".self_attn.q_norm.weight",
+                shape: [dimension], into: &tensors, rng: &rng)
+
+            for projection in ["gate_proj", "up_proj"] {
+                appendQuantizedWeight(
+                    name: prefix + ".mlp." + projection,
+                    outerShape: [intermediate], innerLogical: hidden, bits: 4,
+                    groupSize: group, into: &tensors, rng: &rng)
+            }
+            appendQuantizedWeight(
+                name: prefix + ".mlp.down_proj",
+                outerShape: [hidden], innerLogical: intermediate, bits: 4,
+                groupSize: group, into: &tensors, rng: &rng)
+            appendQuantizedWeight(
+                name: prefix + ".per_layer_input_gate",
+                outerShape: [perLayerHidden], innerLogical: hidden, bits: 4,
+                groupSize: group, into: &tensors, rng: &rng)
+            appendQuantizedWeight(
+                name: prefix + ".per_layer_projection",
+                outerShape: [hidden], innerLogical: perLayerHidden, bits: 4,
+                groupSize: group, into: &tensors, rng: &rng)
+            for norm in [
+                "input_layernorm", "post_attention_layernorm",
+                "pre_feedforward_layernorm", "post_feedforward_layernorm",
+                "post_per_layer_input_norm",
+            ] {
+                appendUnquantizedBF16(
+                    name: prefix + "." + norm + ".weight",
+                    shape: [hidden], into: &tensors, rng: &rng)
+            }
+            appendUnquantizedBF16(
+                name: prefix + ".layer_scalar", shape: [1],
+                into: &tensors, rng: &rng)
+        }
+        appendUnquantizedBF16(
+            name: "language_model.model.norm.weight",
+            shape: [hidden], into: &tensors, rng: &rng)
+        appendQuantizedWeight(
+            name: "embed_audio.embedding_projection",
+            outerShape: [hidden], innerLogical: hidden, bits: 4,
+            groupSize: group, into: &tensors, rng: &rng)
+        appendUnquantizedBF16(
+            name: "audio_tower.layers.0.norm_out.weight",
+            shape: [hidden], into: &tensors, rng: &rng)
+
+        let shardName = "model.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+        let textConfig: [String: Any] = [
+            "hidden_size": hidden,
+            "intermediate_size": intermediate,
+            "num_attention_heads": heads,
+            "num_key_value_heads": kvHeads,
+            "head_dim": headDim,
+            "global_head_dim": fullHeadDim,
+            "vocab_size": vocab,
+            "num_hidden_layers": layers,
+            "sliding_window": 128,
+            "final_logit_softcapping": 30.0,
+            "rope_parameters": [
+                "sliding_attention": ["rope_theta": 10_000.0],
+                "full_attention": ["rope_theta": 1_000_000.0,
+                                   "partial_rotary_factor": 0.25],
+            ],
+            "layer_types": layerTypes,
+            "tie_word_embeddings": true,
+            "attention_k_eq_v": false,
+            "hidden_activation": "gelu_pytorch_tanh",
+            "enable_moe_block": false,
+            "hidden_size_per_layer_input": perLayerHidden,
+            "vocab_size_per_layer_input": vocab,
+            "num_kv_shared_layers": sharedKVLayers,
+        ]
+        let config: [String: Any] = [
+            "model_type": "gemma4",
+            "quantization": ["bits": 4, "group_size": group, "mode": "affine"],
+            "text_config": textConfig,
+        ]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath:
+                (dir as NSString).appendingPathComponent("config.json")))
+        let weightMap = Dictionary(uniqueKeysWithValues: tensors.map {
+            ($0.0, shardName)
+        })
+        let index: [String: Any] = [
+            "metadata": ["format": "mlx"],
+            "weight_map": weightMap,
+        ]
+        try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath:
+                (dir as NSString).appendingPathComponent("model.safetensors.index.json")))
+        return Snapshot(shardPath: shardPath)
+    }
+
     // MARK: - Qwen 3.6 variant
 
     /// Tiny qwen3_5_moe-shaped architecture: a hybrid of three gated-DeltaNet
