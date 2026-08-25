@@ -5,17 +5,20 @@ public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
+    case gptOss_20B = "gpt-oss-20b"
 }
 
 public enum TUFFModelFamily: String, Codable, Sendable {
     case gemma4
     case qwen36
+    case gptOss = "gpt-oss"
 }
 
 public enum TUFFArchitectureID: String, Codable, Sendable {
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
+    case gptOss_20B = "gpt-oss-20b"
 }
 
 public enum TUFFFeedForwardKind: String, Codable, Sendable {
@@ -63,11 +66,18 @@ public extension TUFFArchitectureProfile {
         family: .qwen36,
         feedForwardKind: .mixtureOfExperts,
         weightLayout: .affine)
+
+    static let gptOss_20B = TUFFArchitectureProfile(
+        id: .gptOss_20B,
+        family: .gptOss,
+        feedForwardKind: .mixtureOfExperts,
+        weightLayout: .mxfp4)
 }
 
 public enum TUFFReasoningControl: String, Codable, Sendable {
     case toggle
     case toggleWithPreservation
+    case graded
 }
 
 public enum TUFFModelCapability: String, Codable, Sendable {
@@ -426,6 +436,16 @@ public enum TUFFModelCatalog {
         installedBytes: 19_546_491_213,
         reserveBytes: oneGiB)
 
+    private static let gptOss20BSource = TUFFModelSource(
+        repoID: "openai/gpt-oss-20b",
+        revision: "6cee5e81ee83917806bbde320786a8fb61efebee",
+        sourceIndexSHA256:
+            "0e085b977c4c9942f85938828e8c989ed7d5cdabf852e4da6a67c116cd502cd1",
+        manifestModelID: "openai/gpt-oss-20b",
+        approximateDownloadBytes: 13_790_000_000,
+        installedBytes: 13_792_000_000,
+        reserveBytes: oneGiB)
+
     /// Small text-only launch model. Image and audio remain intentionally
     /// absent until separately packaged add-ons pass their own qualification.
     public static let gemma4_E4B = TUFFModelDescriptor(
@@ -533,10 +553,46 @@ public enum TUFFModelCatalog {
                 minimumUnifiedMemoryBytes: eightGiB,
                 minimumAppleSiliconGeneration: 2))])
 
+    /// Official Harmony checkpoint. The conservative 24 GB gate remains in
+    /// place until the real 20B qualification commit records its measured
+    /// peak working set and safe context limits.
+    public static let gptOss_20B = TUFFModelDescriptor(
+        id: .gptOss_20B,
+        selector: "gpt-oss-20b",
+        aliases: ["gpt-oss"],
+        apiModelID: "gpt-oss-20b",
+        displayName: "GPT-OSS 20B",
+        shortName: "GPT-OSS 20B",
+        summary: "Official MXFP4 checkpoint with Harmony reasoning and tool calls.",
+        family: .gptOss,
+        architecture: .gptOss_20B,
+        installDirectoryName: "gpt-oss-20b.gturbo",
+        source: gptOss20BSource,
+        hardware: TUFFModelHardwareRequirements(
+            minimumUnifiedMemoryBytes: 24 * oneGiB),
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 20 * oneGiB,
+            defaultContextTokens: 4_096,
+            defaultExpertCacheSlots: 4,
+            expertCacheBytesPerSlot: 13_238_272,
+            kvCache: TUFFKVCacheProfile(
+                fullAttentionBytesPerToken: 24_576,
+                slidingAttentionBytesPerToken: 24_576,
+                slidingWindowCapacityTokens: 384)),
+        runtimeDefaults: TUFFModelRuntimeDefaults(
+            contextTokens: 4_096,
+            expertCacheSlots: 4,
+            temperature: 1.0,
+            topK: 0,
+            topP: 1.0),
+        capabilities: [.textGeneration, .reasoning],
+        reasoningControl: .graded)
+
     public static let all: [TUFFModelDescriptor] = [
         gemma4_E4B,
         gemma4_26B_A4B,
         qwen36_35B_A3B,
+        gptOss_20B,
     ]
     public static let `default` = gemma4_26B_A4B
 

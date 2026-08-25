@@ -11,7 +11,7 @@ enum GTurboJSON {
     static let versionMinor = GTurboFormatV1.versionMinor
 
     static func versionMinor(for plan: RepackPlan) -> Int {
-        plan.arch.feedForwardKind == .dense
+        plan.arch.feedForwardKind == .dense || plan.arch.family == .gptOss
             ? GTurboFormatV1.featureVersionMinor : versionMinor
     }
 
@@ -39,6 +39,7 @@ enum GTurboJSON {
         let arch = plan.arch
         let isGemma = arch.family == .gemma4
         let isDense = arch.feedForwardKind == .dense
+        let isGPTOSS = arch.family == .gptOss
         let bitWidthsByQuantSlot = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -77,8 +78,9 @@ enum GTurboJSON {
             // Gemma 4 omits every family extension field, so its manifests stay
             // byte-identical to the pre-family format.
             family: isGemma ? nil : arch.family.rawValue,
-            variant: isDense ? arch.variant.rawValue : nil,
-            feedForwardKind: isDense ? arch.feedForwardKind.rawValue : nil,
+            variant: (isDense || isGPTOSS) ? arch.variant.rawValue : nil,
+            feedForwardKind: (isDense || isGPTOSS)
+                ? arch.feedForwardKind.rawValue : nil,
             attnOutputGate: isGemma ? nil : arch.attnOutputGate,
             attentionScale: isGemma ? nil : arch.attentionScale,
             embeddingScaledBySqrtHidden: isGemma ? nil : arch.embeddingScaledBySqrtHidden,
@@ -95,6 +97,22 @@ enum GTurboJSON {
             guard let weightBits = bitWidthsByQuantSlot[name] else {
                 throw RepackError.configurationInvalid(
                     detail: "missing manifest quant slot bit width for \(name)")
+            }
+            if isGPTOSS, name == "routedExpert" {
+                return GTurboManifestQuantSlotV1(
+                    weightBits: 4,
+                    scheme: "mxfp4",
+                    scaleType: "UE8M0",
+                    biasType: "none",
+                    groupSize: 32)
+            }
+            if isGPTOSS {
+                return GTurboManifestQuantSlotV1(
+                    weightBits: 16,
+                    scheme: "bf16",
+                    scaleType: "none",
+                    biasType: "none",
+                    groupSize: 1)
             }
             return GTurboManifestQuantSlotV1(
                 weightBits: weightBits,
@@ -125,6 +143,7 @@ enum GTurboJSON {
             "aneSharedExpert": false,
         ]
         if isDense { flags["denseFFN"] = true }
+        if isGPTOSS { flags["mxfp4Weights"] = true }
         return try GTurboManifestCodec.encode(GTurboManifestV1(
             versionMinor: versionMinor(for: plan),
             flags: flags,
@@ -158,10 +177,12 @@ enum GTurboJSON {
                     case "weights": key = slice.role
                     case "scales":  key = slice.role + "_scales"
                     case "biases":  key = slice.role + "_biases"
+                    case "bias":    key = slice.role + "_bias"
                     default:        key = slice.role + "_" + slice.component
                     }
                     guard slice.dtype == GTurboFormatV1.DType.u32.rawValue
-                            || slice.dtype == GTurboFormatV1.DType.bf16.rawValue else {
+                            || slice.dtype == GTurboFormatV1.DType.bf16.rawValue
+                            || slice.dtype == SourceTensor.Dtype.u8.rawValue else {
                         throw RepackError.configurationInvalid(
                             detail: "unsupported packed expert dtype \(slice.dtype) for \(key)")
                     }
@@ -172,10 +193,16 @@ enum GTurboJSON {
                         }
                         return UInt32(value)
                     }
+                    let dtype: String
+                    switch slice.dtype {
+                    case GTurboFormatV1.DType.u32.rawValue: dtype = "U32"
+                    case GTurboFormatV1.DType.bf16.rawValue: dtype = "BF16"
+                    default: dtype = "U8"
+                    }
                     let previous = tensors.updateValue(GTurboSubTensorV1(
                         offset: slice.offsetInExpertBlob,
                         size: slice.sizeInExpertBlob,
-                        dtype: slice.dtype == GTurboFormatV1.DType.u32.rawValue ? "U32" : "BF16",
+                        dtype: dtype,
                         shape: shape,
                         bits: slice.bitsForWeights), forKey: key)
                     guard previous == nil else {

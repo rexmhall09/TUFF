@@ -4,7 +4,7 @@ import TurboFieldfareFormat
 struct SubTensorEntry: Sendable, Equatable {
     let offset: UInt64    // relative to the expert blob's start
     let size: UInt64
-    let dtype: String     // "U32" | "BF16"
+    let dtype: String     // "U32" | "BF16" | "U8"
     let shape: [UInt32]
     let bits: Int?        // weight bit width override (4 or 8), if applicable
 }

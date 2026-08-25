@@ -9,9 +9,16 @@ struct SourceTensor: Sendable, Hashable {
         case bf16 = 1
         case fp16 = 2
         case fp32 = 3
+        case u8   = 4
 
         var elementBytes: Int {
-            switch self { case .u32: 4; case .bf16: 2; case .fp16: 2; case .fp32: 4 }
+            switch self {
+            case .u32: 4
+            case .bf16: 2
+            case .fp16: 2
+            case .fp32: 4
+            case .u8: 1
+            }
         }
     }
 

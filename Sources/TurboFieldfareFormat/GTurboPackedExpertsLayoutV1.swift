@@ -146,7 +146,8 @@ package enum GTurboV1StructuralValidator {
                 }
                 var tensorRanges: [(start: UInt64, end: UInt64, name: String)] = []
                 for (name, tensor) in expert.tensors {
-                    guard tensor.dtype == "U32" || tensor.dtype == "BF16",
+                    guard tensor.dtype == "U32" || tensor.dtype == "BF16"
+                            || tensor.dtype == "U8",
                           !name.isEmpty, tensor.size > 0,
                           !tensor.shape.isEmpty,
                           tensor.shape.allSatisfy({ $0 > 0 }),

@@ -54,11 +54,13 @@ import TurboFieldfareRepackCore
             "gemma4-e4b",
             "gemma4-26b-a4b",
             "qwen36-35b-a3b",
+            "gpt-oss-20b",
         ])
         #expect(AppModelInstallDescriptor.catalog.map(\.installDirectoryName) == [
             "gemma4-e4b.gturbo",
             "gemma4.gturbo",
             "qwen36.gturbo",
+            "gpt-oss-20b.gturbo",
         ])
         #expect(AppModelInstallDescriptor.gemma4E4B.supportsImageInput == false)
         #expect(MacModelSettings.defaults(
@@ -68,6 +70,8 @@ import TurboFieldfareRepackCore
             for: ModelVariant.gemma4_E4B) == .gemma4E4B)
         #expect(AppModelInstallDescriptor.descriptor(
             for: ModelVariant.qwen36_35B_A3B) == .qwen36)
+        #expect(AppModelInstallDescriptor.descriptor(
+            for: ModelVariant.gptOss_20B)?.settingsProfileKey == "gpt-oss-20b")
     }
 
     @MainActor

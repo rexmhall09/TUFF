@@ -57,6 +57,7 @@ public struct SupportedModelSource: Sendable, Equatable {
     /// (the 1,769,472-byte expert blob is already page-aligned) plus
     /// layout/manifest sidecars.
     public static let qwen36 = SupportedModelSource(catalog: TUFFModelCatalog.qwen36_35B_A3B)
+    public static let gptOss20B = SupportedModelSource(catalog: TUFFModelCatalog.gptOss_20B)
 
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4

@@ -11,13 +11,21 @@ import Testing
             appleSiliconGeneration: generation)
     }
 
-    @Test func currentModelsAcceptQualifiedMemoryTiers() {
+    @Test func qualifiedModelsAcceptExistingMemoryTiers() {
         for memoryGiB: UInt64 in [8, 16, 24, 64] {
-            for model in TUFFModelCatalog.all {
+            for model in [TUFFModelCatalog.gemma4_E4B,
+                          TUFFModelCatalog.gemma4_26B_A4B,
+                          TUFFModelCatalog.qwen36_35B_A3B] {
                 #expect(model.compatibility(with: device(memoryGiB: memoryGiB))
                     .isCompatible)
             }
         }
+    }
+
+    @Test func unqualifiedGPTOSSUsesConservativeMemoryGate() {
+        let model = TUFFModelCatalog.gptOss_20B
+        #expect(!model.compatibility(with: device(memoryGiB: 16)).isCompatible)
+        #expect(model.compatibility(with: device(memoryGiB: 24)).isCompatible)
     }
 
     @Test func insufficientMemoryAndPlatformReturnConcreteIssues() {

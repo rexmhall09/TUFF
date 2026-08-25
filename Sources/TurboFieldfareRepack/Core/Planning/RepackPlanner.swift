@@ -45,9 +45,9 @@ struct ResidentFilePlan: Sendable {
 }
 
 struct PerExpertTensorSlice: Sendable {
-    let role: String                   // "gate" | "up" | "down"
-    let component: String              // "weights" | "scales" | "biases"
-    let dtype: UInt8                   // 0=U32, 1=BF16
+    let role: String                   // affine roles or GPT-OSS "mlp1"/"mlp2"
+    let component: String              // weights | scales | bias/biases
+    let dtype: UInt8                   // 0=U32, 1=BF16, 4=U8
     let logicalShape: [UInt64]         // per-expert logical shape
     let offsetInExpertBlob: UInt64     // within each expert blob
     let sizeInExpertBlob: UInt64
@@ -217,6 +217,17 @@ enum RepackPlanner {
 
     static func classify(_ name: String, numLayers: Int,
                          family: RepackModelFamily) -> Bucket {
+        if family == .gptOss,
+           (name == "lm_head.weight" || name.hasPrefix("model.")) {
+            if name.contains(".mlp.experts."),
+               let layer = layerIndex(in: name),
+               layer >= 0 && layer < numLayers {
+                return .routedExpert(
+                    role: name.contains("gate_up_proj") ? "mlp1" : "mlp2",
+                    layer: layer)
+            }
+            return .lmResident
+        }
         if name.hasPrefix("language_model.") {
             // Routed expert?
             if let role = routedExpertRole(in: name, family: family),
@@ -238,6 +249,7 @@ enum RepackPlanner {
         switch family {
         case .gemma4: routedContainer = ".experts.switch_glu."
         case .qwen36: routedContainer = ".mlp.switch_mlp."
+        case .gptOss: routedContainer = ".mlp.experts."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -276,6 +288,15 @@ enum RepackPlanner {
         // declared override count for the output manifest audit.
         let bitsOverrideCount = meta.bitsOverrides.count
 
+        if arch.family == .gptOss {
+            return try planGPTOSS(
+                meta: meta,
+                arch: arch,
+                registry: registry,
+                outputDir: outputDir,
+                bitsOverrideCount: bitsOverrideCount)
+        }
+
         var lmResidentBases: [String] = []
         var excludedMultimodalNames: [String] = []
         var routedByLayerAndRole: [Int: [String: String]] = [:]
@@ -307,7 +328,8 @@ enum RepackPlanner {
         let residentPath = (outputDir as NSString).appendingPathComponent("model_weights.bin")
         let resident = try planResidentFile(path: residentPath,
                                             baseNames: lmResidentBases,
-                                            registry: registry, meta: meta)
+                                            registry: registry, meta: meta,
+                                            family: arch.family)
 
         var layerPlans: [LayerFilePlan] = []
         if arch.feedForwardKind == .mixtureOfExperts {
@@ -369,14 +391,16 @@ enum RepackPlanner {
     private static func planResidentFile(path: String,
                                          baseNames: [String],
                                          registry: [String: SourceTensor],
-                                         meta: IndexLoader.SourceMetadata) throws
+                                         meta: IndexLoader.SourceMetadata,
+                                         family: RepackModelFamily) throws
                                         -> ResidentFilePlan {
         let entryCount = baseNames.count
 
         var stringTable: [UInt8] = []
         var offsets: [UInt32] = []
         offsets.reserveCapacity(entryCount)
-        for n in baseNames {
+        for sourceName in baseNames {
+            let n = canonicalResidentName(sourceName, family: family)
             offsets.append(UInt32(stringTable.count))
             stringTable.append(contentsOf: n.utf8)
         }
@@ -392,15 +416,17 @@ enum RepackPlanner {
         var entries: [ResidentEntry] = []
         entries.reserveCapacity(entryCount)
 
-        for name in baseNames {
-            guard let weight = registry[name] else {
-                throw RepackError.missingTensor(name: name)
+        for sourceName in baseNames {
+            let name = canonicalResidentName(sourceName, family: family)
+            guard let weight = registry[sourceName] else {
+                throw RepackError.missingTensor(name: sourceName)
             }
             let dtype = ietnyDtype(weight.dtype)
-            let isQuantizedPacked = (weight.dtype == .u32) && name.hasSuffix(".weight")
+            let isQuantizedPacked = (weight.dtype == .u32)
+                && sourceName.hasSuffix(".weight")
 
             if isQuantizedPacked {
-                let base = String(name.dropLast(".weight".count))
+                let base = String(sourceName.dropLast(".weight".count))
                 guard let scales = registry[base + ".scales"] else {
                     throw RepackError.missingScalesCompanion(name: name)
                 }
@@ -411,7 +437,7 @@ enum RepackPlanner {
                     throw RepackError.dtypeMismatch(name: name,
                         detail: "expected BF16 scales/biases, got \(scales.dtype)/\(biases.dtype)")
                 }
-                let spec = IndexLoader.quantSpec(forTensor: name, meta: meta)
+                let spec = IndexLoader.quantSpec(forTensor: sourceName, meta: meta)
                 let logical = logicalShape(forPackedSource: weight.shape, bits: spec.bits)
 
                 let wOff = fileCursor
@@ -455,6 +481,186 @@ enum RepackPlanner {
                                 stringTableOffsets: offsets,
                                 indexSize: indexSize,
                                 residentSize: residentSize)
+    }
+
+    private static func canonicalResidentName(
+        _ sourceName: String,
+        family: RepackModelFamily
+    ) -> String {
+        guard family == .gptOss else { return sourceName }
+        if sourceName == "lm_head.weight" {
+            return "language_model.lm_head.weight"
+        }
+        return "language_model." + sourceName
+    }
+
+    // MARK: - GPT-OSS planning
+
+    private static func planGPTOSS(
+        meta: IndexLoader.SourceMetadata,
+        arch: ArchInfo,
+        registry: [String: SourceTensor],
+        outputDir: String,
+        bitsOverrideCount: Int
+    ) throws -> RepackPlan {
+        guard meta.baseMode.lowercased() == "mxfp4",
+              meta.baseBits == 4,
+              meta.baseGroupSize == 32,
+              bitsOverrideCount == 0 else {
+            throw RepackError.configurationInvalid(
+                detail: "GPT-OSS requires MXFP4 group-32 source metadata without overrides")
+        }
+
+        let expertMarker = ".mlp.experts."
+        var residentNames: [String] = []
+        for name in registry.keys {
+            if name.contains(expertMarker) { continue }
+            guard name == "lm_head.weight" || name.hasPrefix("model.") else {
+                throw RepackError.unknownTensorPrefix(name: name)
+            }
+            residentNames.append(name)
+        }
+        residentNames.sort(by: lmResidentOrdering(family: .gptOss))
+        let residentPath = (outputDir as NSString)
+            .appendingPathComponent("model_weights.bin")
+        let resident = try planResidentFile(
+            path: residentPath,
+            baseNames: residentNames,
+            registry: registry,
+            meta: meta,
+            family: .gptOss)
+        guard resident.entries.allSatisfy({ $0.dtype == GTurboFormatV1.DType.bf16.rawValue }) else {
+            throw RepackError.configurationInvalid(
+                detail: "GPT-OSS resident tensors must be BF16")
+        }
+
+        let layersDir = (outputDir as NSString)
+            .appendingPathComponent("packed_experts")
+        var layers: [LayerFilePlan] = []
+        layers.reserveCapacity(arch.numLayers)
+        for layer in 0..<arch.numLayers {
+            let prefix = "model.layers.\(layer).mlp.experts."
+            let path = (layersDir as NSString).appendingPathComponent(
+                "layer_\(String(format: "%02d", layer)).bin")
+            layers.append(try planGPTOSSLayer(
+                path: path,
+                layer: layer,
+                prefix: prefix,
+                registry: registry,
+                arch: arch))
+        }
+
+        return RepackPlan(
+            arch: arch,
+            baseMode: meta.baseMode,
+            baseGroupSize: meta.baseGroupSize,
+            bitsOverrideCount: bitsOverrideCount,
+            resident: resident,
+            layers: layers,
+            matchedModelID: SourceFingerprint.modelID(
+                forIndexSha256: meta.indexSha256Hex),
+            excludedMultimodalTensorNames: [])
+    }
+
+    private static func planGPTOSSLayer(
+        path: String,
+        layer: Int,
+        prefix: String,
+        registry: [String: SourceTensor],
+        arch: ArchInfo
+    ) throws -> LayerFilePlan {
+        let sources: [(role: String, component: String, suffix: String)] = [
+            ("mlp1", "weights", "gate_up_proj_blocks"),
+            ("mlp1", "scales", "gate_up_proj_scales"),
+            ("mlp1", "bias", "gate_up_proj_bias"),
+            ("mlp2", "weights", "down_proj_blocks"),
+            ("mlp2", "scales", "down_proj_scales"),
+            ("mlp2", "bias", "down_proj_bias"),
+        ]
+        var slices: [PerExpertTensorSlice] = []
+        var cursor: UInt64 = 0
+        for source in sources {
+            let name = prefix + source.suffix
+            guard let tensor = registry[name] else {
+                throw RepackError.missingTensor(name: name)
+            }
+            let expectedDtype: SourceTensor.Dtype = source.component == "bias"
+                ? .bf16 : .u8
+            guard tensor.dtype == expectedDtype,
+                  tensor.shape.first == UInt64(arch.numExperts) else {
+                throw RepackError.shapeMismatch(
+                    name: name,
+                    detail: "expected \(expectedDtype) with leading \(arch.numExperts), got \(tensor.dtype) \(tensor.shape)")
+            }
+            let expectedShape: [UInt64]
+            switch (source.role, source.component) {
+            case ("mlp1", "weights"):
+                expectedShape = [UInt64(arch.numExperts),
+                                 UInt64(2 * arch.moeIntermediateSize),
+                                 UInt64(arch.hiddenSize / 32), 16]
+            case ("mlp1", "scales"):
+                expectedShape = [UInt64(arch.numExperts),
+                                 UInt64(2 * arch.moeIntermediateSize),
+                                 UInt64(arch.hiddenSize / 32)]
+            case ("mlp1", "bias"):
+                expectedShape = [UInt64(arch.numExperts),
+                                 UInt64(2 * arch.moeIntermediateSize)]
+            case ("mlp2", "weights"):
+                expectedShape = [UInt64(arch.numExperts),
+                                 UInt64(arch.hiddenSize),
+                                 UInt64(arch.moeIntermediateSize / 32), 16]
+            case ("mlp2", "scales"):
+                expectedShape = [UInt64(arch.numExperts),
+                                 UInt64(arch.hiddenSize),
+                                 UInt64(arch.moeIntermediateSize / 32)]
+            default:
+                expectedShape = [UInt64(arch.numExperts), UInt64(arch.hiddenSize)]
+            }
+            guard tensor.shape == expectedShape,
+                  tensor.sizeBytes % UInt64(arch.numExperts) == 0 else {
+                throw RepackError.shapeMismatch(
+                    name: name,
+                    detail: "expected shape \(expectedShape), got \(tensor.shape)")
+            }
+            let perExpert = tensor.sizeBytes / UInt64(arch.numExperts)
+            let logicalShape: [UInt64]
+            switch (source.role, source.component) {
+            case ("mlp1", "weights"):
+                logicalShape = [UInt64(2 * arch.moeIntermediateSize),
+                                UInt64(arch.hiddenSize)]
+            case ("mlp1", "scales"):
+                logicalShape = [UInt64(2 * arch.moeIntermediateSize),
+                                UInt64(arch.hiddenSize / 32)]
+            case ("mlp1", "bias"):
+                logicalShape = [UInt64(2 * arch.moeIntermediateSize)]
+            case ("mlp2", "weights"):
+                logicalShape = [UInt64(arch.hiddenSize),
+                                UInt64(arch.moeIntermediateSize)]
+            case ("mlp2", "scales"):
+                logicalShape = [UInt64(arch.hiddenSize),
+                                UInt64(arch.moeIntermediateSize / 32)]
+            default:
+                logicalShape = [UInt64(arch.hiddenSize)]
+            }
+            slices.append(PerExpertTensorSlice(
+                role: source.role,
+                component: source.component,
+                dtype: tensor.dtype == .u8 ? SourceTensor.Dtype.u8.rawValue
+                    : GTurboFormatV1.DType.bf16.rawValue,
+                logicalShape: logicalShape,
+                offsetInExpertBlob: cursor,
+                sizeInExpertBlob: perExpert,
+                sourceOffsetPerExpert: perExpert,
+                sourceTensor: tensor,
+                bitsForWeights: source.component == "weights" ? 4 : nil))
+            cursor += perExpert
+        }
+        return LayerFilePlan(
+            layerIndex: layer,
+            path: path,
+            expertsPerLayer: arch.numExperts,
+            expertStride: roundUpToPage(cursor),
+            subTensors: slices)
     }
 
     // MARK: - Layer planning
@@ -537,7 +743,13 @@ enum RepackPlanner {
     // MARK: - Helpers
 
     private static func ietnyDtype(_ d: SourceTensor.Dtype) -> UInt8 {
-        switch d { case .u32: 0; case .bf16: 1; case .fp16: 2; case .fp32: 3 }
+        switch d {
+        case .u32: 0
+        case .bf16: 1
+        case .fp16: 2
+        case .fp32: 3
+        case .u8: 4
+        }
     }
 
     private static func roundUpToPage(_ v: UInt64) -> UInt64 {
@@ -568,7 +780,8 @@ enum RepackPlanner {
     private static func lmResidentOrdering(family: RepackModelFamily)
         -> (String, String) -> Bool {
         // Compute a sort key per name; we order by (group rank, layer, slot rank, name).
-        func key(_ n: String) -> (Int, Int, Int, String) {
+        func key(_ sourceName: String) -> (Int, Int, Int, String) {
+            let n = canonicalResidentName(sourceName, family: family)
             if n == "language_model.model.embed_tokens.weight" { return (0, 0, 0, n) }
             if n == "language_model.model.embed_tokens_per_layer.weight" { return (0, 0, 1, n) }
             if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
@@ -578,6 +791,7 @@ enum RepackPlanner {
                 switch family {
                 case .gemma4: slot = slotRank(in: n)
                 case .qwen36: slot = qwenSlotRank(in: n)
+                case .gptOss: slot = gptOssSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -590,6 +804,23 @@ enum RepackPlanner {
             if ka.2 != kb.2 { return ka.2 < kb.2 }
             return ka.3 < kb.3
         }
+    }
+
+    private static func gptOssSlotRank(in name: String) -> Int {
+        if name.hasSuffix(".input_layernorm.weight") { return 0 }
+        if name.contains(".self_attn.q_proj.weight") { return 1 }
+        if name.contains(".self_attn.q_proj.bias") { return 2 }
+        if name.contains(".self_attn.k_proj.weight") { return 3 }
+        if name.contains(".self_attn.k_proj.bias") { return 4 }
+        if name.contains(".self_attn.v_proj.weight") { return 5 }
+        if name.contains(".self_attn.v_proj.bias") { return 6 }
+        if name.contains(".self_attn.o_proj.weight") { return 7 }
+        if name.contains(".self_attn.o_proj.bias") { return 8 }
+        if name.hasSuffix(".self_attn.sinks") { return 9 }
+        if name.hasSuffix(".post_attention_layernorm.weight") { return 10 }
+        if name.contains(".mlp.router.weight") { return 11 }
+        if name.contains(".mlp.router.bias") { return 12 }
+        return 100
     }
 
     /// Within-layer slot order for the Qwen 3.6 family: full-attention

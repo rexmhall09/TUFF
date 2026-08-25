@@ -6,12 +6,14 @@ import Foundation
 enum RepackModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
+    case gptOss = "gpt-oss"
 }
 
 enum RepackModelVariant: String, Sendable, Equatable {
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
+    case gptOss_20B = "gpt-oss-20b"
 }
 
 enum RepackFeedForwardKind: String, Sendable, Equatable {
@@ -75,6 +77,9 @@ struct ArchInfo: Sendable, Equatable {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
         }
+        if (root["model_type"] as? String) == "gpt_oss" {
+            return try loadGPTOSS20B(configPath: configPath, config: root)
+        }
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
         }
@@ -82,6 +87,136 @@ struct ArchInfo: Sendable, Equatable {
             return try loadQwen36(configPath: configPath, tc: tc)
         }
         return try loadGemma4(configPath: configPath, tc: tc)
+    }
+
+    // MARK: - GPT-OSS
+
+    private static func loadGPTOSS20B(
+        configPath: String,
+        config: [String: Any]
+    ) throws -> ArchInfo {
+        func i(_ key: String) throws -> Int {
+            guard let value = (config[key] as? Int)
+                    ?? (config[key] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "missing \(key)")
+            }
+            return value
+        }
+        func d(_ key: String) throws -> Double {
+            guard let value = (config[key] as? Double)
+                    ?? (config[key] as? NSNumber)?.doubleValue else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "missing \(key)")
+            }
+            return value
+        }
+        guard let layerTypes = config["layer_types"] as? [String] else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing layer_types")
+        }
+        let mask: [UInt8] = try layerTypes.map { value in
+            switch value {
+            case "sliding_attention": return 0
+            case "full_attention": return 1
+            default:
+                throw RepackError.configJsonInvalid(
+                    path: configPath,
+                    detail: "unknown layer_types entry \"\(value)\"")
+            }
+        }
+        guard let quant = config["quantization_config"] as? [String: Any],
+              (quant["quant_method"] as? String)?.lowercased() == "mxfp4" else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "GPT-OSS requires quantization_config.quant_method=mxfp4")
+        }
+        let headDim = try i("head_dim")
+        let experts = (config["num_local_experts"] as? Int)
+            ?? (config["num_local_experts"] as? NSNumber)?.intValue
+        let topK = (config["experts_per_token"] as? Int)
+            ?? (config["experts_per_token"] as? NSNumber)?.intValue
+            ?? (config["num_experts_per_tok"] as? Int)
+            ?? (config["num_experts_per_tok"] as? NSNumber)?.intValue
+        guard let experts, let topK else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing GPT-OSS expert dimensions")
+        }
+        let arch = ArchInfo(
+            hiddenSize: try i("hidden_size"),
+            intermediateSize: try i("intermediate_size"),
+            moeIntermediateSize: try i("intermediate_size"),
+            numHeads: try i("num_attention_heads"),
+            numKVHeads: try i("num_key_value_heads"),
+            numFullKVHeads: try i("num_key_value_heads"),
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: try i("sliding_window"),
+            finalLogitSoftcap: 0,
+            ropeTheta: try d("rope_theta"),
+            fullRopeTheta: try d("rope_theta"),
+            partialRotaryFactor: 1,
+            numLayers: try i("num_hidden_layers"),
+            numExperts: experts,
+            topKExperts: topK,
+            tieWordEmbeddings: (config["tie_word_embeddings"] as? Bool) ?? false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: mask,
+            hiddenActivation: "swiglu_capped",
+            family: .gptOss,
+            variant: .gptOss_20B,
+            feedForwardKind: .mixtureOfExperts,
+            attnOutputGate: false,
+            attentionScale: 1 / Double(headDim).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true)
+        try crossCheckProductionGPTOSS20B(
+            arch, config: config, configPath: configPath)
+        return arch
+    }
+
+    private static func crossCheckProductionGPTOSS20B(
+        _ arch: ArchInfo,
+        config: [String: Any],
+        configPath: String
+    ) throws {
+        guard arch.hiddenSize == 2_880, arch.numLayers == 24 else { return }
+        let expectedMask = (0..<24).map { UInt8($0.isMultiple(of: 2) ? 0 : 1) }
+        let rope = config["rope_scaling"] as? [String: Any]
+        func number(_ object: Any?) -> Double? {
+            (object as? Double) ?? (object as? NSNumber)?.doubleValue
+        }
+        guard arch.intermediateSize == 2_880,
+              arch.moeIntermediateSize == 2_880,
+              arch.numHeads == 64,
+              arch.numKVHeads == 8,
+              arch.headDim == 64,
+              arch.vocabSize == 201_088,
+              arch.slidingWindow == 128,
+              arch.ropeTheta == 150_000,
+              arch.numExperts == 32,
+              arch.topKExperts == 4,
+              arch.fullAttentionLayerMask == expectedMask,
+              arch.attentionScale == 0.125,
+              arch.hiddenActivation == "swiglu_capped",
+              !arch.tieWordEmbeddings,
+              config["attention_bias"] as? Bool == true,
+              number(config["swiglu_limit"]) == 7,
+              (config["initial_context_length"] as? Int) == 4_096,
+              (config["max_position_embeddings"] as? Int) == 131_072,
+              (rope?["rope_type"] as? String) == "yarn",
+              number(rope?["factor"]) == 32,
+              number(rope?["beta_fast"]) == 32,
+              number(rope?["beta_slow"]) == 1,
+              (rope?["original_max_position_embeddings"] as? Int) == 4_096 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "GPT-OSS config does not match the pinned 20B architecture baseline")
+        }
     }
 
     // MARK: - Gemma 4

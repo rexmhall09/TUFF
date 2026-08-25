@@ -50,6 +50,22 @@ enum IndexLoader {
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
             }
+            if let gptQuant = root["quantization_config"] as? [String: Any],
+               (gptQuant["quant_method"] as? String)?.lowercased() == "mxfp4" {
+                baseBits = 4
+                baseGroup = 32
+                baseMode = "mxfp4"
+                return SourceMetadata(
+                    indexPath: indexPath,
+                    configPath: configPath,
+                    indexSha256Hex: indexSha,
+                    weightMap: weightMap,
+                    baseBits: baseBits,
+                    baseGroupSize: baseGroup,
+                    baseMode: baseMode,
+                    bitsOverrides: overrides,
+                    shardFilenames: stableShardFilenames(weightMap))
+            }
             guard let quant = root["quantization"] as? [String: Any] else {
                 throw RepackError.configJsonInvalid(path: configPath, detail: "no quantization slot")
             }
@@ -73,12 +89,7 @@ enum IndexLoader {
             throw RepackError.configJsonInvalid(path: configPath, detail: "\(error)")
         }
 
-        var seen = Set<String>()
-        var shards: [String] = []
-        for k in weightMap.keys.sorted() {
-            let shard = weightMap[k]!
-            if !seen.contains(shard) { seen.insert(shard); shards.append(shard) }
-        }
+        let shards = stableShardFilenames(weightMap)
 
         return SourceMetadata(indexPath: indexPath, configPath: configPath,
                               indexSha256Hex: indexSha,
@@ -87,6 +98,18 @@ enum IndexLoader {
                               baseMode: baseMode,
                               bitsOverrides: overrides,
                               shardFilenames: shards)
+    }
+
+    private static func stableShardFilenames(
+        _ weightMap: [String: String]
+    ) -> [String] {
+        var seen = Set<String>()
+        var shards: [String] = []
+        for key in weightMap.keys.sorted() {
+            let shard = weightMap[key]!
+            if seen.insert(shard).inserted { shards.append(shard) }
+        }
+        return shards
     }
 
     /// Resolves the bits/group for one tensor name (with or without `.weight`).

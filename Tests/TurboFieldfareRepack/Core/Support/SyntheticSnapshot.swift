@@ -564,6 +564,17 @@ enum SyntheticSnapshot {
             "linear_conv_kernel_dim": arch.linearConvKernelSize,
             "attn_output_gate": true,
             "tie_word_embeddings": false,
+            "attention_bias": true,
+            "swiglu_limit": 7.0,
+            "initial_context_length": 4_096,
+            "max_position_embeddings": 131_072,
+            "rope_scaling": [
+                "rope_type": "yarn",
+                "factor": 32.0,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+                "original_max_position_embeddings": 4_096,
+            ],
             "rms_norm_eps": 1e-6,
             "hidden_act": "silu"
         ]
@@ -586,6 +597,116 @@ enum SyntheticSnapshot {
         let indexData = try JSONSerialization.data(withJSONObject: indexObj, options: [.sortedKeys])
         let indexPath = (dir as NSString).appendingPathComponent("model.safetensors.index.json")
         try indexData.write(to: URL(fileURLWithPath: indexPath))
+        return Snapshot(shardPath: shardPath)
+    }
+
+    static func buildGPTOSS(
+        at dir: String,
+        seed: UInt64 = 0x2055_0A55_20BB_0001
+    ) throws -> Snapshot {
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+        let hidden = 64
+        let intermediate = 64
+        let heads = 4
+        let kvHeads = 2
+        let headDim = 16
+        let vocab = 128
+        let numLayers = 2
+        let experts = 2
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+
+        appendUnquantizedBF16(
+            name: "model.embed_tokens.weight",
+            shape: [vocab, hidden], into: &tensors, rng: &rng)
+        for layer in 0..<numLayers {
+            let prefix = "model.layers.\(layer)."
+            appendUnquantizedBF16(name: prefix + "input_layernorm.weight",
+                                  shape: [hidden], into: &tensors, rng: &rng)
+            for (name, shape) in [
+                ("q_proj.weight", [heads * headDim, hidden]),
+                ("q_proj.bias", [heads * headDim]),
+                ("k_proj.weight", [kvHeads * headDim, hidden]),
+                ("k_proj.bias", [kvHeads * headDim]),
+                ("v_proj.weight", [kvHeads * headDim, hidden]),
+                ("v_proj.bias", [kvHeads * headDim]),
+                ("o_proj.weight", [hidden, heads * headDim]),
+                ("o_proj.bias", [hidden]),
+            ] {
+                appendUnquantizedBF16(
+                    name: prefix + "self_attn." + name,
+                    shape: shape, into: &tensors, rng: &rng)
+            }
+            appendUnquantizedBF16(name: prefix + "self_attn.sinks",
+                                  shape: [heads], into: &tensors, rng: &rng)
+            appendUnquantizedBF16(
+                name: prefix + "post_attention_layernorm.weight",
+                shape: [hidden], into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + "mlp.router.weight",
+                                  shape: [experts, hidden], into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: prefix + "mlp.router.bias",
+                                  shape: [experts], into: &tensors, rng: &rng)
+
+            let expertPrefix = prefix + "mlp.experts."
+            appendU8(name: expertPrefix + "gate_up_proj_blocks",
+                     shape: [experts, 2 * intermediate, hidden / 32, 16],
+                     into: &tensors, rng: &rng)
+            appendU8(name: expertPrefix + "gate_up_proj_scales",
+                     shape: [experts, 2 * intermediate, hidden / 32],
+                     into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: expertPrefix + "gate_up_proj_bias",
+                                  shape: [experts, 2 * intermediate],
+                                  into: &tensors, rng: &rng)
+            appendU8(name: expertPrefix + "down_proj_blocks",
+                     shape: [experts, hidden, intermediate / 32, 16],
+                     into: &tensors, rng: &rng)
+            appendU8(name: expertPrefix + "down_proj_scales",
+                     shape: [experts, hidden, intermediate / 32],
+                     into: &tensors, rng: &rng)
+            appendUnquantizedBF16(name: expertPrefix + "down_proj_bias",
+                                  shape: [experts, hidden],
+                                  into: &tensors, rng: &rng)
+        }
+        appendUnquantizedBF16(name: "model.norm.weight", shape: [hidden],
+                              into: &tensors, rng: &rng)
+        appendUnquantizedBF16(name: "lm_head.weight", shape: [vocab, hidden],
+                              into: &tensors, rng: &rng)
+
+        let shardName = "model-00000-of-00002.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+        let config: [String: Any] = [
+            "model_type": "gpt_oss",
+            "hidden_size": hidden,
+            "intermediate_size": intermediate,
+            "num_attention_heads": heads,
+            "num_key_value_heads": kvHeads,
+            "head_dim": headDim,
+            "vocab_size": vocab,
+            "num_hidden_layers": numLayers,
+            "sliding_window": 128,
+            "rope_theta": 150_000.0,
+            "num_local_experts": experts,
+            "experts_per_token": experts,
+            "tie_word_embeddings": false,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "quantization_config": ["quant_method": "mxfp4"],
+        ]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("config.json")))
+        let weightMap = Dictionary(uniqueKeysWithValues: tensors.map {
+            ($0.0, shardName)
+        })
+        let index: [String: Any] = [
+            "metadata": ["format": "pt"],
+            "weight_map": weightMap,
+        ]
+        try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath: (dir as NSString)
+                .appendingPathComponent("model.safetensors.index.json")))
         return Snapshot(shardPath: shardPath)
     }
 
@@ -626,6 +747,15 @@ enum SyntheticSnapshot {
         var bytes = [UInt8](repeating: 0, count: elements * 2)
         for i in 0..<bytes.count { bytes[i] = UInt8(rng.next() & 0xFF) }
         tensors.append((name, "BF16", shape, bytes))
+    }
+
+    private static func appendU8(name: String, shape: [Int],
+                                 into tensors: inout [(String, String, [Int], [UInt8])],
+                                 rng: inout SplitMix64) {
+        let elements = shape.reduce(1, *)
+        var bytes = [UInt8](repeating: 0, count: elements)
+        for index in bytes.indices { bytes[index] = UInt8(rng.next() & 0xFF) }
+        tensors.append((name, "U8", shape, bytes))
     }
 
     // MARK: - Safetensors writer
