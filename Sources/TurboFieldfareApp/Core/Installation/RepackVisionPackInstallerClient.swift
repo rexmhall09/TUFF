@@ -28,17 +28,19 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
     public init(descriptor: AppModelInstallDescriptor = .visionCompanion) {
         self.descriptor = descriptor
         self.runInstall = { textModelDirectory, progress in
+            let resolved = Self.resolvedDescriptor(
+                descriptor, for: textModelDirectory)
             let output = try VisionPackLocation.companionURL(
                 forTextModel: textModelDirectory)
             let paths = try RemoteInstallPaths(outputDirectory: output.path)
             let resume = FileManager.default.fileExists(atPath: paths.checkpointFile)
             let options = RemoteVisionPackInstallOptions(
-                repoID: descriptor.repoID,
-                revision: descriptor.revision,
+                repoID: resolved.repoID,
+                revision: resolved.revision,
                 textModelDirectory: textModelDirectory.path,
                 outputDirectory: output.path,
                 token: ProcessInfo.processInfo.environment["HF_TOKEN"],
-                minFreeReserveBytes: descriptor.reserveBytes,
+                minFreeReserveBytes: resolved.reserveBytes,
                 overwrite: true,
                 resume: resume)
             let result = try await RemoteVisionPackInstaller(options: options)
@@ -74,6 +76,8 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
     public func checkInstallRequirement(
         textModelDirectory: URL
     ) throws -> AppModelInstallRequirement {
+        let descriptor = Self.resolvedDescriptor(
+            descriptor, for: textModelDirectory)
         let output = try VisionPackLocation.companionURL(
             forTextModel: textModelDirectory)
         let saved = try RemoteVisionPackInstaller.inspectPersistentInstall(
@@ -165,6 +169,8 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
         let textModelDirectory = textModelDirectory.standardizedFileURL
         let output = try VisionPackLocation.companionURL(
             forTextModel: textModelDirectory)
+        let descriptor = Self.resolvedDescriptor(
+            descriptor, for: textModelDirectory)
         try await runCancellableDetached { [descriptor] in
             try RemoteVisionPackInstaller.activatePrepared(
                 outputDirectory: output.path,
@@ -212,5 +218,16 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
         try await Task.detached(priority: .utility) {
             try await runner(directory.standardizedFileURL)
         }.value
+    }
+
+    private static func resolvedDescriptor(
+        _ configured: AppModelInstallDescriptor,
+        for textModelDirectory: URL
+    ) -> AppModelInstallDescriptor {
+        guard configured == .visionCompanion,
+              (try? ManifestReader.peekFamily(directoryURL: textModelDirectory)) == .qwen36 else {
+            return configured
+        }
+        return .qwen36VisionCompanion
     }
 }

@@ -6,6 +6,52 @@ private let visionMPPTensorOpsAvailable = MTLCreateSystemDefaultDevice()?
     .supportsFamily(.apple8) == true
 
 @Suite struct VisionAttentionTests {
+    @Test func qwenScoreScaleMatchesScaledDotProductReference() throws {
+        let context = try MetalContext()
+        let length = 2
+        let heads = 1
+        let dimension = VisionAttention.headDimension
+        var q = [Float](repeating: 0, count: length * heads * dimension)
+        var k = q
+        var v = q
+        q[0] = 1
+        q[dimension] = 1
+        k[0] = 1
+        k[dimension] = -1
+        v[0] = 1
+        v[dimension] = -1
+
+        func buffer(_ values: [Float]) throws -> MTLBuffer {
+            let bits = values.map(Quantization.bf16Bits)
+            return try #require(context.device.makeBuffer(
+                bytes: bits, length: bits.count * MemoryLayout<UInt16>.stride,
+                options: .storageModeShared))
+        }
+        let output = try #require(context.device.makeBuffer(
+            length: q.count * MemoryLayout<UInt16>.stride,
+            options: .storageModeShared))
+        let scoreScale = 1 / sqrt(Float(dimension))
+        let attention = try VisionAttention(
+            context: context,
+            environment: ["TURBO_FIELDFARE_VISION_ATTENTION_Q8": "1"],
+            scoreScale: scoreScale)
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        attention.encode(
+            commandBuffer: commandBuffer,
+            q: try buffer(q), k: try buffer(k), v: try buffer(v),
+            output: output, sequenceLength: length, numHeads: heads)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.error == nil)
+
+        let actual = Quantization.bf16ToFloat(
+            output.contents().bindMemory(to: UInt16.self, capacity: q.count)[0])
+        // softmax([s, -s]) dot [1, -1] == tanh(s)
+        #expect(abs(actual - tanh(scoreScale)) < 0.01)
+        #expect(abs(actual - tanh(1)) > 0.5,
+                "the Qwen path accidentally used the legacy Gemma scale")
+    }
+
     /// The layout is the caller's decision, signalled by the row stride: the
     /// runtime fuses only when the linear path can also write the padded
     /// head-major store, so an attention that *could* fuse still receives

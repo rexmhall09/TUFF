@@ -47,6 +47,25 @@ struct ServerRequestImagesTests {
         let encoded: Int
     }
 
+    @Test func qwenIngressPlansWithItsOwnProcessorContract() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let preprocessor = VisionImagePreprocessor(
+            device: device, config: VisionConfig(family: .qwen36))
+        let directory = try Self.makeStagingDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("qwen-still.png")
+        try Self.writeSolidImage(width: 640, height: 384, to: url)
+
+        let plans = try ServerRequestImages.plans(for: [url], with: preprocessor)
+        let plan = try #require(plans.first)
+        let geometry = try #require(plan.plan?.geometry)
+        #expect(geometry.processedWidth == 640)
+        #expect(geometry.processedHeight == 384)
+        #expect(geometry.patchGridWidth == 40)
+        #expect(geometry.patchGridHeight == 24)
+        #expect(plan.softTokenCount == 240)
+    }
+
     /// The full-prefill path: every image of the request encoded from the plan
     /// its count came from, so a file rewritten after the request was planned
     /// cannot move the count out from under the span already laid out for it.

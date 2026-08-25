@@ -341,8 +341,9 @@ public final class RemoteVisionPackInstaller {
             requireKnownSource: true,
             metadataDirectory: paths.metadataDirectory,
             audit: audit)
-        guard SourceFingerprint.modelID(forIndexSha256: snapshot.metadata.indexSha256Hex)
-                == options.repoID else {
+        guard SourceFingerprint.modelID(
+            forIndexSha256: snapshot.metadata.indexSha256Hex,
+            repoID: options.repoID) != nil else {
             throw RepackError.sourceFingerprintRejected(
                 path: snapshot.metadata.indexPath,
                 sha256: snapshot.metadata.indexSha256Hex)
@@ -539,7 +540,8 @@ public final class RemoteVisionPackInstaller {
         }
         return TextBinding(
             sourceSnapshotHash: source,
-            manifestSha256: hash(data))
+            manifestSha256: hash(data),
+            family: manifest.arch.family ?? "gemma4")
     }
 
     private func createWeightsFile(paths: RemoteInstallPaths, size: UInt64) throws {
@@ -575,6 +577,12 @@ public final class RemoteVisionPackInstaller {
         weightsSha256: String,
         paths: RemoteInstallPaths
     ) throws {
+        let visionFamily: GTurboVisionFamilyV1 =
+            options.repoID == SupportedModelSource.qwen36.repoID ? .qwen36 : .gemma4
+        guard textBinding.family == visionFamily.rawValue else {
+            throw RepackError.configurationInvalid(
+                detail: "\(visionFamily.rawValue) vision source cannot bind to \(textBinding.family) text model")
+        }
         let files = [
             GTurboVisionFormatV1.weightsFile: GTurboManifestFileV1(
                 size: plan.weightsFileSize, sha256: weightsSha256),
@@ -599,6 +607,8 @@ public final class RemoteVisionPackInstaller {
                 })
         }
         let manifest = GTurboVisionManifestV1(
+            artifactKind: visionFamily.artifactKind,
+            family: visionFamily == .gemma4 ? nil : visionFamily,
             modelID: options.repoID,
             sourceRevision: sourceRevision,
             sourceIndexSha256: sourceIndexSha256,
@@ -614,6 +624,8 @@ public final class RemoteVisionPackInstaller {
                 size: UInt64(manifestData.count), sha256: manifestSHA)
         ]) { _, new in new }
         let receipt = GTurboVisionReceiptV1(
+            artifactKind: visionFamily.artifactKind,
+            family: visionFamily == .gemma4 ? nil : visionFamily,
             manifestSha256: manifestSHA,
             companionDirectoryPath: paths.finalDirectory,
             compatibleTextManifestSha256: textBinding.manifestSha256,
@@ -644,4 +656,5 @@ public final class RemoteVisionPackInstaller {
 private struct TextBinding: Sendable {
     let sourceSnapshotHash: String
     let manifestSha256: String
+    let family: String
 }

@@ -808,6 +808,33 @@ kernel void prefill_rope_neox_subdim_block(
                                  float(start_position + t), theta_base);
 }
 
+// Qwen multimodal RoPE. Frequency slots remain in their normal order while
+// temporal/height/width position axes are interleaved across those slots.
+kernel void prefill_rope_mrope_neox_subdim_block(
+    device half*   data                [[buffer(0)]],
+    constant uint& head_dim            [[buffer(1)]],
+    constant uint& num_heads           [[buffer(2)]],
+    constant uint& token_stride_elems  [[buffer(3)]],
+    constant float& theta_base         [[buffer(4)]],
+    constant uint& rotary_dim          [[buffer(5)]],
+    device const int* temporal_pos     [[buffer(6)]],
+    device const int* height_pos       [[buffer(7)]],
+    device const int* width_pos        [[buffer(8)]],
+    uint3          gid                 [[thread_position_in_grid]]
+) {
+    const uint i = gid.x;
+    const uint h = gid.y;
+    const uint t = gid.z;
+    const uint half_rotary = rotary_dim / 2u;
+    if (i >= half_rotary || h >= num_heads) return;
+    int position = temporal_pos[t];
+    if ((i % 3u) == 1u && i < 33u) position = height_pos[t];
+    if ((i % 3u) == 2u && i < 30u) position = width_pos[t];
+    device half* head_ptr = data + t * token_stride_elems + h * head_dim;
+    prefill_rope_apply_neox_pair(head_ptr, i, half_rotary, rotary_dim,
+                                 float(position), theta_base);
+}
+
 struct PrefillAttentionParams {
     uint startPosition;
     uint queryCount;

@@ -56,6 +56,7 @@ final class VisionWeightStore {
 
     static func open(
         directoryURL: URL,
+        expectedFamily: ModelFamily = .gemma4,
         compatibleTextSourceSnapshotHash: String,
         compatibleTextManifestSha256: String
     ) throws -> VisionWeightStore {
@@ -92,6 +93,14 @@ final class VisionWeightStore {
         } catch {
             throw VisionPackError.invalidMetadata("\(error)")
         }
+        let packFamily: ModelFamily = manifest.resolvedFamily == .qwen36
+            ? .qwen36 : .gemma4
+        let receiptFamily: ModelFamily = receipt.resolvedFamily == .qwen36
+            ? .qwen36 : .gemma4
+        guard packFamily == expectedFamily, receiptFamily == expectedFamily,
+              manifest.artifactKind == receipt.artifactKind else {
+            throw VisionPackError.incompatibleTextArtifact
+        }
         guard manifest.compatibleTextSourceSnapshotHash
                 == compatibleTextSourceSnapshotHash,
               manifest.compatibleTextManifestSha256.lowercased()
@@ -100,16 +109,15 @@ final class VisionWeightStore {
         }
 
         let manifestSHA = Sha256Verifier.hashData(manifestData)
-        let receiptDirectory = canonicalVisionDirectoryPath(URL(
-            fileURLWithPath: receipt.companionDirectoryPath,
-            isDirectory: true))
-        let openedDirectory = canonicalVisionDirectoryPath(directoryURL)
         guard receipt.manifestSha256.lowercased() == manifestSHA,
               receipt.compatibleTextManifestSha256.lowercased()
                 == compatibleTextManifestSha256.lowercased(),
               receipt.sourceRepoID == manifest.modelID,
               receipt.sourceRevision == manifest.sourceRevision,
-              receiptDirectory == openedDirectory else {
+              visionDirectoryBindingMatches(
+                  receiptPath: receipt.companionDirectoryPath,
+                  openedDirectory: directoryURL
+              ) else {
             throw VisionPackError.invalidReceipt("path or manifest binding mismatch")
         }
         let manifestEntry = receipt.files[GTurboVisionFormatV1.manifestFile]
@@ -261,6 +269,25 @@ private func canonicalVisionDirectoryPath(_ url: URL) -> String {
         .resolvingSymlinksInPath()
         .appendingPathComponent(standardized.lastPathComponent, isDirectory: true)
         .standardizedFileURL.path
+}
+
+private func visionDirectoryBindingMatches(
+    receiptPath: String,
+    openedDirectory: URL
+) -> Bool {
+    let receiptURL = URL(
+        fileURLWithPath: receiptPath,
+        isDirectory: true
+    ).standardizedFileURL
+    if canonicalVisionDirectoryPath(receiptURL)
+        == canonicalVisionDirectoryPath(openedDirectory) {
+        return true
+    }
+    guard (try? FileManager.default.destinationOfSymbolicLink(
+        atPath: receiptURL.path
+    )) == nil else { return false }
+    return receiptURL.resolvingSymlinksInPath().path
+        == openedDirectory.standardizedFileURL.resolvingSymlinksInPath().path
 }
 
 struct VisionMappedWeightRegion {

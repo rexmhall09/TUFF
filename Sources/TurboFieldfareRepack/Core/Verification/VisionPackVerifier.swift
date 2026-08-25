@@ -68,6 +68,13 @@ public enum VisionPackVerifier {
             textManifestPath,
             maximumBytes: GTurboVisionFormatV1.metadataMaxBytes)
         let textManifest = try GTurboManifestCodec.decode(textManifestData)
+        let textFamily = textManifest.arch.family ?? "gemma4"
+        guard manifest.resolvedFamily.rawValue == textFamily,
+              receipt.resolvedFamily == manifest.resolvedFamily,
+              receipt.artifactKind == manifest.artifactKind else {
+            throw RepackError.installStateIncompatible(
+                detail: "vision companion family does not match the text model")
+        }
         guard let textSource = textManifest.sourceSnapshotHash,
               manifest.compatibleTextSourceSnapshotHash == textSource else {
             throw RepackError.installStateIncompatible(
@@ -81,15 +88,14 @@ public enum VisionPackVerifier {
         }
 
         let manifestSHA = hash(manifestData)
-        let receiptDirectory = canonicalDirectoryPath(URL(
-            fileURLWithPath: receipt.companionDirectoryPath,
-            isDirectory: true))
-        let expectedDirectory = canonicalDirectoryPath(installedDirectory)
         guard receipt.manifestSha256.lowercased() == manifestSHA else {
             throw RepackError.configurationInvalid(
                 detail: "vision companion receipt manifest binding mismatch")
         }
-        guard receiptDirectory == expectedDirectory else {
+        guard directoryBindingMatches(
+            receiptPath: receipt.companionDirectoryPath,
+            installedDirectory: installedDirectory
+        ) else {
             throw RepackError.configurationInvalid(
                 detail: "vision companion receipt directory binding mismatch")
         }
@@ -158,5 +164,25 @@ public enum VisionPackVerifier {
             .resolvingSymlinksInPath()
             .appendingPathComponent(standardized.lastPathComponent, isDirectory: true)
             .standardizedFileURL.path
+    }
+
+    private static func directoryBindingMatches(
+        receiptPath: String,
+        installedDirectory: URL
+    ) -> Bool {
+        let receiptURL = URL(
+            fileURLWithPath: receiptPath,
+            isDirectory: true
+        ).standardizedFileURL
+        if canonicalDirectoryPath(receiptURL)
+            == canonicalDirectoryPath(installedDirectory) {
+            return true
+        }
+        guard (try? FileManager.default.destinationOfSymbolicLink(
+            atPath: receiptURL.path
+        )) == nil else { return false }
+        return receiptURL.resolvingSymlinksInPath().path
+            == installedDirectory.standardizedFileURL
+                .resolvingSymlinksInPath().path
     }
 }

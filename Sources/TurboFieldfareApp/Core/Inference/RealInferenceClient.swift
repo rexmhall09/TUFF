@@ -364,7 +364,8 @@ actor RealInferenceSession {
         request: AppGenerationRequest,
         features: [UUID: VisionFeatures],
         tokenizer: GFTokenizer,
-        maxContext: Int
+        maxContext: Int,
+        family: ModelFamily = .gemma4
     ) throws -> RenderedMultimodalConversation {
         var currentContent = request.imageAttachments.map {
             MultimodalContentPart.image(id: $0.id)
@@ -384,7 +385,8 @@ actor RealInferenceSession {
             return try MultimodalPromptRenderer.render(
                 messages: messages,
                 featuresByID: features,
-                tokenizer: tokenizer)
+                tokenizer: tokenizer,
+                family: family)
         }
 
         var dropped = 0
@@ -488,7 +490,8 @@ actor RealInferenceSession {
                     request: request,
                     features: features,
                     tokenizer: tokenizer,
-                    maxContext: runner.maxContext)
+                    maxContext: runner.maxContext,
+                    family: model.config.family)
                 promptIds = rendered.input.effectiveTokenIDs
                 multimodalInput = rendered.input
                 conversationTrim = rendered.trim

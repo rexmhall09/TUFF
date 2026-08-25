@@ -33,4 +33,10 @@ fi
 # builds and omit only their DEBUG declarations for package tests.
 preview_flags=(-Xswiftc -D -Xswiftc TURBOFIELDFARE_NO_PREVIEWS)
 
+# Tests that exercise the default app catalog are Gemma regression fixtures.
+# A developer's saved GUI selection must not silently turn those into Qwen
+# fixtures and change image budgets, model paths, or prompt behavior. Explicit
+# test invocations can still override this when they intentionally cover Qwen.
+export TURBO_FIELDFARE_MODEL="${TURBO_FIELDFARE_MODEL:-gemma4}"
+
 exec swift test --no-parallel "${testing_flags[@]}" "${preview_flags[@]}" "$@"

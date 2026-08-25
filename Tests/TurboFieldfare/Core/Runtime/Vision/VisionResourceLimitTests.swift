@@ -227,8 +227,57 @@ import Testing
 
     static var visionModelURL: URL? { visionModelURL() }
 
+    /// The real Qwen tower is deliberately opt-in: a normal package test must
+    /// never map or execute a locally installed 0.9 GB companion merely because
+    /// it happens to exist. Set the documented flag to validate that exact pack.
+    static var qwenOptInModelURL: URL? {
+        guard ProcessInfo.processInfo.environment[
+            "TURBO_FIELDFARE_VALIDATE_QWEN_VISION"] == "1" else { return nil }
+        let manager = FileManager.default
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while directory.path != "/" {
+            let candidate = directory.appendingPathComponent("scratch/qwen36.gturbo")
+            if let companion = try? VisionPackLocation.companionURL(
+                forTextModel: candidate),
+               manager.fileExists(atPath: candidate.path),
+               manager.fileExists(atPath: companion.path) {
+                return candidate
+            }
+            directory = directory.deletingLastPathComponent()
+        }
+        return nil
+    }
+
     static var supportsVisionRuntime: Bool {
         MTLCreateSystemDefaultDevice()?.supportsFamily(.apple8) == true
+    }
+
+    @Test(.enabled(if: Self.qwenOptInModelURL != nil && Self.supportsVisionRuntime,
+                   "set TURBO_FIELDFARE_VALIDATE_QWEN_VISION=1 with the local Qwen pack installed"))
+    func optInRealQwenStillImageTowerProducesFiniteLanguageFeatures() throws {
+        let textModel = try #require(Self.qwenOptInModelURL)
+        let context = try MetalContext()
+        let runtime = try VisionRuntime.open(
+            textModelURL: textModel, context: context, environment: [:])
+        let image = FileManager.default.temporaryDirectory
+            .appendingPathComponent("qwen-real-vision-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: image) }
+        try Self.writeSolidPNG(width: 256, height: 256, to: image)
+
+        let features = try runtime.encodeImage(at: image)
+
+        #expect(runtime.config.family == .qwen36)
+        #expect(features.family == .qwen36)
+        #expect(features.hiddenSize == 2_048)
+        #expect(features.tokenCount == 64)
+        let values = features.buffer.contents().bindMemory(
+            to: Float16.self, capacity: features.tokenCount * features.hiddenSize)
+        for index in stride(
+            from: 0,
+            to: features.tokenCount * features.hiddenSize,
+            by: 4_093) {
+            #expect(Float(values[index]).isFinite)
+        }
     }
 
     @Test func osSidecarsDoNotInvalidateAPack() {

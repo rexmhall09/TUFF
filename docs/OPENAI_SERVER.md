@@ -1,7 +1,7 @@
 # Local OpenAI-compatible server
 
-`TUFFServer` exposes a local Chat Completions API for one Gemma
-model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
+`TUFFServer` exposes a local Chat Completions API for one installed Gemma 4 or
+Qwen 3.6 model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
 through a proxy or tunnel.
 
 ## Start the server
@@ -235,6 +235,9 @@ generating, completed, or failed. It includes token counts and timing, but not
 prompt text, tool arguments, headers, or request bodies.
 
 ## Images
+
+Both Gemma 4 and Qwen 3.6 accept still images when their matching optional
+companion pack is loaded. Video is not supported.
 
 `messages[].content` accepts `image_url` parts in user messages. An
 `image_url` on any other role returns HTTP 400. The URL must be a data URL,

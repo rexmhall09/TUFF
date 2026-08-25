@@ -23,6 +23,9 @@ public struct VisionFeatures: @unchecked Sendable {
     public let buffer: MTLBuffer
     public let tokenCount: Int
     public let hiddenSize: Int
+    public let family: ModelFamily
+    public let patchGridWidth: Int
+    public let patchGridHeight: Int
     public let gpuNanoseconds: UInt64
     public let scratchBytes: Int
     public let attentionVariant: VisionAttention.Variant
@@ -30,6 +33,36 @@ public struct VisionFeatures: @unchecked Sendable {
     public let expertResidencyTransition: VisionExpertResidencyTransition?
     public let preprocessing: VisionPreprocessingReport?
     public var wall: VisionWallBreakdown = .unmeasured
+
+    public init(
+        buffer: MTLBuffer,
+        tokenCount: Int,
+        hiddenSize: Int,
+        family: ModelFamily = .gemma4,
+        patchGridWidth: Int = 0,
+        patchGridHeight: Int = 0,
+        gpuNanoseconds: UInt64,
+        scratchBytes: Int,
+        attentionVariant: VisionAttention.Variant,
+        projectorPath: MPPPrefillInt4QMM.Path,
+        expertResidencyTransition: VisionExpertResidencyTransition?,
+        preprocessing: VisionPreprocessingReport?,
+        wall: VisionWallBreakdown = .unmeasured
+    ) {
+        self.buffer = buffer
+        self.tokenCount = tokenCount
+        self.hiddenSize = hiddenSize
+        self.family = family
+        self.patchGridWidth = patchGridWidth
+        self.patchGridHeight = patchGridHeight
+        self.gpuNanoseconds = gpuNanoseconds
+        self.scratchBytes = scratchBytes
+        self.attentionVariant = attentionVariant
+        self.projectorPath = projectorPath
+        self.expertResidencyTransition = expertResidencyTransition
+        self.preprocessing = preprocessing
+        self.wall = wall
+    }
 }
 
 /// Splits tower wall time into the buckets that decide whether GPU-time work or
@@ -90,7 +123,7 @@ public struct VisionStageProfile: Sendable, Equatable {
 }
 
 public final class VisionRuntime {
-    public let config = VisionConfig()
+    public let config: VisionConfig
 
     private let context: MetalContext
     private let store: VisionWeightStore
@@ -124,7 +157,9 @@ public final class VisionRuntime {
     @discardableResult
     public func prewarmWeightRegions() throws -> Int {
         for layer in 0..<config.numLayers {
-            let prefix = "vision_tower.encoder.layers.\(layer)."
+            let prefix = config.family == .gemma4
+                ? "vision_tower.encoder.layers.\(layer)."
+                : "vision_tower.blocks.\(layer)."
             let names = store.tensorNames(withPrefix: prefix)
             guard !names.isEmpty else { continue }
             let key = names.first ?? ""
@@ -140,7 +175,10 @@ public final class VisionRuntime {
         // in this pack, and an `embed_vision.` group whose key differed from the
         // projector's: the patch embedder was never prewarmed and the projector
         // was mapped a second time and then held for the life of the runtime.
-        for names in [Self.patchEmbedderTensorNames, Self.projectorTensorNames] {
+        let fixedGroups = config.family == .gemma4
+            ? [Self.patchEmbedderTensorNames, Self.projectorTensorNames]
+            : [Self.qwenPatchTensorNames, Self.qwenMergerTensorNames]
+        for names in fixedGroups {
             let key = names.first ?? ""
             guard cachedRegions[key] == nil else { continue }
             cachedRegions[key] = try store.mapRegion(
@@ -166,9 +204,14 @@ public final class VisionRuntime {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> VisionRuntime {
         try requireSupportedDevice(context.device)
+        let textFamily = try ManifestReader.peekFamily(directoryURL: textModelURL)
+        guard let baseline = ArchConfig.knownArchitectures[textFamily] else {
+            throw VisionRuntimeError.invalidInput(
+                "unsupported text family \(textFamily.rawValue)")
+        }
         let manifest = try ManifestReader.load(
             directoryURL: textModelURL,
-            expecting: .gemma4_26B_A4B)
+            expecting: baseline)
         guard let source = manifest.sourceSnapshotHash else {
             throw VisionRuntimeError.invalidInput("text model has no source identity")
         }
@@ -201,18 +244,22 @@ public final class VisionRuntime {
         let useLease = try VisionPackUseLease.acquireShared(companionURL: companion)
         let store = try VisionWeightStore.open(
             directoryURL: companion,
+            expectedFamily: textFamily,
             compatibleTextSourceSnapshotHash: source,
             compatibleTextManifestSha256: textManifestSHA)
-        let runtimeEnvironment = resolvedKernelEnvironment(environment)
+        let runtimeEnvironment = resolvedKernelEnvironment(
+            environment, family: textFamily)
         return try VisionRuntime(
             context: context,
             store: store,
             useLease: useLease,
+            family: textFamily,
             environment: runtimeEnvironment)
     }
 
     static func resolvedKernelEnvironment(
-        _ environment: [String: String]
+        _ environment: [String: String],
+        family: ModelFamily = .gemma4
     ) -> [String: String] {
         var runtimeEnvironment = environment
         if environment["TURBO_FIELDFARE_VISION_BASELINE_KERNELS"] != "1" {
@@ -224,7 +271,10 @@ public final class VisionRuntime {
                 "TURBO_FIELDFARE_VISION_MLX_METALLIB",
             ].contains { environment[$0] != nil }
             if !explicitAttention {
-                runtimeEnvironment["TURBO_FIELDFARE_VISION_ATTENTION_MPP"] = "1"
+                runtimeEnvironment[
+                    family == .gemma4
+                        ? "TURBO_FIELDFARE_VISION_ATTENTION_MPP"
+                        : "TURBO_FIELDFARE_VISION_ATTENTION_Q16"] = "1"
             }
             let explicitLinear = [
                 "TURBO_FIELDFARE_VISION_REGISTER_GEMM",
@@ -261,10 +311,12 @@ public final class VisionRuntime {
 
     init(context: MetalContext, store: VisionWeightStore,
                  useLease: VisionPackUseLease,
+                 family: ModelFamily = .gemma4,
                  environment: [String: String]) throws {
         self.context = context
         self.store = store
         self.useLease = useLease
+        self.config = VisionConfig(family: family)
         let linear = try VisionLinearBF16(context: context, environment: environment)
         self.linear = linear
         self.primitives = try VisionPrimitives(context: context, environment: environment)
@@ -272,9 +324,10 @@ public final class VisionRuntime {
         // told here whether the linear path can write the padded head-major
         // store. Re-deriving the AND at encode time let the two sides disagree
         // and run a different kernel than the one diagnostics reported.
-        let shape = VisionConfig()
+        let shape = config
         self.attention = try VisionAttention(
             context: context, environment: environment,
+            scoreScale: shape.attentionScale,
             allowFusedPaddedLayout: linear.supportsPaddedHeadStore(
                 n: shape.hiddenSize, k: shape.hiddenSize))
         self.usesBF16Projector = context.device.supportsFamily(.apple10)
@@ -316,6 +369,19 @@ public final class VisionRuntime {
         "embed_vision.embedding_projection.weight",
         "embed_vision.embedding_projection.scales",
         "embed_vision.embedding_projection.biases",
+    ]
+    static let qwenPatchTensorNames = [
+        "vision_tower.patch_embed.proj.weight",
+        "vision_tower.patch_embed.proj.bias",
+        "vision_tower.pos_embed.weight",
+    ]
+    static let qwenMergerTensorNames = [
+        "vision_tower.merger.norm.weight",
+        "vision_tower.merger.norm.bias",
+        "vision_tower.merger.linear_fc1.weight",
+        "vision_tower.merger.linear_fc1.bias",
+        "vision_tower.merger.linear_fc2.weight",
+        "vision_tower.merger.linear_fc2.bias",
     ]
 
     public func preprocessImage(at fileURL: URL) throws -> VisionPixelBuffer {
@@ -393,7 +459,7 @@ public final class VisionRuntime {
               patchGridHeight.isMultiple(of: config.poolingKernel),
               rows <= config.maximumPatches else {
             throw VisionRuntimeError.invalidInput(
-                "patch grid must be positive, 3-aligned, and no larger than 2520")
+                "patch grid must be positive, merge-aligned, and within the family patch budget")
         }
         // Coordinates are validated here, once, rather than per element in the
         // kernel: `vision.metal` reinterprets them as unsigned and multiplies
@@ -410,7 +476,7 @@ public final class VisionRuntime {
         if positionCount >= rows {
             let coordinates = positionsInt32x2.contents()
                 .bindMemory(to: Int32.self, capacity: positionCount * 2)
-            let limit = Int32(config.positionEmbeddingSize)
+            let limit = Int32(config.positionGridSide)
             for index in 0..<(rows * 2) {
                 let value = coordinates[index]
                 guard value >= 0, value < limit else {
@@ -454,6 +520,17 @@ public final class VisionRuntime {
         if !retainsWeightRegions { releaseCachedWeightRegions() }
         try checkCancellation()
         let rows = patchGridWidth * patchGridHeight
+        if config.family == .qwen36 {
+            return try encodeQwenPreparedPatches(
+                patchesBF16: patchesBF16,
+                positionsInt32x2: positionsInt32x2,
+                patchGridWidth: patchGridWidth,
+                patchGridHeight: patchGridHeight,
+                expertResidencyTransition: expertResidencyTransition,
+                preprocessing: preprocessing,
+                retainsWeightRegions: retainsWeightRegions,
+                checkCancellation: checkCancellation)
+        }
 
         let wallStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         // The QKV projections write the padded head-major layout directly when the
@@ -819,6 +896,9 @@ public final class VisionRuntime {
         return VisionFeatures(buffer: features,
                               tokenCount: outputRows,
                               hiddenSize: config.textHiddenSize,
+                              family: config.family,
+                              patchGridWidth: patchGridWidth,
+                              patchGridHeight: patchGridHeight,
                               gpuNanoseconds: gpuNanoseconds,
                               scratchBytes: scratch.allocatedBytes
                                   + attention.additionalScratchBytes,
@@ -832,6 +912,264 @@ public final class VisionRuntime {
                                   gpuWaitNanoseconds: gpuWaitNanoseconds,
                                   totalNanoseconds: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                                       - wallStarted))
+    }
+
+    /// Qwen3.6's tower shares the Gemma allocation, GEMM, attention and pack
+    /// machinery, but owns its tensor names and block/merger graph. Keeping the
+    /// family branch here prevents Qwen biases, LayerNorms and 2x2 merger from
+    /// leaking into the Gemma path.
+    private func encodeQwenPreparedPatches(
+        patchesBF16: MTLBuffer,
+        positionsInt32x2: MTLBuffer,
+        patchGridWidth: Int,
+        patchGridHeight: Int,
+        expertResidencyTransition: VisionExpertResidencyTransition?,
+        preprocessing: VisionPreprocessingReport?,
+        retainsWeightRegions: Bool,
+        checkCancellation: () throws -> Void
+    ) throws -> VisionFeatures {
+        let wallStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let rows = patchGridWidth * patchGridHeight
+        let scratch = try VisionScratch(
+            device: context.device, rows: rows, config: config,
+            needsSeparateKV: true, needsSeparateUp: false)
+        let allocationNanoseconds = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - wallStarted
+        var mapNanoseconds: UInt64 = 0
+        var waitNanoseconds: UInt64 = 0
+        var gpuNanoseconds: UInt64 = 0
+
+        func map(_ names: [String]) throws -> VisionMappedWeightRegion {
+            let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            defer { mapNanoseconds += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started }
+            let key = names.first ?? ""
+            if retainsWeightRegions, let cached = cachedRegions[key] { return cached }
+            let region = try store.mapRegion(tensorNames: names, device: context.device)
+            if retainsWeightRegions { cachedRegions[key] = region }
+            return region
+        }
+        func finish(_ commandBuffer: MTLCommandBuffer) throws {
+            let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            waitNanoseconds += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started
+            if let error = commandBuffer.error {
+                throw VisionRuntimeError.commandFailed(String(describing: error))
+            }
+            gpuNanoseconds += UInt64(
+                max(0, commandBuffer.gpuEndTime - commandBuffer.gpuStartTime)
+                    * 1_000_000_000)
+        }
+
+        let patch = try map(Self.qwenPatchTensorNames)
+        do {
+            let commandBuffer = try makeCommandBuffer()
+            try scratch.encodeClear(commandBuffer: commandBuffer)
+            primitives.encodeQwenCopyPadded(
+                commandBuffer: commandBuffer,
+                input: patchesBF16, output: scratch.normalizedPatches,
+                rows: rows, paddedRows: scratch.paddedRows,
+                width: config.patchDimension)
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.normalizedPatches,
+                weights: patch.buffer,
+                weightsOffset: try patch.offset(of: "vision_tower.patch_embed.proj.weight"),
+                output: scratch.hiddenA,
+                m: scratch.paddedRows, n: config.hiddenSize, k: config.patchDimension)
+            primitives.encodeQwenAddBias(
+                commandBuffer: commandBuffer,
+                values: scratch.hiddenA, weights: patch.buffer,
+                biasOffset: try patch.offset(of: "vision_tower.patch_embed.proj.bias"),
+                count: rows * config.hiddenSize, width: config.hiddenSize)
+            primitives.encodeQwenAddPosition(
+                commandBuffer: commandBuffer,
+                hidden: scratch.hiddenA,
+                table: patch.buffer,
+                tableOffset: try patch.offset(of: "vision_tower.pos_embed.weight"),
+                positions: positionsInt32x2, rows: rows,
+                gridHeight: patchGridHeight, gridWidth: patchGridWidth)
+            try finish(commandBuffer)
+        }
+
+        let componentWeightBytes = config.hiddenSize * config.hiddenSize
+            * MemoryLayout<UInt16>.stride
+        let componentBiasBytes = config.hiddenSize * MemoryLayout<UInt16>.stride
+        for layer in 0..<config.numLayers {
+            try checkCancellation()
+            let prefix = "vision_tower.blocks.\(layer)."
+            let names = store.tensorNames(withPrefix: prefix)
+            guard names.count == 12 else {
+                throw VisionRuntimeError.invalidInput(
+                    "Qwen vision block \(layer) expected 12 tensors, found \(names.count)")
+            }
+            let weights = try map(names)
+            func offset(_ suffix: String) throws -> Int {
+                try weights.offset(of: prefix + suffix)
+            }
+            let commandBuffer = try makeCommandBuffer()
+            primitives.encodeQwenLayerNorm(
+                commandBuffer: commandBuffer,
+                input: scratch.hiddenA, output: scratch.hiddenB,
+                weights: weights.buffer,
+                weightOffset: try offset("norm1.weight"),
+                biasOffset: try offset("norm1.bias"), rows: rows)
+            let qkvWeight = try offset("attn.qkv.weight")
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.hiddenB, weights: weights.buffer,
+                weightsOffset: qkvWeight,
+                output: scratch.q,
+                m: scratch.paddedRows, n: config.hiddenSize, k: config.hiddenSize)
+            guard let k = scratch.k, let v = scratch.v else {
+                throw VisionRuntimeError.invalidInput("Qwen QKV scratch is unavailable")
+            }
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.hiddenB, weights: weights.buffer,
+                weightsOffset: qkvWeight + componentWeightBytes,
+                output: k,
+                m: scratch.paddedRows, n: config.hiddenSize, k: config.hiddenSize)
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.hiddenB, weights: weights.buffer,
+                weightsOffset: qkvWeight + componentWeightBytes * 2,
+                output: v,
+                m: scratch.paddedRows, n: config.hiddenSize, k: config.hiddenSize)
+            let qkvBias = try offset("attn.qkv.bias")
+            primitives.encodeQwenQKV(
+                commandBuffer: commandBuffer,
+                q: scratch.q, k: k, v: v,
+                weights: weights.buffer,
+                qBiasOffset: qkvBias,
+                kBiasOffset: qkvBias + componentBiasBytes,
+                vBiasOffset: qkvBias + componentBiasBytes * 2,
+                positions: positionsInt32x2, rows: rows, heads: config.numHeads)
+            attention.encode(
+                commandBuffer: commandBuffer,
+                q: scratch.q, k: k, v: v,
+                output: scratch.attention,
+                sequenceLength: rows, numHeads: config.numHeads)
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.attention, weights: weights.buffer,
+                weightsOffset: try offset("attn.proj.weight"),
+                output: scratch.q,
+                m: scratch.paddedRows, n: config.hiddenSize, k: config.hiddenSize)
+            primitives.encodeQwenResidualBias(
+                commandBuffer: commandBuffer,
+                residual: scratch.hiddenA, branch: scratch.q,
+                weights: weights.buffer,
+                biasOffset: try offset("attn.proj.bias"),
+                output: scratch.hiddenB, rows: rows, width: config.hiddenSize)
+            primitives.encodeQwenLayerNorm(
+                commandBuffer: commandBuffer,
+                input: scratch.hiddenB, output: scratch.hiddenA,
+                weights: weights.buffer,
+                weightOffset: try offset("norm2.weight"),
+                biasOffset: try offset("norm2.bias"), rows: rows)
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.hiddenA, weights: weights.buffer,
+                weightsOffset: try offset("mlp.linear_fc1.weight"),
+                output: scratch.gate,
+                m: scratch.paddedRows, n: config.intermediateSize, k: config.hiddenSize)
+            primitives.encodeQwenGELUTanhBias(
+                commandBuffer: commandBuffer,
+                values: scratch.gate, weights: weights.buffer,
+                biasOffset: try offset("mlp.linear_fc1.bias"),
+                count: rows * config.intermediateSize,
+                width: config.intermediateSize)
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.gate, weights: weights.buffer,
+                weightsOffset: try offset("mlp.linear_fc2.weight"),
+                output: scratch.q,
+                m: scratch.paddedRows, n: config.hiddenSize, k: config.intermediateSize)
+            primitives.encodeQwenResidualBias(
+                commandBuffer: commandBuffer,
+                residual: scratch.hiddenB, branch: scratch.q,
+                weights: weights.buffer,
+                biasOffset: try offset("mlp.linear_fc2.bias"),
+                output: scratch.hiddenA, rows: rows, width: config.hiddenSize)
+            try finish(commandBuffer)
+        }
+
+        try checkCancellation()
+        let outputRows = rows / (config.poolingKernel * config.poolingKernel)
+        let merger = try map(Self.qwenMergerTensorNames)
+        guard let featuresBF16 = context.device.makeBuffer(
+                  length: outputRows * config.textHiddenSize
+                      * MemoryLayout<UInt16>.stride,
+                  options: .storageModePrivate),
+              let features = context.device.makeBuffer(
+                  length: outputRows * config.textHiddenSize
+                      * MemoryLayout<Float16>.stride,
+                  options: .storageModeShared) else {
+            throw MetalError.noDevice
+        }
+        do {
+            let commandBuffer = try makeCommandBuffer()
+            primitives.encodeQwenLayerNorm(
+                commandBuffer: commandBuffer,
+                input: scratch.hiddenA, output: scratch.hiddenB,
+                weights: merger.buffer,
+                weightOffset: try merger.offset(of: "vision_tower.merger.norm.weight"),
+                biasOffset: try merger.offset(of: "vision_tower.merger.norm.bias"),
+                rows: rows)
+            let mergedWidth = config.hiddenSize * config.poolingKernel
+                * config.poolingKernel
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.hiddenB, weights: merger.buffer,
+                weightsOffset: try merger.offset(
+                    of: "vision_tower.merger.linear_fc1.weight"),
+                output: scratch.gate,
+                m: outputRows, n: mergedWidth, k: mergedWidth)
+            primitives.encodeQwenGELUErfBias(
+                commandBuffer: commandBuffer,
+                values: scratch.gate, weights: merger.buffer,
+                biasOffset: try merger.offset(
+                    of: "vision_tower.merger.linear_fc1.bias"),
+                count: outputRows * mergedWidth, width: mergedWidth)
+            linear.encode(
+                commandBuffer: commandBuffer,
+                input: scratch.gate, weights: merger.buffer,
+                weightsOffset: try merger.offset(
+                    of: "vision_tower.merger.linear_fc2.weight"),
+                output: featuresBF16,
+                m: outputRows, n: config.textHiddenSize, k: mergedWidth)
+            primitives.encodeQwenAddBias(
+                commandBuffer: commandBuffer,
+                values: featuresBF16, weights: merger.buffer,
+                biasOffset: try merger.offset(
+                    of: "vision_tower.merger.linear_fc2.bias"),
+                count: outputRows * config.textHiddenSize,
+                width: config.textHiddenSize)
+            primitives.encodeBFloatToHalf(
+                commandBuffer: commandBuffer,
+                input: featuresBF16, output: features,
+                count: outputRows * config.textHiddenSize)
+            try finish(commandBuffer)
+        }
+
+        return VisionFeatures(
+            buffer: features,
+            tokenCount: outputRows,
+            hiddenSize: config.textHiddenSize,
+            family: .qwen36,
+            patchGridWidth: patchGridWidth,
+            patchGridHeight: patchGridHeight,
+            gpuNanoseconds: gpuNanoseconds,
+            scratchBytes: scratch.allocatedBytes + featuresBF16.length,
+            attentionVariant: attention.variant,
+            projectorPath: .fallback,
+            expertResidencyTransition: expertResidencyTransition,
+            preprocessing: preprocessing,
+            wall: VisionWallBreakdown(
+                scratchAllocationNanoseconds: allocationNanoseconds,
+                weightMapNanoseconds: mapNanoseconds,
+                gpuWaitNanoseconds: waitNanoseconds,
+                totalNanoseconds: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - wallStarted))
     }
 
     private func makeCommandBuffer() throws -> MTLCommandBuffer {

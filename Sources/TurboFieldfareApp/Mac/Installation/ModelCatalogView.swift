@@ -48,6 +48,9 @@ struct ModelCatalogRow: View {
             }
             message
             actions
+            if install.isInstalled {
+                visionSupport
+            }
         }
         .padding(compact ? 12 : 16)
         .background {
@@ -232,6 +235,116 @@ struct ModelCatalogRow: View {
             }
         }
         .controlSize(compact ? .small : .regular)
+    }
+
+    private var visionSupport: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(visionDescriptor.displayName, systemImage: "photo")
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 8)
+                Text(visionStatusText)
+                    .font(.caption2)
+                    .foregroundStyle(visionStatusColor)
+            }
+
+            if model.isVisionInstallTarget(install),
+               let fraction = model.visionInstallProgressFraction {
+                ProgressView(value: fraction)
+                    .accessibilityLabel("\(visionDescriptor.displayName) download")
+                    .accessibilityValue(Text(MetricFormat.percent(fraction * 100)))
+            }
+
+            HStack(spacing: 8) {
+                visionAction
+                Spacer(minLength: 8)
+                if !visionIsInstalled && !visionIsPrepared {
+                    Text(MetricFormat.storage(visionDescriptor.approximateDownloadBytes))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .controlSize(compact ? .small : .regular)
+        }
+    }
+
+    @ViewBuilder
+    private var visionAction: some View {
+        if visionIsInstalled {
+            Label("Image support installed", systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+        } else if model.isVisionInstallTarget(install), model.isInstallingVisionPack {
+            Button("Cancel \(visionDescriptor.displayName)") {
+                model.cancelVisionInstall()
+            }
+            .disabled(!model.canCancelVisionInstall)
+        } else if visionIsPrepared {
+            if isSelected {
+                if model.loadState.isReady {
+                    Button("Unload to Activate \(visionDescriptor.displayName)") {
+                        model.unloadModel()
+                    }
+                    .disabled(!model.canUnloadModel)
+                } else {
+                    Button("Activate \(visionDescriptor.displayName)") {
+                        model.activateVisionPack()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canActivateVisionPack)
+                }
+            } else {
+                Button("Use This Model to Activate") {
+                    model.selectModel(install)
+                }
+                .disabled(!model.canSelectModel(install))
+            }
+        } else {
+            Button(model.visionDownloadButtonLabel(for: install)) {
+                model.installVisionPack(for: install)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!model.canInstallVisionPack(for: install))
+            .help("Optional download for this model only. The text model stays installed.")
+        }
+    }
+
+    private var visionDescriptor: AppModelInstallDescriptor {
+        model.visionInstallDescriptor(for: install)
+    }
+
+    private var visionIsInstalled: Bool {
+        model.isVisionPackInstalled(for: install)
+    }
+
+    private var visionIsPrepared: Bool {
+        guard model.isVisionInstallTarget(install) else { return false }
+        if case .readyToActivate = model.visionInstallState { return true }
+        return false
+    }
+
+    private var visionStatusText: String {
+        guard model.isVisionRuntimeSupported else { return "Requires M2 or newer" }
+        if model.isVisionInstallTarget(install) {
+            if model.visionInstallState != .idle {
+                return model.visionInstallPhaseLabel
+            }
+        }
+        switch model.visionInstallationStatus(for: install) {
+        case .complete: return "Installed"
+        case .partial: return "Needs repair"
+        case .missing: return "Optional"
+        case .unsupportedLayout: return "Unavailable"
+        }
+    }
+
+    private var visionStatusColor: Color {
+        if visionIsInstalled { return .green }
+        if case .partial = model.visionInstallationStatus(for: install) {
+            return .orange
+        }
+        return .secondary
     }
 
     private var stageLabel: String {

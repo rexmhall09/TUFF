@@ -29,13 +29,15 @@ Set HF_TOKEN only if Hugging Face requests authentication. A cancelled or
 interrupted download can be continued with --resume or removed with
 --discard-partial.
 
-The optional Gemma 4 image companion pack installs beside an existing Gemma 4
-text model and is bound to it. Without the pack the text runtime is unchanged;
-image input is simply unavailable.
+The optional Gemma 4 or Qwen3.6 image companion pack installs beside its
+matching text model and is bound to it. The family is inferred from the text
+manifest (or selected explicitly with --model). Without the pack the text
+runtime is unchanged; image input is unavailable.
 """
 
 private struct Arguments {
     var model = SupportedModelSource.default
+    var modelWasExplicit = false
     var output: String?
     var overwrite = false
     var resume = false
@@ -103,6 +105,7 @@ private struct Arguments {
                         + SupportedModelSource.all.map(\.name).joined(separator: ", "))
                 }
                 parsed.model = source
+                parsed.modelWasExplicit = true
                 index += 2
             case "--output", "--input-gturbo", "--repo-id", "--revision":
                 guard index + 1 < values.count else {
@@ -268,13 +271,39 @@ private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
         }
     }
 
+    // Resume and activation are local-state operations first. Preserve their
+    // fail-fast contract before reading the text manifest, so a missing saved
+    // transaction is never misreported as an unidentifiable model family.
+    if arguments.resume || arguments.activateVisionInstall {
+        do {
+            let paths = try RemoteInstallPaths(outputDirectory: visionOutput)
+            guard FileManager.default.fileExists(atPath: paths.checkpointFile) else {
+                throw RepackError.installStateMissing(path: paths.checkpointFile)
+            }
+        } catch {
+            let operation = arguments.activateVisionInstall
+                ? "activate-vision-install"
+                : "vision install"
+            printError("\(operation) failed: \(error)")
+            return 1
+        }
+    }
+
+    let source: SupportedModelSource
+    do {
+        source = try visionSource(arguments: arguments, textModel: textModel)
+    } catch {
+        printError("could not identify text-model family: \(error)")
+        return 2
+    }
+
     if arguments.activateVisionInstall {
         do {
             try RemoteVisionPackInstaller.activatePrepared(
                 outputDirectory: visionOutput,
                 textModelDirectory: textModel,
-                repoID: SupportedModelSource.default.repoID,
-                requestedRevision: SupportedModelSource.default.revision)
+                repoID: source.repoID,
+                requestedRevision: source.revision)
             print("Activated image pack \(visionOutput)")
             return 0
         } catch {
@@ -284,8 +313,8 @@ private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
     }
 
     let options = RemoteVisionPackInstallOptions(
-        repoID: SupportedModelSource.default.repoID,
-        revision: SupportedModelSource.default.revision,
+        repoID: source.repoID,
+        revision: source.revision,
         textModelDirectory: textModel,
         outputDirectory: visionOutput,
         token: ProcessInfo.processInfo.environment["HF_TOKEN"],
@@ -302,6 +331,21 @@ private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
         printError("vision install failed: \(error)")
         return 1
     }
+}
+
+private func visionSource(
+    arguments: Arguments,
+    textModel: String
+) throws -> SupportedModelSource {
+    if arguments.modelWasExplicit { return arguments.model }
+    let manifest = URL(fileURLWithPath: textModel, isDirectory: true)
+        .appendingPathComponent("manifest.json")
+    let data = try Data(contentsOf: manifest)
+    guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let arch = root["arch"] as? [String: Any] else {
+        throw ParseError.invalidMode("text manifest has no architecture")
+    }
+    return (arch["family"] as? String) == "qwen36" ? .qwen36 : .gemma4
 }
 
 private func run(_ values: [String]) async -> Int32 {

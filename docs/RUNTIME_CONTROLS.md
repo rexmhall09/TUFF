@@ -51,8 +51,15 @@ diagnostic and does not change behavior.
 
 ## Image controls
 
-Image input needs the companion pack installed beside the text model. Without
-it, these controls have nothing to select.
+Image input needs the matching Gemma 4 or Qwen 3.6 companion pack installed
+beside the text model. Without it, these controls have nothing to select.
+Still images are supported; video is not.
+
+The companion is an optional download independent of the text install. In the
+Mac app, use the photo control beside the prompt or **Image Support** in
+Settings. TUFF can prepare the download while the text model stays loaded;
+only activation requires unloading it. Installing or removing image support
+never reinstalls the text model.
 
 | Control | Values | Default | Effect |
 | --- | --- | --- | --- |

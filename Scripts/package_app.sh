@@ -60,11 +60,11 @@ install -m 0755 "$signed_binaries/TUFF" "$app/Contents/MacOS/TUFF"
 install -m 0755 "$signed_binaries/TUFFDecodeService" \
   "$app/Contents/MacOS/TUFFDecodeService"
 
-# SwiftPM's generated Bundle.module accessors look beside Bundle.main.bundleURL.
-# For a packaged app that is the .app root, so keep these bundles there rather
-# than moving them under Contents/Resources.
+# Keep resource bundles in the standard sealed app resource directory. TUFF's
+# resource lookups prefer this location in a packaged app and fall back to
+# SwiftPM's generated Bundle.module path for command-line and test builds.
 for name in "${required_bundles[@]}"; do
-  ditto "$binary_directory/$name" "$app/$name"
+  ditto "$binary_directory/$name" "$app/Contents/Resources/$name"
 done
 
 install -m 0644 LICENSE "$app/Contents/Resources/LICENSE"
@@ -120,6 +120,12 @@ if [[ "$main_architectures" != "arm64" || "$service_architectures" != "arm64" ]]
   exit 1
 fi
 
+# Sign after the complete bundle has been assembled so Info.plist and resources
+# are sealed as part of the app rather than leaving a standalone executable
+# signature inside an otherwise unsigned bundle.
+codesign --force --deep --sign - --timestamp=none "$app"
+codesign --verify --deep --strict --verbose=2 "$app"
+
 ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
 (
   cd "$output_directory"
@@ -129,13 +135,7 @@ ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
 extracted="$temporary_directory/extracted"
 mkdir -p "$extracted"
 ditto -x -k "$archive" "$extracted"
-install -m 0755 "$extracted/TUFF.app/Contents/MacOS/TUFF" \
-  "$temporary_directory/extracted-TUFF"
-install -m 0755 "$extracted/TUFF.app/Contents/MacOS/TUFFDecodeService" \
-  "$temporary_directory/extracted-TUFFDecodeService"
-codesign --verify --strict --verbose=2 "$temporary_directory/extracted-TUFF"
-codesign --verify --strict --verbose=2 \
-  "$temporary_directory/extracted-TUFFDecodeService"
+codesign --verify --deep --strict --verbose=2 "$extracted/TUFF.app"
 
 echo "created $archive"
 echo "created $checksum"

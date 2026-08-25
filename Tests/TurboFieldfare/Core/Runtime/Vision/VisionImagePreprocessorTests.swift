@@ -100,6 +100,66 @@ import UniformTypeIdentifiers
         }
     }
 
+    @Test func qwenSmartResizeMatchesTransformersRules() throws {
+        let config = VisionConfig(family: .qwen36)
+        let standard = try Gemma4ImageGeometry(
+            sourceWidth: 640, sourceHeight: 480, config: config)
+        #expect(standard.processedWidth == 640)
+        #expect(standard.processedHeight == 480)
+        #expect(standard.patchGridWidth == 40)
+        #expect(standard.patchGridHeight == 30)
+        #expect(standard.softTokenCount == 300)
+
+        let minimum = try Gemma4ImageGeometry(
+            sourceWidth: 100, sourceHeight: 100, config: config)
+        #expect(minimum.processedWidth == 256)
+        #expect(minimum.processedHeight == 256)
+        // 256x256 produces a 16x16 patch grid, then the official 2x2
+        // spatial merger reduces it to 8x8 language tokens.
+        #expect(minimum.softTokenCount == 64)
+
+        let nearestEven = try Gemma4ImageGeometry(
+            sourceWidth: 80, sourceHeight: 1_600, config: config)
+        #expect(nearestEven.processedWidth == 64)
+        #expect(nearestEven.processedHeight == 1_600)
+
+        #expect(throws: VisionImageError.self) {
+            try Gemma4ImageGeometry(
+                sourceWidth: 6_432, sourceHeight: 32, config: config)
+        }
+    }
+
+    @Test func qwenPatchifiesTemporalChannelsAndMergeBlocks() throws {
+        let image = try #require(Self.corpusRoot)
+            .appendingPathComponent("natural-square.png")
+        let config = VisionConfig(family: .qwen36)
+        let preprocessor = Gemma4ImagePreprocessor(
+            device: try #require(MTLCreateSystemDefaultDevice()), config: config)
+        let result = try preprocessor.preprocess(fileURL: image)
+        #expect(result.geometry.patchGridWidth.isMultiple(of: 2))
+        #expect(result.geometry.patchGridHeight.isMultiple(of: 2))
+        #expect(result.patchesBF16.length
+                == result.geometry.patchCount * 1_536 * 2)
+
+        let positions = result.positionsInt32x2.contents().bindMemory(
+            to: Int32.self, capacity: result.geometry.patchCount * 2)
+        let first = (0..<5).map { (positions[$0 * 2], positions[$0 * 2 + 1]) }
+        #expect(first.map(\.0) == [0, 0, 1, 1, 0])
+        #expect(first.map(\.1) == [0, 1, 0, 1, 2])
+
+        let patches = result.patchesBF16.contents().bindMemory(
+            to: UInt16.self, capacity: result.geometry.patchCount * config.patchDimension)
+        // The still frame is repeated across the physical MLX T,H,W,C patch
+        // layout, so the second temporal plane begins after 16*16*3 values.
+        for index in stride(from: 0, to: 768, by: 17) {
+            #expect(patches[index] == patches[768 + index])
+        }
+        for index in stride(from: 0, to: config.patchDimension, by: 97) {
+            let value = Quantization.bf16ToFloat(patches[index])
+            #expect(value.isFinite && value >= -1 && value <= 1)
+        }
+    }
+
     @Test func rejectsMalformedEncodedInput() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("vision-malformed-\(UUID().uuidString).jpg")

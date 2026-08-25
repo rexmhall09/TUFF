@@ -5,11 +5,52 @@ final class PrefillRoPE {
     private let psoDefaultNeox: MTLComputePipelineState
     private let psoProportionalNeox: MTLComputePipelineState
     private let psoNeoxSubdim: MTLComputePipelineState
+    private let psoMRoPENeoxSubdim: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoDefaultNeox = try context.pipeline("prefill_rope_default_neox_block")
         self.psoProportionalNeox = try context.pipeline("prefill_rope_proportional_neox_block")
         self.psoNeoxSubdim = try context.pipeline("prefill_rope_neox_subdim_block")
+        self.psoMRoPENeoxSubdim = try context.pipeline(
+            "prefill_rope_mrope_neox_subdim_block")
+    }
+
+    func encodeMRoPENeoxSubdim(
+        commandBuffer: MTLCommandBuffer,
+        data: MTLBuffer,
+        dataOffset: Int = 0,
+        queryCount: UInt32,
+        headDim: UInt32,
+        numHeads: UInt32,
+        rotaryDim: UInt32,
+        tokenStrideElements: UInt32,
+        theta: Float,
+        temporalPositions: MTLBuffer,
+        heightPositions: MTLBuffer,
+        widthPositions: MTLBuffer
+    ) {
+        precondition(queryCount > 0)
+        precondition(rotaryDim > 0 && rotaryDim % 2 == 0 && rotaryDim <= headDim)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoMRoPENeoxSubdim)
+        enc.setBuffer(data, offset: dataOffset, index: 0)
+        var hd = headDim, heads = numHeads, stride = tokenStrideElements
+        var thetaVar = theta, rotary = rotaryDim
+        enc.setBytes(&hd, length: 4, index: 1)
+        enc.setBytes(&heads, length: 4, index: 2)
+        enc.setBytes(&stride, length: 4, index: 3)
+        enc.setBytes(&thetaVar, length: 4, index: 4)
+        enc.setBytes(&rotary, length: 4, index: 5)
+        enc.setBuffer(temporalPositions, offset: 0, index: 6)
+        enc.setBuffer(heightPositions, offset: 0, index: 7)
+        enc.setBuffer(widthPositions, offset: 0, index: 8)
+        let pairs = Int(rotaryDim) / 2
+        enc.dispatchThreads(
+            MTLSize(width: pairs, height: Int(numHeads), depth: Int(queryCount)),
+            threadsPerThreadgroup: MTLSize(
+                width: min(pairs, psoMRoPENeoxSubdim.maxTotalThreadsPerThreadgroup),
+                height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     /// Qwen-style partial RoPE over a chunk: rotation confined to the first

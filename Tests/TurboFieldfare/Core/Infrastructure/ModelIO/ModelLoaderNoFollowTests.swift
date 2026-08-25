@@ -50,6 +50,23 @@ extension ModelLoaderTests {
         }
     }
 
+    @Test func trustedReceiptAtTargetAllowsARootAlias() throws {
+        let target = try Self.writeToySynthetic()
+        let alias = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gturbo-target-receipt-root-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: alias)
+            try? FileManager.default.removeItem(at: target)
+        }
+        try Self.writeVerifiedInstallReceipt(directoryURL: target)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: target)
+        let device = try #require(MTLCreateSystemDefaultDevice())
+
+        _ = try Model.load(
+            directoryURL: alias, device: device, expecting: .gemma4Toy(),
+            integrityPolicy: .sizeCheckTrustedReceipt)
+    }
+
     @Test func rejectsManifestLeafSymlink() throws {
         let dir = try Self.writeToySynthetic()
         let outside = FileManager.default.temporaryDirectory

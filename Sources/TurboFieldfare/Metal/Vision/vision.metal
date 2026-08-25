@@ -50,6 +50,7 @@ inline void vision_attention_online_impl(
     device bfloat* output,
     constant uint& sequenceLength,
     constant uint& numHeads,
+    constant float& scoreScale,
     uint2 group,
     uint tid,
     threadgroup bfloat* qTile,
@@ -113,7 +114,7 @@ inline void vision_attention_online_impl(
                     score = fma(qValue, kValue, score);
                 }
             }
-            probabilities[pair] = score;
+            probabilities[pair] = score * scoreScale;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -178,6 +179,7 @@ kernel void vision_attention_online_72(
     device bfloat* output [[buffer(3)]],
     constant uint& sequenceLength [[buffer(4)]],
     constant uint& numHeads [[buffer(5)]],
+    constant float& scoreScale [[buffer(6)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint3 threadPosition [[thread_position_in_threadgroup]]) {
     threadgroup bfloat qTile[kVisionMaxQueryTile * kVisionHeadDim];
@@ -189,7 +191,8 @@ kernel void vision_attention_online_72(
     threadgroup float rowSum[kVisionMaxQueryTile];
     threadgroup float rowMax[kVisionMaxQueryTile];
     vision_attention_online_impl<kVisionHeadDim, 8>(
-        q, k, v, output, sequenceLength, numHeads, group.xy, threadPosition.x,
+        q, k, v, output, sequenceLength, numHeads, scoreScale,
+        group.xy, threadPosition.x,
         qTile, kTile, vTile, probabilities, accumulator,
         oldScale, rowSum, rowMax);
 }
@@ -201,6 +204,7 @@ kernel void vision_attention_online_80(
     device bfloat* output [[buffer(3)]],
     constant uint& sequenceLength [[buffer(4)]],
     constant uint& numHeads [[buffer(5)]],
+    constant float& scoreScale [[buffer(6)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint3 threadPosition [[thread_position_in_threadgroup]]) {
     threadgroup bfloat qTile[kVisionMaxQueryTile * kVisionHeadDim];
@@ -212,7 +216,8 @@ kernel void vision_attention_online_80(
     threadgroup float rowSum[kVisionMaxQueryTile];
     threadgroup float rowMax[kVisionMaxQueryTile];
     vision_attention_online_impl<kVisionPaddedHeadDim, 8>(
-        q, k, v, output, sequenceLength, numHeads, group.xy, threadPosition.x,
+        q, k, v, output, sequenceLength, numHeads, scoreScale,
+        group.xy, threadPosition.x,
         qTile, kTile, vTile, probabilities, accumulator,
         oldScale, rowSum, rowMax);
 }
@@ -224,6 +229,7 @@ kernel void vision_attention_online_72_q16(
     device bfloat* output [[buffer(3)]],
     constant uint& sequenceLength [[buffer(4)]],
     constant uint& numHeads [[buffer(5)]],
+    constant float& scoreScale [[buffer(6)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint3 threadPosition [[thread_position_in_threadgroup]]) {
     threadgroup bfloat qTile[kVisionMaxQueryTile * kVisionHeadDim];
@@ -235,7 +241,8 @@ kernel void vision_attention_online_72_q16(
     threadgroup float rowSum[kVisionMaxQueryTile];
     threadgroup float rowMax[kVisionMaxQueryTile];
     vision_attention_online_impl<kVisionHeadDim, 16>(
-        q, k, v, output, sequenceLength, numHeads, group.xy, threadPosition.x,
+        q, k, v, output, sequenceLength, numHeads, scoreScale,
+        group.xy, threadPosition.x,
         qTile, kTile, vTile, probabilities, accumulator,
         oldScale, rowSum, rowMax);
 }
@@ -553,4 +560,222 @@ kernel void vision_bfloat_to_half(
     constant uint& count [[buffer(2)]],
     uint index [[thread_position_in_grid]]) {
     if (index < count) output[index] = half(input[index]);
+}
+
+// MARK: - Qwen3.6 vision
+
+kernel void vision_qwen_copy_padded(
+    device const bfloat* input [[buffer(0)]],
+    device bfloat* output [[buffer(1)]],
+    constant uint& realRows [[buffer(2)]],
+    constant uint& paddedRows [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= paddedRows * width) return;
+    output[index] = index < realRows * width ? input[index] : bfloat(0.0f);
+}
+
+kernel void vision_qwen_add_interpolated_position(
+    device bfloat* hidden [[buffer(0)]],
+    device const bfloat* table [[buffer(1)]],
+    device const int2* positions [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& gridHeight [[buffer(4)]],
+    constant uint& gridWidth [[buffer(5)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= rows * 1152u) return;
+    const uint row = index / 1152u;
+    const uint dimension = index % 1152u;
+    const int2 position = positions[row]; // (height, width)
+    const float sourceY = gridHeight > 1u
+        ? float(position.x) * 47.0f / float(gridHeight - 1u) : 0.0f;
+    const float sourceX = gridWidth > 1u
+        ? float(position.y) * 47.0f / float(gridWidth - 1u) : 0.0f;
+    const uint y0 = uint(floor(sourceY));
+    const uint x0 = uint(floor(sourceX));
+    const uint y1 = min(y0 + 1u, 47u);
+    const uint x1 = min(x0 + 1u, 47u);
+    const float fy = sourceY - float(y0);
+    const float fx = sourceX - float(x0);
+    const float p00 = float(table[(y0 * 48u + x0) * 1152u + dimension]);
+    const float p01 = float(table[(y0 * 48u + x1) * 1152u + dimension]);
+    const float p10 = float(table[(y1 * 48u + x0) * 1152u + dimension]);
+    const float p11 = float(table[(y1 * 48u + x1) * 1152u + dimension]);
+    const float top = mix(p00, p01, fx);
+    const float bottom = mix(p10, p11, fx);
+    hidden[index] = bfloat(float(hidden[index]) + mix(top, bottom, fy));
+}
+
+kernel void vision_qwen_layernorm_rows(
+    device const bfloat* input [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device const bfloat* bias [[buffer(2)]],
+    device bfloat* output [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]]) {
+    if (row >= rows) return;
+    threadgroup float partials[32];
+    threadgroup float sharedMean[1];
+    threadgroup float sharedInverse[1];
+    float values[4];
+    float sum = 0.0f;
+    const uint base = tid * 4u;
+    for (uint i = 0; i < 4u; ++i) {
+        const uint d = base + i;
+        values[i] = d < width ? float(input[row * width + d]) : 0.0f;
+        sum += values[i];
+    }
+    sum = simd_sum(sum);
+    if (simdgroup == 0u) partials[lane] = 0.0f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) partials[simdgroup] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdgroup == 0u) {
+        const float total = simd_sum(partials[lane]);
+        if (lane == 0u) sharedMean[0] = total / float(width);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float squares = 0.0f;
+    for (uint i = 0; i < 4u; ++i) {
+        const uint d = base + i;
+        if (d < width) {
+            const float centered = values[i] - sharedMean[0];
+            squares = fma(centered, centered, squares);
+        }
+    }
+    squares = simd_sum(squares);
+    if (simdgroup == 0u) partials[lane] = 0.0f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) partials[simdgroup] = squares;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdgroup == 0u) {
+        const float total = simd_sum(partials[lane]);
+        if (lane == 0u) {
+            sharedInverse[0] = metal::precise::rsqrt(total / float(width) + 1e-6f);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = 0; i < 4u; ++i) {
+        const uint d = base + i;
+        if (d < width) {
+            const float normalized = (values[i] - sharedMean[0]) * sharedInverse[0];
+            output[row * width + d] = bfloat(
+                normalized * float(weight[d]) + float(bias[d]));
+        }
+    }
+}
+
+inline float2 vision_qwen_rope_pair(float2 value, int position, uint pair) {
+    const float exponent = (2.0f / 36.0f) * float(pair);
+    const float angle = float(position) / powr(10000.0f, exponent);
+    const float c = cos(angle);
+    const float s = sin(angle);
+    return float2(value.x * c - value.y * s,
+                  value.y * c + value.x * s);
+}
+
+kernel void vision_qwen_qkv_bias_rope(
+    device bfloat* q [[buffer(0)]],
+    device bfloat* k [[buffer(1)]],
+    device bfloat* v [[buffer(2)]],
+    device const bfloat* qBias [[buffer(3)]],
+    device const bfloat* kBias [[buffer(4)]],
+    device const bfloat* vBias [[buffer(5)]],
+    device const int2* positions [[buffer(6)]],
+    constant uint& rows [[buffer(7)]],
+    constant uint& heads [[buffer(8)]],
+    uint vectorIndex [[thread_position_in_grid]]) {
+    if (vectorIndex >= rows * heads) return;
+    const uint head = vectorIndex % heads;
+    const uint row = vectorIndex / heads;
+    const uint base = vectorIndex * 72u;
+    const uint biasBase = head * 72u;
+    const int2 position = positions[row];
+    for (uint pair = 0; pair < 36u; ++pair) {
+        const uint first = base + pair;
+        const uint second = first + 36u;
+        float2 qPair = float2(
+            float(q[first]) + float(qBias[biasBase + pair]),
+            float(q[second]) + float(qBias[biasBase + pair + 36u]));
+        float2 kPair = float2(
+            float(k[first]) + float(kBias[biasBase + pair]),
+            float(k[second]) + float(kBias[biasBase + pair + 36u]));
+        const int coordinate = pair < 18u ? position.x : position.y;
+        qPair = vision_qwen_rope_pair(qPair, coordinate, pair % 18u);
+        kPair = vision_qwen_rope_pair(kPair, coordinate, pair % 18u);
+        q[first] = bfloat(qPair.x);
+        q[second] = bfloat(qPair.y);
+        k[first] = bfloat(kPair.x);
+        k[second] = bfloat(kPair.y);
+    }
+    for (uint d = 0; d < 72u; ++d) {
+        const uint index = base + d;
+        v[index] = bfloat(float(v[index]) + float(vBias[biasBase + d]));
+    }
+}
+
+kernel void vision_qwen_residual_bias(
+    device const bfloat* residual [[buffer(0)]],
+    device const bfloat* branch [[buffer(1)]],
+    device const bfloat* bias [[buffer(2)]],
+    device bfloat* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& width [[buffer(5)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= count) return;
+    output[index] = bfloat(float(residual[index]) + float(branch[index])
+                           + float(bias[index % width]));
+}
+
+kernel void vision_qwen_add_bias(
+    device bfloat* values [[buffer(0)]],
+    device const bfloat* bias [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index < count) {
+        values[index] = bfloat(float(values[index]) + float(bias[index % width]));
+    }
+}
+
+kernel void vision_qwen_gelu_tanh_bias(
+    device bfloat* values [[buffer(0)]],
+    device const bfloat* bias [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= count) return;
+    const float x = float(values[index]) + float(bias[index % width]);
+    const float inner = clamp(
+        0.7978845608f * (x + 0.044715f * x * x * x), -20.0f, 20.0f);
+    values[index] = bfloat(0.5f * x * (1.0f + tanh(inner)));
+}
+
+// MSL does not expose erf on every supported compiler. This Abramowitz-Stegun
+// polynomial has maximum absolute error below 1.5e-7, well under one BF16 ULP
+// throughout the merger's useful range, while preserving Qwen's exact-GELU
+// branch rather than substituting the tower MLP's tanh approximation.
+inline float vision_qwen_erf(float value) {
+    const float sign = value < 0.0f ? -1.0f : 1.0f;
+    const float x = abs(value);
+    const float t = 1.0f / (1.0f + 0.3275911f * x);
+    const float polynomial = (((((1.061405429f * t - 1.453152027f) * t
+        + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t);
+    return sign * (1.0f - polynomial * exp(-x * x));
+}
+
+kernel void vision_qwen_gelu_erf_bias(
+    device bfloat* values [[buffer(0)]],
+    device const bfloat* bias [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= count) return;
+    const float x = float(values[index]) + float(bias[index % width]);
+    values[index] = bfloat(
+        0.5f * x * (1.0f + vision_qwen_erf(x * 0.7071067811865475f)));
 }

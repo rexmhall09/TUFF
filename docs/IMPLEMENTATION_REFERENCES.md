@@ -10,6 +10,13 @@ included for broader design context rather than a line-level claim.
 
 ## Model and weights
 
+- Qwen3.6 uses the official Qwen3.5 multimodal implementation in Transformers.
+  TUFF follows its [Qwen3.5 MoE model](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5_moe/modeling_qwen3_5_moe.py)
+  for the 27-layer vision tower, 2x2 merger, prompt token expansion, and
+  interleaved temporal/height/width M-RoPE positions, and the official
+  [Qwen3.6 configuration](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/config.json)
+  for the pinned architecture and token IDs.
+
 - The official [Gemma 4 model card](https://ai.google.dev/gemma/docs/core/model_card_4)
   defines the model family, the 26B A4B mixture-of-experts shape, hybrid
   attention, and intended capabilities.

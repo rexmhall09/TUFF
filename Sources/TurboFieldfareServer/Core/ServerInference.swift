@@ -792,7 +792,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             with: imagePreprocessor(visionRuntime),
             checkCancellation: { try Task.checkCancellation() })
         let bridge = try tokenizer.encodeMultimodalUserContinuation(
-            textAndImages: parts, imageTokenCounts: images.map(\.softTokenCount))
+            textAndImages: parts,
+            imageTokenCounts: images.map(\.softTokenCount),
+            family: model.config.family)
         var spans: [MultimodalImageSpan] = []
         for (range, image) in zip(bridge.imageTokenRanges, images) {
             try Task.checkCancellation()
@@ -807,7 +809,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         return try MultimodalPrefillInput(
             effectiveTokenIDs: bridge.effectiveTokenIDs,
             embeddingTokenIDs: bridge.embeddingTokenIDs,
-            imageSpans: spans)
+            imageSpans: spans,
+            family: model.config.family)
     }
 
     private func renderMultimodal(
@@ -828,7 +831,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 messages: messages,
                 featuresByID: features,
                 tokenizer: tokenizer,
-                tools: request.tools)
+                tools: request.tools,
+                family: model.config.family)
         } catch let error as MultimodalPromptRendererError {
             throw Self.clientError(for: error) ?? error
         }

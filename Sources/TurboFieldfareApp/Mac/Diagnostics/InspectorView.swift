@@ -33,7 +33,8 @@ struct InspectorView: View {
     /// hiding image support until after a 14.62 GB download meant nobody found
     /// out it existed. It still collapses once the pack is installed and healthy.
      private var showsVisionSection: Bool {
-        VisionSectionVisibility.shows(
+        guard model.selectedModelOwnsVisionInstallState else { return false }
+        return VisionSectionVisibility.shows(
             visionRuntimeEnabled: model.visionRuntimeEnabled,
             visionRuntimeSupported: model.isVisionRuntimeSupported,
             isModelInstalled: model.isModelInstalled,
@@ -116,8 +117,15 @@ struct InspectorView: View {
                     + "Your prompt, images, and transcript are kept.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else if case .readyToActivate = model.visionInstallState,
+                      model.loadState.isReady {
+                Text("The separate image-support download is ready. "
+                    + "Unload the model once to activate it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else if !model.isVisionPackInstalled && model.loadState.isReady {
-                Text("Unload the model before preparing image support.")
+                Text("Image support downloads separately while the text model "
+                    + "stays installed. Unload only when the download is ready to activate.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if model.isVisionPackInstalled && model.loadState.isReady {
@@ -171,9 +179,13 @@ struct InspectorView: View {
     }
 
     private var visionInstallButtonLabel: String {
-        if model.hasPartialVisionPackDownload { return "Resume" }
-        if model.hasVisionPackDirectory { return "Repair" }
-        return "Download"
+        if model.hasPartialVisionPackDownload {
+            return "Resume \(model.visionInstallDescriptor.displayName)"
+        }
+        if model.hasVisionPackDirectory {
+            return "Repair \(model.visionInstallDescriptor.displayName)"
+        }
+        return "Download \(model.visionInstallDescriptor.displayName)"
     }
 
     private func visionAccessibleProgress(fraction: Double) -> String {

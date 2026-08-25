@@ -602,19 +602,24 @@ public struct GFTokenizer: @unchecked Sendable {
     public func encodeMultimodalUserContinuation(
         textAndImages: [MultimodalContinuationPart],
         imageTokenCounts: [Int],
-        openingConversation: Bool = false
+        openingConversation: Bool = false,
+        family: ModelFamily = .gemma4
     ) throws -> MultimodalContinuationTokens {
+        let policy = MultimodalPromptRenderer.FamilyPolicy.forFamily(family)
         var text = ""
         var expected = 0
         for part in textAndImages {
             switch part {
             case .text(let value):
-                guard !value.contains(MultimodalPromptRenderer.placeholder) else {
+                guard !value.contains(policy.placeholder),
+                      !value.contains("<|image_pad|>"),
+                      !value.contains("<|vision_start|>"),
+                      !value.contains("<|vision_end|>") else {
                     throw MultimodalPromptRendererError.reservedImageMarker
                 }
                 text += value
             case .image:
-                text += MultimodalPromptRenderer.placeholder
+                text += policy.placeholder
                 expected += 1
             }
         }
@@ -622,7 +627,7 @@ public struct GFTokenizer: @unchecked Sendable {
             throw MultimodalPromptRendererError.placeholderMismatch
         }
         guard text.components(
-            separatedBy: MultimodalPromptRenderer.placeholder).count - 1 == expected else {
+            separatedBy: policy.placeholder).count - 1 == expected else {
             throw MultimodalPromptRendererError.reservedImageMarker
         }
         let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -634,10 +639,15 @@ public struct GFTokenizer: @unchecked Sendable {
             template = encode(
                 try applyChatTemplate([Message(role: .user, content: content)]),
                 addBOS: false)
-        } else {
+        } else if dialect == .gemma {
             template = [endOfTurnID] + encode(
                 "\n\(Self.turnOpen)user\n\(content)\(Self.turnClose)\n"
                     + "\(Self.turnOpen)model\n<|channel>thought\n<channel|>",
+                addBOS: false)
+        } else {
+            template = [endOfTurnID] + encode(
+                "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
+                    + Self.chatMLGenerationSuffix,
                 addBOS: false)
         }
         // Count the placeholders the tokenizer actually produced before indexing
@@ -645,7 +655,7 @@ public struct GFTokenizer: @unchecked Sendable {
         // split across two text parts, which concatenation would reassemble into
         // a real image token and leave more placeholders than counts.
         let placeholders = template.reduce(into: 0) {
-            if $1 == MultimodalPromptRenderer.imageTokenID { $0 += 1 }
+            if $1 == policy.imageTokenID { $0 += 1 }
         }
         guard placeholders == imageTokenCounts.count else {
             throw MultimodalPromptRendererError.placeholderMismatch
@@ -656,21 +666,25 @@ public struct GFTokenizer: @unchecked Sendable {
         var ranges: [Range<Int>] = []
         var index = 0
         for token in template {
-            guard token == MultimodalPromptRenderer.imageTokenID else {
+            guard token == policy.imageTokenID else {
                 effective.append(token)
                 embedding.append(token)
                 continue
             }
             let count = imageTokenCounts[index]
-            effective.append(MultimodalPromptRenderer.beginImageTokenID)
-            embedding.append(MultimodalPromptRenderer.beginImageTokenID)
+            if policy.rendererAddsBoundaryTokens {
+                effective.append(policy.beginImageTokenID)
+                embedding.append(policy.beginImageTokenID)
+            }
             let lower = effective.count
             effective.append(contentsOf: repeatElement(
-                MultimodalPromptRenderer.imageTokenID, count: count))
+                policy.imageTokenID, count: count))
             embedding.append(contentsOf: repeatElement(Int32(0), count: count))
             ranges.append(lower..<effective.count)
-            effective.append(MultimodalPromptRenderer.endImageTokenID)
-            embedding.append(MultimodalPromptRenderer.endImageTokenID)
+            if policy.rendererAddsBoundaryTokens {
+                effective.append(policy.endImageTokenID)
+                embedding.append(policy.endImageTokenID)
+            }
             index += 1
         }
         guard index == imageTokenCounts.count else {

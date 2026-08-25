@@ -438,9 +438,9 @@ references lead to the supporting code and tests.
 ## Scope and limitations
 
 The runtime supports two pinned instruction checkpoints, Gemma 4 26B-A4B and
-Qwen 3.6 35B-A3B. Gemma supports text and optional image input through a
-separate companion pack; Qwen is text-only. An installation without the Gemma
-image pack has the footprint it had before. The image tower requires M2 or
+Qwen 3.6 35B-A3B. Both support text and optional still-image input through a
+family-specific companion pack. An installation without its image pack has the
+same text behavior and footprint as before. The image tower requires M2 or
 newer; text-only inference remains available on M1. See [Images](#images).
 
 Qwen 3.6 is selected from `manifest.json -> arch.family`. It is a hybrid of 30
@@ -485,8 +485,14 @@ default.
 Image support ships as a companion pack, `<name>.vision.gturbo`, installed
 beside the text model. The pack's manifest records the SHA-256 of the text
 manifest it was built against, so a pack cannot be used with a model it does
-not match. When the pack is absent or fails verification, the text runtime
-runs unchanged and image input is unavailable.
+not match. It also records the model family, so a Qwen pack cannot open as a
+Gemma pack or vice versa. When the pack is absent or fails verification, the
+text runtime runs unchanged and image input is unavailable.
+
+Downloading the companion prepares a separate sibling directory and does not
+rewrite the text install or the active pack. The Mac app therefore permits the
+download while the text model is loaded, but activation and removal still
+require an unloaded runtime so the verified companion can be swapped safely.
 
 Preprocessing reads the image header before anything else. Orientation, colour
 space, and pixel dimensions come from metadata, and the number of tokens an
@@ -498,10 +504,13 @@ The tower then runs on bounded scratch. Attention is tiled with an online
 softmax, so the full attention matrix is never allocated. The runtime keeps
 the projected features and releases the rest.
 
-Projected features enter the language model as whole spans of rows. Within the
-25 sliding-window layers, the rows of one image attend to each other in both
-directions. The 5 full-attention layers stay causal, and text rows stay causal
-in every layer. An image span prefills as one chunk, so it is never split
+Projected features enter the language model as whole spans of rows. Gemma image
+rows attend to each other in both directions within its 25 sliding-window
+layers; its full-attention layers and all text rows remain causal. Qwen remains
+causal throughout and uses three-axis multimodal RoPE: temporal, merged-grid
+height, and merged-grid width positions are interleaved across rotary frequency
+slots, with the resulting RoPE delta carried into generated text. An image span
+prefills as one chunk, so it is never split
 across a chunk boundary. The chunk scratch and the KV ring are sized for the
 largest pooled span rather than for the text chunk size.
 
@@ -526,3 +535,9 @@ residency policies at 2,224 to 2,229 MiB peak footprint. Per-row system
 swapouts ranged from 0 to 383 MiB. Five smaller images at a 64K context
 completed at 3,357 MiB footprint with 425 MiB of swapouts. These figures are
 observed costs, not rejection thresholds; on-demand remains the default.
+
+Gemma uses its original 3x3 pooling and position-table preprocessing unchanged.
+Qwen follows Transformers `smart_resize`, patch size 16, temporal patch size 2
+(a still is repeated across both temporal frames), 2x2 spatial merge order,
+learned 48x48 position interpolation, and a 2048-wide merger projection. Video
+frames and video timestamps are not implemented in v1.2.0.

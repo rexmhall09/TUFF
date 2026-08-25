@@ -34,6 +34,72 @@ import TurboFieldfareValidationSupport
         }
     }
 
+    @Test func qwenMRoPEInterleavesOfficialElevenElevenTenSections() throws {
+        let headDim = 256
+        let rotaryDim = 64
+        let theta: Float = 10_000_000
+        let input = (0..<headDim).map {
+            Float16(Float(($0 * 17) % 41 - 20) / 32)
+        }
+        let temporal: [Int32] = [2]
+        let height: [Int32] = [5]
+        let width: [Int32] = [9]
+        let context = try MetalContext()
+        let buffer = try #require(Fp16Buffer.make(context.device, halves: input))
+        func positionBuffer(_ values: [Int32]) throws -> MTLBuffer {
+            try #require(context.device.makeBuffer(
+                bytes: values,
+                length: values.count * MemoryLayout<Int32>.stride,
+                options: .storageModeShared))
+        }
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        try PrefillRoPE(context: context).encodeMRoPENeoxSubdim(
+            commandBuffer: commandBuffer,
+            data: buffer,
+            queryCount: 1,
+            headDim: UInt32(headDim),
+            numHeads: 1,
+            rotaryDim: UInt32(rotaryDim),
+            tokenStrideElements: UInt32(headDim),
+            theta: theta,
+            temporalPositions: positionBuffer(temporal),
+            heightPositions: positionBuffer(height),
+            widthPositions: positionBuffer(width))
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.error == nil)
+
+        var expected = input
+        var sectionCounts = [0, 0, 0]
+        for pair in 0..<(rotaryDim / 2) {
+            let axis: Int
+            let position: Float
+            if pair % 3 == 1, pair < 33 {
+                axis = 1
+                position = Float(height[0])
+            } else if pair % 3 == 2, pair < 30 {
+                axis = 2
+                position = Float(width[0])
+            } else {
+                axis = 0
+                position = Float(temporal[0])
+            }
+            sectionCounts[axis] += 1
+            let angle = position * pow(theta, -Float(2 * pair) / Float(rotaryDim))
+            let x0 = Float(input[pair])
+            let x1 = Float(input[rotaryDim / 2 + pair])
+            expected[pair] = Float16(x0 * cos(angle) - x1 * sin(angle))
+            expected[rotaryDim / 2 + pair] = Float16(
+                x0 * sin(angle) + x1 * cos(angle))
+        }
+        #expect(sectionCounts == [11, 11, 10])
+        let actual = Fp16Buffer.read(buffer, count: headDim)
+        #expect(RelError.maxAbsDiff(actual, expected.map(Float.init)) <= 0.002)
+        #expect(Array(actual[rotaryDim...])
+                == input[rotaryDim...].map(Float.init),
+                "MRoPE changed the unrotated three quarters of the Qwen head")
+    }
+
     @Test func blockDefaultNeoxMatchesRepeatedScalarAbsolutePositions() throws {
         let rows = 5
         let heads = 8

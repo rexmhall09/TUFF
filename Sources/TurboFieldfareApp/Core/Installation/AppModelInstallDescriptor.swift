@@ -116,6 +116,22 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes: 1_144_373_248 + 4_194_304,
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 1_073_741_824)
+
+    public static let qwen36VisionCompanion = AppModelInstallDescriptor(
+        displayName: "Qwen3.6 Image Support",
+        repoID: "mlx-community/Qwen3.6-35B-A3B-4bit",
+        revision: "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+        sourceIndexSHA256: "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea",
+        approximateDownloadBytes: 893_142_496,
+        installedBytes: 900_808_704,
+        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+        reserveBytes: 1_073_741_824)
+
+    public static func visionCompanion(
+        for family: ModelFamily
+    ) -> AppModelInstallDescriptor {
+        family == .qwen36 ? .qwen36VisionCompanion : .visionCompanion
+    }
 }
 
 public struct AppModelInstallRequirement: Equatable, Sendable {

@@ -111,6 +111,12 @@ public final class AppModel {
     private var unloadGeneration: UInt64 = 0
     private var visionInstallGeneration: UInt64 = 0
     private var visionInstallCancellationRequested = false
+    /// The catalog model whose optional companion owns the current vision
+    /// transaction. This is deliberately separate from `selectedModelID`:
+    /// downloading Qwen image support must not silently switch away from a
+    /// loaded Gemma text session (or vice versa).
+    public private(set) var visionInstallTargetModelID: String?
+    private var visionInstallTargetDirectory: URL?
     private var pendingExplicitLoadRuntimeKey: AppLoadedRuntimeKey?
     private var activeRunRuntimeKey: AppLoadedRuntimeKey?
     private var hasHandledTerminalEvent = false
@@ -230,7 +236,17 @@ public final class AppModel {
     public var isInstallingAnyModel: Bool { installs.contains { $0.isInstalling } }
 
     public func canSelectModel(_ coordinator: ModelInstallCoordinator) -> Bool {
-        !isRunning && !loadState.isLoading && coordinator.id != selectedModelID
+        guard !isRunning, !loadState.isLoading,
+              coordinator.id != selectedModelID else { return false }
+        // A transfer keeps writing beside its original text model. Wait for it
+        // to reach a saved state before changing selection; once prepared, the
+        // target model itself can be selected for activation.
+        if isVisionCompanionOperationInProgress { return false }
+        if case .readyToActivate = visionInstallState,
+           let target = visionInstallTargetModelID {
+            return coordinator.id == target
+        }
+        return true
     }
 
     /// Focus a different model. A download already running for either model is
@@ -320,13 +336,58 @@ public final class AppModel {
     public var canCancelInstall: Bool { selectedInstall.canCancel }
 
     public var isVisionPackInstalled: Bool {
-        selectedDescriptor.family == .gemma4 && visionInstallationStatus == .complete
+        visionInstallationStatus == .complete
     }
 
     public var isInstallingVisionPack: Bool { visionInstallState.isInstalling }
 
     public var visionInstallDescriptor: AppModelInstallDescriptor {
-        visionInstaller.descriptor
+        visionInstallDescriptor(for: selectedInstall)
+    }
+
+    public func visionInstallDescriptor(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelInstallDescriptor {
+        .visionCompanion(for: coordinator.descriptor.family)
+    }
+
+    public func visionInstallationStatus(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppVisionPackInstallationStatus {
+        AppVisionPackInstallationProbe.status(at: coordinator.directoryURL)
+    }
+
+    public func isVisionPackInstalled(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        visionInstallationStatus(for: coordinator) == .complete
+    }
+
+    public func isVisionInstallTarget(
+        _ coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        visionInstallTargetModelID == coordinator.id
+    }
+
+    /// Selected-model surfaces must not relabel another catalog row's active
+    /// transfer as though it belonged to the model currently in use.
+    public var selectedModelOwnsVisionInstallState: Bool {
+        visionInstallTargetModelID == nil
+            || visionInstallTargetModelID == selectedModelID
+    }
+
+    public func visionDownloadButtonLabel(
+        for coordinator: ModelInstallCoordinator
+    ) -> String {
+        let verb: String
+        if hasPartialVisionPackDownload(for: coordinator) {
+            verb = "Resume"
+        } else if hasVisionPackDirectory(for: coordinator) {
+            verb = "Repair"
+        } else {
+            verb = "Download"
+        }
+        return "\(verb) \(visionInstallDescriptor(for: coordinator).displayName)"
     }
 
     /// Every companion Download, Resume, Verify, Activate, Repair, and Remove
@@ -337,30 +398,49 @@ public final class AppModel {
         visionInstallState.isInstalling
     }
 
-    /// A companion operation may only begin against an unloaded model session
-    /// with no other transfer in flight; the draft, transcript, and attachments
-    /// are untouched by the gate.
-    public var canBeginVisionCompanionOperation: Bool {
-        !isRunning && !loadState.isLoading && !loadState.isReady
+    /// Downloading prepares a sibling directory and does not touch the loaded
+    /// runtime or the active companion. Activation and destructive mutations
+    /// still require an unloaded session below.
+    public var canPrepareVisionCompanionOperation: Bool {
+        !isRunning && !loadState.isLoading
             && !isInstallingModel && !isVisionCompanionOperationInProgress
     }
 
+    /// Activation, discard, and removal mutate companion state and therefore
+    /// require an unloaded model session.
+    public var canBeginVisionCompanionOperation: Bool {
+        canPrepareVisionCompanionOperation && !loadState.isReady
+    }
+
     public var canInstallVisionPack: Bool {
-        guard selectedDescriptor.family == .gemma4,
-              isVisionRuntimeSupported else { return false }
+        canInstallVisionPack(for: selectedInstall)
+    }
+
+    public func canInstallVisionPack(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        guard isVisionRuntimeSupported else { return false }
         // A layout with nowhere to put a companion cannot be repaired by
         // downloading one, so do not offer to.
-        guard visionInstallationStatus != .unsupportedLayout else { return false }
-        guard isModelInstalled, !isVisionPackInstalled,
-              case .ready = visionInstallReadiness else { return false }
-        if case .readyToActivate = visionInstallState { return false }
-        return canBeginVisionCompanionOperation
+        let status = visionInstallationStatus(for: coordinator)
+        guard status != .unsupportedLayout, status != .complete,
+              coordinator.isInstalled else { return false }
+        if isVisionInstallTarget(coordinator),
+           case .readyToActivate = visionInstallState { return false }
+        guard canPrepareVisionCompanionOperation else { return false }
+        do {
+            return try visionInstaller.checkInstallRequirement(
+                textModelDirectory: coordinator.directoryURL).canInstall
+        } catch {
+            return false
+        }
     }
 
     public var canActivateVisionPack: Bool {
-        guard selectedDescriptor.family == .gemma4,
-              isVisionRuntimeSupported else { return false }
+        guard isVisionRuntimeSupported else { return false }
         guard case .readyToActivate = visionInstallState else { return false }
+        guard visionInstallTargetModelID == nil
+                || visionInstallTargetModelID == selectedModelID else { return false }
         return canBeginVisionCompanionOperation
     }
 
@@ -570,6 +650,12 @@ public final class AppModel {
     /// that was loaded from the previous one.
     private func applySelectedModelDirectory(_ url: URL) {
         let path = url.standardizedFileURL.path
+        let preservesPreparedVisionPack = visionInstallTargetModelID == selectedModelID
+            && visionInstallTargetDirectory?.standardizedFileURL.path == path
+            && {
+                if case .readyToActivate = visionInstallState { return true }
+                return false
+            }()
         modelPathText = path
         clearImages()
         applyPersistedSettings(
@@ -577,13 +663,17 @@ public final class AppModel {
         loadGeneration &+= 1
         loadTask?.cancel()
         loadTask = nil
-        visionInstallGeneration &+= 1
-        visionInstallCancellationRequested = false
-        visionInstallTask?.cancel()
-        visionInstaller.cancel()
-        visionInstallTask = nil
-        resetVisionInstallETA()
-        visionInstallState = .idle
+        if !preservesPreparedVisionPack {
+            visionInstallGeneration &+= 1
+            visionInstallCancellationRequested = false
+            visionInstallTask?.cancel()
+            visionInstaller.cancel()
+            visionInstallTask = nil
+            visionInstallTargetModelID = nil
+            visionInstallTargetDirectory = nil
+            resetVisionInstallETA()
+            visionInstallState = .idle
+        }
         pendingExplicitLoadRuntimeKey = nil
         activeRunRuntimeKey = nil
         loadedRuntimeKey = nil
@@ -684,7 +774,8 @@ public final class AppModel {
         // composer accept images the request then refused.
         max(1, VisionImageTokenBudget.capacity(
             maxContext: effectiveMaxContextTokens,
-            reservedTextTokens: Self.reservedPromptTokens))
+            reservedTextTokens: Self.reservedPromptTokens,
+            family: selectedDescriptor.family))
     }
 
     /// The context a generation would run with right now.
@@ -968,8 +1059,14 @@ public final class AppModel {
     /// model's coordinator and a model installed outside the app both show up.
 
     public var hasPartialVisionPackDownload: Bool {
+        hasPartialVisionPackDownload(for: selectedInstall)
+    }
+
+    public func hasPartialVisionPackDownload(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
         guard let output = try? VisionPackLocation.companionURL(
-            forTextModel: URL(fileURLWithPath: modelPathText, isDirectory: true)),
+            forTextModel: coordinator.directoryURL),
               let paths = try? RemoteInstallPaths(outputDirectory: output.path) else {
             return false
         }
@@ -982,13 +1079,18 @@ public final class AppModel {
     }
 
     public var canRemoveVisionPack: Bool {
-        selectedDescriptor.family == .gemma4
-            && hasVisionPackDirectory && canBeginVisionCompanionOperation
+        hasVisionPackDirectory && canBeginVisionCompanionOperation
     }
 
     public var hasVisionPackDirectory: Bool {
+        hasVisionPackDirectory(for: selectedInstall)
+    }
+
+    public func hasVisionPackDirectory(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
         guard let output = try? VisionPackLocation.companionURL(
-            forTextModel: URL(fileURLWithPath: modelPathText, isDirectory: true)) else {
+            forTextModel: coordinator.directoryURL) else {
             return false
         }
         var isDirectory: ObjCBool = false
@@ -998,13 +1100,17 @@ public final class AppModel {
     }
 
     public func installVisionPack() {
-        guard canInstallVisionPack else { return }
+        installVisionPack(for: selectedInstall)
+    }
+
+    public func installVisionPack(for coordinator: ModelInstallCoordinator) {
+        guard canInstallVisionPack(for: coordinator) else { return }
         visionInstallCancellationRequested = false
         visionInstallTask?.cancel()
         visionInstaller.cancel()
-        let textModelDirectory = URL(
-            fileURLWithPath: modelPathText,
-            isDirectory: true).standardizedFileURL
+        let textModelDirectory = coordinator.directoryURL.standardizedFileURL
+        visionInstallTargetModelID = coordinator.id
+        visionInstallTargetDirectory = textModelDirectory
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
         visionInstallState = .checking
@@ -1170,18 +1276,6 @@ public final class AppModel {
     }
 
     private func refreshVisionInstallReadiness(at textModelDirectory: URL) {
-        guard selectedDescriptor.family == .gemma4 else {
-            visionInstallationStatus = .missing
-            visionInstallReadiness = .failed(
-                "Image support is available only for Gemma 4")
-            if !imageAttachments.isEmpty {
-                for attachment in imageAttachments { attachmentStore.remove(attachment) }
-                imageAttachments.removeAll()
-                imageAttachmentError =
-                    "Qwen 3.6 is text-only, so the attached images were removed."
-            }
-            return
-        }
         visionInstallationStatus = AppVisionPackInstallationProbe.status(
             at: textModelDirectory)
         // Removing the companion leaves any attached image unsendable, and the
@@ -1219,6 +1313,8 @@ public final class AppModel {
             default: reportedBroken = false
             }
             if let output, !isInstallingVisionPack, !reportedBroken {
+                visionInstallTargetModelID = selectedModelID
+                visionInstallTargetDirectory = textModelDirectory
                 visionInstallState = .readyToActivate(output)
             }
         }
@@ -1283,12 +1379,14 @@ public final class AppModel {
             visionInstallTask = nil
         case .installed:
             resetVisionInstallETA()
-            let textModelDirectory = URL(
-                fileURLWithPath: modelPathText,
-                isDirectory: true).standardizedFileURL
-            visionInstallationStatus = AppVisionPackInstallationProbe.status(
-                at: textModelDirectory)
-            guard isVisionPackInstalled else {
+            let textModelDirectory = visionInstallTargetDirectory
+                ?? URL(fileURLWithPath: modelPathText, isDirectory: true)
+                    .standardizedFileURL
+            let status = AppVisionPackInstallationProbe.status(at: textModelDirectory)
+            if visionInstallTargetModelID == selectedModelID {
+                visionInstallationStatus = status
+            }
+            guard status == .complete else {
                 finishVisionInstallFailure(
                     RepackError.configurationInvalid(
                         detail: "completed vision install failed verification"),
@@ -1319,7 +1417,9 @@ public final class AppModel {
         visionInstallCancellationRequested = false
         visionInstallTask = nil
         visionInstallState = .cancelled
-        refreshVisionInstallReadiness()
+        if visionInstallTargetModelID == selectedModelID {
+            refreshVisionInstallReadiness()
+        }
     }
 
     /// Which phase failed. Only a download failure may leave a prepared pack
@@ -1340,10 +1440,12 @@ public final class AppModel {
         }
         resetVisionInstallETA()
         visionInstallTask = nil
-        let hasSavedDownload = hasPartialVisionPackDownload
-        let textModelDirectory = URL(
-            fileURLWithPath: modelPathText,
-            isDirectory: true).standardizedFileURL
+        let textModelDirectory = visionInstallTargetDirectory
+            ?? URL(fileURLWithPath: modelPathText, isDirectory: true)
+                .standardizedFileURL
+        let target = installs.first { $0.id == visionInstallTargetModelID }
+        let hasSavedDownload = target.map(hasPartialVisionPackDownload(for:))
+            ?? hasPartialVisionPackDownload
         // A download that finished and verifies is activatable whatever went
         // wrong afterwards. Reporting it as "needs attention" hid the Activate
         // button behind a Resume that only repeats work already done. The one
@@ -1359,10 +1461,12 @@ public final class AppModel {
         if phase == .download || isContention, hasSavedDownload,
            let output = try? VisionPackLocation.companionURL(
             forTextModel: textModelDirectory),
-           visionInstaller.preparedInstallIsValid(
+            visionInstaller.preparedInstallIsValid(
             textModelDirectory: textModelDirectory) {
             visionInstallState = .readyToActivate(output)
-            refreshVisionInstallReadiness(at: textModelDirectory)
+            if visionInstallTargetModelID == selectedModelID {
+                refreshVisionInstallReadiness(at: textModelDirectory)
+            }
             return
         }
         visionInstallState = hasSavedDownload
@@ -1375,7 +1479,9 @@ public final class AppModel {
                 requiredBytes: required,
                 availableBytes: available))
         } else {
-            refreshVisionInstallReadiness()
+            if visionInstallTargetModelID == selectedModelID {
+                refreshVisionInstallReadiness()
+            }
             if hasSavedDownload {
                 visionInstallState = .recoverable("\(error)")
             }

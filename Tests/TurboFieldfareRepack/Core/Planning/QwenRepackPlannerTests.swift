@@ -83,9 +83,17 @@ struct QwenRepackPlannerTests {
     }
 
     @Test func qwenSourceFingerprintIsKnown() {
-        #expect(SourceFingerprint.modelID(forIndexSha256:
-            "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea")
+        let qwenFingerprint =
+            "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea"
+        #expect(SourceFingerprint.modelID(forIndexSha256: qwenFingerprint)
             == "qwen3.6-35b-a3b-4bit")
+        #expect(SourceFingerprint.modelID(
+            forIndexSha256: qwenFingerprint,
+            repoID: "mlx-community/Qwen3.6-35B-A3B-4bit")
+            == "qwen3.6-35b-a3b-4bit")
+        #expect(SourceFingerprint.modelID(
+            forIndexSha256: qwenFingerprint,
+            repoID: "mlx-community/gemma-4-26b-a4b-it-4bit") == nil)
         #expect(SourceFingerprint.modelID(forIndexSha256:
             "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
             == "mlx-community/gemma-4-26b-a4b-it-4bit")

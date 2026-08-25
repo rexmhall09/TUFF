@@ -3,9 +3,12 @@ import Foundation
 import ImageIO
 import Metal
 
-public final class Gemma4ImagePreprocessor {
+public final class VisionImagePreprocessor {
     private static let unitBF16 = (0...255).map {
         Quantization.bf16Bits(Float($0) / 255)
+    }
+    private static let qwenNormalizedBF16 = (0...255).map {
+        Quantization.bf16Bits(Float($0) * (2.0 / 255.0) - 1.0)
     }
 
     private let device: MTLDevice
@@ -221,6 +224,12 @@ public final class Gemma4ImagePreprocessor {
         patches: MTLBuffer,
         positions: MTLBuffer
     ) {
+        if config.family == .qwen36 {
+            patchifyQwen36(
+                rgba: rgba, rowBytes: rowBytes, geometry: geometry,
+                patches: patches, positions: positions)
+            return
+        }
         let patchPointer = patches.contents().bindMemory(
             to: UInt16.self, capacity: geometry.patchCount * config.patchDimension)
         let positionPointer = positions.contents().bindMemory(
@@ -246,6 +255,57 @@ public final class Gemma4ImagePreprocessor {
         }
     }
 
+    /// Mirrors `Qwen2VLImageProcessor`'s still-image patch layout. A still is
+    /// repeated across the temporal patch of two frames, and rows are ordered
+    /// by spatial-merge block before the 2x2 patches inside that block.
+    private func patchifyQwen36(
+        rgba: UnsafePointer<UInt8>,
+        rowBytes: Int,
+        geometry: Gemma4ImageGeometry,
+        patches: MTLBuffer,
+        positions: MTLBuffer
+    ) {
+        let patchPointer = patches.contents().bindMemory(
+            to: UInt16.self, capacity: geometry.patchCount * config.patchDimension)
+        let positionPointer = positions.contents().bindMemory(
+            to: Int32.self, capacity: geometry.patchCount * 2)
+        let size = config.patchSize
+        let merge = config.poolingKernel
+        var row = 0
+        for blockY in 0..<(geometry.patchGridHeight / merge) {
+            for blockX in 0..<(geometry.patchGridWidth / merge) {
+                for mergeY in 0..<merge {
+                    for mergeX in 0..<merge {
+                        let patchY = blockY * merge + mergeY
+                        let patchX = blockX * merge + mergeX
+                        // Qwen vision RoPE consumes (height, width).
+                        positionPointer[row * 2] = Int32(patchY)
+                        positionPointer[row * 2 + 1] = Int32(patchX)
+                        var output = row * config.patchDimension
+                        // Transformers applies the logical Conv3D to C,T,H,W.
+                        // The pinned MLX checkpoint transposes that kernel to
+                        // T,H,W,C, so emit the equivalent channels-last physical
+                        // order for the flattened matrix multiplication.
+                        for _ in 0..<config.temporalPatchSize {
+                            for pixelY in 0..<size {
+                                let inputRow = (patchY * size + pixelY) * rowBytes
+                                for pixelX in 0..<size {
+                                    let input = inputRow + (patchX * size + pixelX) * 4
+                                    for channel in 0..<3 {
+                                        patchPointer[output] = Self.qwenNormalizedBF16[
+                                            Int(rgba[input + channel])]
+                                        output += 1
+                                    }
+                                }
+                            }
+                        }
+                        row += 1
+                    }
+                }
+            }
+        }
+    }
+
     private func checkedMultiply(_ lhs: Int, _ rhs: Int) throws -> Int {
         let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
         guard !overflow else {
@@ -261,3 +321,7 @@ public final class Gemma4ImagePreprocessor {
         return seconds * 1_000_000_000 + fractional
     }
 }
+
+/// Source-compatible v1.0 spelling. It now routes through the shared,
+/// family-parameterized processor.
+public typealias Gemma4ImagePreprocessor = VisionImagePreprocessor

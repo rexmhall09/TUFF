@@ -31,6 +31,33 @@
    "special": true
   },
   {
+   "id": 248053,
+   "content": "<|vision_start|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 248054,
+   "content": "<|vision_end|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 248056,
+   "content": "<|image_pad|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
    "id": 248058,
    "content": "<tool_call>",
    "single_word": false,

@@ -35,11 +35,13 @@ public enum VisionPackWriter {
         audit: RepackAudit = RepackAudit()
     ) throws -> VisionPackWriteResult {
         let meta = try IndexLoader.load(snapshotDir: options.inputDirectory)
-        guard let modelID = SourceFingerprint.modelID(forIndexSha256: meta.indexSha256Hex),
-              modelID == "mlx-community/gemma-4-26b-a4b-it-4bit" else {
+        guard let modelID = SourceFingerprint.modelID(
+            forIndexSha256: meta.indexSha256Hex),
+              let source = SupportedModelSource.all.first(where: { $0.modelID == modelID }) else {
             throw RepackError.sourceFingerprintRejected(
                 path: meta.indexPath, sha256: meta.indexSha256Hex)
         }
+        let visionFamily: GTurboVisionFamilyV1 = source == .qwen36 ? .qwen36 : .gemma4
 
         var headers: [Safetensors.Header] = []
         for filename in meta.shardFilenames {
@@ -53,6 +55,11 @@ public enum VisionPackWriter {
         let textManifestData = try Posix.readBoundedData(
             textManifestPath, maximumBytes: GTurboVisionFormatV1.metadataMaxBytes)
         let textManifest = try GTurboManifestCodec.decode(textManifestData)
+        let textFamily = textManifest.arch.family ?? "gemma4"
+        guard textFamily == visionFamily.rawValue else {
+            throw RepackError.configurationInvalid(
+                detail: "\(visionFamily.rawValue) vision source cannot bind to \(textFamily) text model")
+        }
         guard let textSnapshot = textManifest.sourceSnapshotHash,
               !textSnapshot.isEmpty else {
             throw RepackError.configurationInvalid(
@@ -144,6 +151,8 @@ public enum VisionPackWriter {
                     })
             }
             let manifest = GTurboVisionManifestV1(
+                artifactKind: visionFamily.artifactKind,
+                family: visionFamily == .gemma4 ? nil : visionFamily,
                 modelID: modelID,
                 sourceRevision: options.sourceRevision,
                 sourceIndexSha256: meta.indexSha256Hex,
@@ -163,6 +172,8 @@ public enum VisionPackWriter {
                     size: UInt64(manifestData.count), sha256: manifestSHA)
             ]) { _, new in new }
             let receipt = GTurboVisionReceiptV1(
+                artifactKind: visionFamily.artifactKind,
+                family: visionFamily == .gemma4 ? nil : visionFamily,
                 manifestSha256: manifestSHA,
                 companionDirectoryPath: finalURL.path,
                 compatibleTextManifestSha256: textManifestSHA,

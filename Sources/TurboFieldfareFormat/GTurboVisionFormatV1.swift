@@ -2,7 +2,10 @@ import Foundation
 
 package enum GTurboVisionFormatV1 {
     package static let magic = "GTURBO-VISION"
+    /// Kept as the default so v1.0 Gemma companion manifests and receipts
+    /// continue to encode byte-for-byte identically.
     package static let artifactKind = "gemma4_vision_companion"
+    package static let qwen36ArtifactKind = "qwen36_vision_companion"
     package static let versionMajor = 1
     package static let versionMinor = 0
     package static let alignmentBytes: UInt64 = 16_384
@@ -42,6 +45,18 @@ package enum GTurboVisionFormatV1 {
         if !missing.isEmpty { parts.append("missing \(missing)") }
         if !unexpected.isEmpty { parts.append("unexpected \(unexpected)") }
         return parts.isEmpty ? "entries differ" : parts.joined(separator: ", ")
+    }
+}
+
+package enum GTurboVisionFamilyV1: String, Codable, Equatable, Sendable {
+    case gemma4
+    case qwen36
+
+    package var artifactKind: String {
+        switch self {
+        case .gemma4: GTurboVisionFormatV1.artifactKind
+        case .qwen36: GTurboVisionFormatV1.qwen36ArtifactKind
+        }
     }
 }
 
@@ -103,6 +118,10 @@ package struct GTurboVisionTensorRegionV1: Codable, Equatable, Sendable {
 package struct GTurboVisionManifestV1: Codable, Equatable, Sendable {
     package let magic: String
     package let artifactKind: String
+    /// Nil is the original v1.0 Gemma representation. New families are
+    /// explicit, which lets old fixtures remain stable while wrong-family
+    /// packs fail closed.
+    package let family: GTurboVisionFamilyV1?
     package let versionMajor: Int
     package let versionMinor: Int
     package let modelID: String
@@ -116,6 +135,7 @@ package struct GTurboVisionManifestV1: Codable, Equatable, Sendable {
 
     package init(magic: String = GTurboVisionFormatV1.magic,
                  artifactKind: String = GTurboVisionFormatV1.artifactKind,
+                 family: GTurboVisionFamilyV1? = nil,
                  versionMajor: Int = GTurboVisionFormatV1.versionMajor,
                  versionMinor: Int = GTurboVisionFormatV1.versionMinor,
                  modelID: String, sourceRevision: String,
@@ -126,6 +146,7 @@ package struct GTurboVisionManifestV1: Codable, Equatable, Sendable {
                  tensors: [GTurboVisionTensorRegionV1]) {
         self.magic = magic
         self.artifactKind = artifactKind
+        self.family = family
         self.versionMajor = versionMajor
         self.versionMinor = versionMinor
         self.modelID = modelID
@@ -137,6 +158,8 @@ package struct GTurboVisionManifestV1: Codable, Equatable, Sendable {
         self.files = files
         self.tensors = tensors
     }
+
+    package var resolvedFamily: GTurboVisionFamilyV1 { family ?? .gemma4 }
 }
 
 package enum GTurboVisionManifestCodec {
@@ -180,7 +203,7 @@ package enum GTurboVisionManifestCodec {
 package enum GTurboVisionStructuralValidator {
     package static func validate(_ manifest: GTurboVisionManifestV1) throws {
         guard manifest.magic == GTurboVisionFormatV1.magic,
-              manifest.artifactKind == GTurboVisionFormatV1.artifactKind else {
+              manifest.artifactKind == manifest.resolvedFamily.artifactKind else {
             throw GTurboFormatError.invalid(field: "vision.manifest.identity",
                                              reason: "unsupported artifact")
         }
@@ -283,6 +306,60 @@ package enum GTurboVisionStructuralValidator {
             }
             previousEnd = end
         }
+        if manifest.resolvedFamily == .qwen36 {
+            try validateQwen36Architecture(manifest.tensors)
+        }
+    }
+
+    private static func validateQwen36Architecture(
+        _ tensors: [GTurboVisionTensorRegionV1]
+    ) throws {
+        var expected: [String: [UInt64]] = [
+            // MLX stores Conv3D kernels channels-last. This is the physical
+            // checkpoint layout corresponding to Transformers' logical
+            // [out, channels, temporal, height, width] kernel.
+            "vision_tower.patch_embed.proj.weight": [1_152, 2, 16, 16, 3],
+            "vision_tower.patch_embed.proj.bias": [1_152],
+            "vision_tower.pos_embed.weight": [2_304, 1_152],
+            "vision_tower.merger.norm.weight": [1_152],
+            "vision_tower.merger.norm.bias": [1_152],
+            "vision_tower.merger.linear_fc1.weight": [4_608, 4_608],
+            "vision_tower.merger.linear_fc1.bias": [4_608],
+            "vision_tower.merger.linear_fc2.weight": [2_048, 4_608],
+            "vision_tower.merger.linear_fc2.bias": [2_048],
+        ]
+        for layer in 0..<27 {
+            let p = "vision_tower.blocks.\(layer)."
+            expected[p + "attn.qkv.weight"] = [3_456, 1_152]
+            expected[p + "attn.qkv.bias"] = [3_456]
+            expected[p + "attn.proj.weight"] = [1_152, 1_152]
+            expected[p + "attn.proj.bias"] = [1_152]
+            expected[p + "mlp.linear_fc1.weight"] = [4_304, 1_152]
+            expected[p + "mlp.linear_fc1.bias"] = [4_304]
+            expected[p + "mlp.linear_fc2.weight"] = [1_152, 4_304]
+            expected[p + "mlp.linear_fc2.bias"] = [1_152]
+            expected[p + "norm1.weight"] = [1_152]
+            expected[p + "norm1.bias"] = [1_152]
+            expected[p + "norm2.weight"] = [1_152]
+            expected[p + "norm2.bias"] = [1_152]
+        }
+        guard tensors.count == expected.count else {
+            throw GTurboFormatError.invalid(
+                field: "vision.qwen36.tensors",
+                reason: "expected \(expected.count) tensors, found \(tensors.count)")
+        }
+        for tensor in tensors {
+            guard tensor.dtype == .bf16, tensor.quantization == nil,
+                  expected.removeValue(forKey: tensor.name) == tensor.shape else {
+                throw GTurboFormatError.invalid(
+                    field: "vision.qwen36.tensor.\(tensor.name)",
+                    reason: "unexpected name, shape, or storage type")
+            }
+        }
+        guard expected.isEmpty else {
+            throw GTurboFormatError.invalid(
+                field: "vision.qwen36.tensors", reason: "missing tensors")
+        }
     }
 
     private static func validateSHA(_ value: String, field: String) throws {
@@ -300,6 +377,7 @@ package enum GTurboVisionStructuralValidator {
 package struct GTurboVisionReceiptV1: Codable, Equatable, Sendable {
     package let schemaVersion: Int
     package let artifactKind: String
+    package let family: GTurboVisionFamilyV1?
     package let manifestSha256: String
     package let companionDirectoryPath: String
     package let compatibleTextManifestSha256: String
@@ -311,6 +389,7 @@ package struct GTurboVisionReceiptV1: Codable, Equatable, Sendable {
 
     package init(schemaVersion: Int = 1,
                  artifactKind: String = GTurboVisionFormatV1.artifactKind,
+                 family: GTurboVisionFamilyV1? = nil,
                  manifestSha256: String, companionDirectoryPath: String,
                  compatibleTextManifestSha256: String,
                  sourceRepoID: String, sourceRevision: String,
@@ -318,6 +397,7 @@ package struct GTurboVisionReceiptV1: Codable, Equatable, Sendable {
                  files: [String: GTurboManifestFileV1]) {
         self.schemaVersion = schemaVersion
         self.artifactKind = artifactKind
+        self.family = family
         self.manifestSha256 = manifestSha256
         self.companionDirectoryPath = companionDirectoryPath
         self.compatibleTextManifestSha256 = compatibleTextManifestSha256
@@ -327,6 +407,8 @@ package struct GTurboVisionReceiptV1: Codable, Equatable, Sendable {
         self.toolVersion = toolVersion
         self.files = files
     }
+
+    package var resolvedFamily: GTurboVisionFamilyV1 { family ?? .gemma4 }
 }
 
 package enum GTurboVisionReceiptCodec {
@@ -368,7 +450,7 @@ package enum GTurboVisionReceiptCodec {
 
     private static func validate(_ receipt: GTurboVisionReceiptV1) throws {
         guard receipt.schemaVersion == 1,
-              receipt.artifactKind == GTurboVisionFormatV1.artifactKind,
+              receipt.artifactKind == receipt.resolvedFamily.artifactKind,
               !receipt.companionDirectoryPath.isEmpty,
               !receipt.sourceRepoID.isEmpty, !receipt.sourceRevision.isEmpty,
               !receipt.verificationTimestamp.isEmpty, !receipt.toolVersion.isEmpty else {

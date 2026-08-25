@@ -17,7 +17,11 @@ public enum VisionImageTokenBudget {
     /// not — the app, deciding whether to accept a drop before anything is
     /// preprocessed — can bound the answer with this.
     public static var maximumTokensPerImage: Int {
-        VisionConfig().maximumPooledTokens + markerTokensPerImage
+        maximumTokensPerImage(family: .gemma4)
+    }
+
+    public static func maximumTokensPerImage(family: ModelFamily) -> Int {
+        VisionConfig(family: family).maximumPooledTokens + markerTokensPerImage
     }
 
     public static func imageTokens(softTokenCounts: [Int]) -> Int {
@@ -53,10 +57,16 @@ public enum VisionImageTokenBudget {
     /// this only has to be a defensible ceiling rather than an exact one.
     public static func capacity(
         maxContext: Int,
-        reservedTextTokens: Int
+        reservedTextTokens: Int,
+        family: ModelFamily = .gemma4
     ) -> Int {
         let available = maxContext - reservedTextTokens
         guard available > 0 else { return 0 }
-        return max(0, available / maximumTokensPerImage)
+        let conservative = available / maximumTokensPerImage(family: family)
+        // Qwen's processor permits a 16k-token maximum image, but ordinary
+        // stills are much smaller and are measured before encode. Refusing the
+        // first attachment solely because the theoretical maximum equals the
+        // whole context would make image support unusable.
+        return family == .qwen36 ? max(1, conservative) : max(0, conservative)
     }
 }

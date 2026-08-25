@@ -120,9 +120,33 @@ public enum VerifiedInstallReceiptReader {
             throw ModelError.trustedReceiptInvalid(detail: "manifest SHA mismatch")
         }
 
-        let actualPath = directoryURL.standardizedFileURL.path
-        guard receipt.modelDirectoryPath == actualPath else {
+        guard directoryBindingMatches(
+            receiptPath: receipt.modelDirectoryPath,
+            openedDirectory: directoryURL
+        ) else {
             throw ModelError.trustedReceiptInvalid(detail: "model directory mismatch")
         }
+    }
+
+    /// A receipt written for the real directory may be opened through a root
+    /// alias, which is how a packaged app can reuse a development install
+    /// without copying it. Keep the binding asymmetric: a receipt written for
+    /// a symlink remains bound to that exact alias and cannot authorize opening
+    /// its target by another path.
+    private static func directoryBindingMatches(
+        receiptPath: String,
+        openedDirectory: URL
+    ) -> Bool {
+        let receiptURL = URL(
+            fileURLWithPath: receiptPath,
+            isDirectory: true
+        ).standardizedFileURL
+        let openedURL = openedDirectory.standardizedFileURL
+        if receiptURL.path == openedURL.path { return true }
+        guard (try? FileManager.default.destinationOfSymbolicLink(
+            atPath: receiptURL.path
+        )) == nil else { return false }
+        return receiptURL.resolvingSymlinksInPath().path
+            == openedURL.resolvingSymlinksInPath().path
     }
 }

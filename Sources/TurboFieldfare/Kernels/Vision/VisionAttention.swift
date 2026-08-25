@@ -22,6 +22,7 @@ public final class VisionAttention {
     private let mlxOutput: MTLBuffer?
     private let mppPadded: Bool
     private let queryTile: Int
+    private let scoreScale: Float
     public let variant: Variant
 
     /// True when the projections write the padded head-major layout directly and
@@ -78,7 +79,10 @@ public final class VisionAttention {
 
     public init(context: MetalContext,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
+                scoreScale: Float = 1,
                 allowFusedPaddedLayout: Bool = true) throws {
+        precondition(scoreScale.isFinite && scoreScale > 0)
+        self.scoreScale = scoreScale
         if let path = environment["TURBO_FIELDFARE_VISION_MLX_METALLIB"] {
             variant = .mlxSteel80
             queryTile = 32
@@ -257,7 +261,8 @@ public final class VisionAttention {
                     paddedQ: q, paddedK: k, paddedV: v,
                     paddedOutput: output,
                     inputRowStride: inputRowStride,
-                    unpaddedOutputHeadDim: Self.headDimension)
+                    unpaddedOutputHeadDim: Self.headDimension,
+                    scoreScale: scoreScale)
             }
             return
         }
@@ -277,14 +282,15 @@ public final class VisionAttention {
                         pipeline: mlxPipeline,
                         paddedQ: mlxQ, paddedK: mlxK, paddedV: mlxV,
                         paddedOutput: mlxOutput,
-                        inputRowStride: 0, unpaddedOutputHeadDim: 0)
+                        inputRowStride: 0, unpaddedOutputHeadDim: 0,
+                        scoreScale: scoreScale)
                 } else {
                     encodeMLXSteel(
                         commandBuffer: commandBuffer,
                         sequenceLength: sequenceLength, numHeads: numHeads,
                         pipeline: mlxPipeline,
                         paddedQ: mlxQ, paddedK: mlxK, paddedV: mlxV,
-                        paddedOutput: mlxOutput)
+                        paddedOutput: mlxOutput, scoreScale: scoreScale)
                 }
             }
             run(.unpad) { commandBuffer in
@@ -315,6 +321,8 @@ public final class VisionAttention {
         var heads = UInt32(numHeads)
         encoder.setBytes(&length, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&heads, length: MemoryLayout<UInt32>.size, index: 5)
+        var scale = scoreScale
+        encoder.setBytes(&scale, length: MemoryLayout<Float>.size, index: 6)
         encoder.dispatchThreadgroups(
             MTLSize(width: (sequenceLength + nativeQueryTile - 1) / nativeQueryTile,
                     height: numHeads, depth: 1),
@@ -371,10 +379,12 @@ public final class VisionAttention {
         sequenceLength: Int, numHeads: Int,
         pipeline: MTLComputePipelineState,
         paddedQ: MTLBuffer, paddedK: MTLBuffer, paddedV: MTLBuffer,
-        paddedOutput: MTLBuffer
+        paddedOutput: MTLBuffer,
+        scoreScale: Float
     ) {
         var parameters = MLXAttentionParameters(
-            sequenceLength: sequenceLength, heads: numHeads)
+            sequenceLength: sequenceLength, heads: numHeads,
+            scale: scoreScale)
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(paddedQ, offset: 0, index: 0)
@@ -398,14 +408,16 @@ public final class VisionAttention {
         paddedQ: MTLBuffer, paddedK: MTLBuffer, paddedV: MTLBuffer,
         paddedOutput: MTLBuffer,
         inputRowStride: Int,
-        unpaddedOutputHeadDim: Int
+        unpaddedOutputHeadDim: Int,
+        scoreScale: Float
     ) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         var rows = UInt32(sequenceLength), heads = UInt32(numHeads)
         var layout = VisionAttentionLayout(
             inputRowStride: UInt32(inputRowStride),
             unpaddedOutputHeadDim: UInt32(unpaddedOutputHeadDim),
-            parallelSoftmax: softmaxPhase.rawValue)
+            parallelSoftmax: softmaxPhase.rawValue,
+            scoreScale: scoreScale)
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(paddedQ, offset: 0, index: 0)
         encoder.setBuffer(paddedK, offset: 0, index: 1)
@@ -436,6 +448,7 @@ private struct VisionAttentionLayout {
     var inputRowStride: UInt32
     var unpaddedOutputHeadDim: UInt32
     var parallelSoftmax: UInt32
+    var scoreScale: Float
 }
 
 private struct MLXAttentionParameters {
@@ -466,7 +479,7 @@ private struct MLXAttentionParameters {
     var outputStrideHead: Int64
     var outputStrideSequence: Int64
 
-    init(sequenceLength: Int, heads: Int) {
+    init(sequenceLength: Int, heads: Int, scale: Float) {
         self.heads = Int32(heads)
         self.dimension = 80
         queryLength = Int32(sequenceLength)
@@ -477,6 +490,7 @@ private struct MLXAttentionParameters {
         alignedKeyBlocks = alignedQueryBlocks
         queryRemainder = Int32(sequenceLength % 32)
         keyRemainder = queryRemainder
+        self.scale = scale
         let batchStride = Int64(heads * sequenceLength * 80)
         let headStride = Int64(sequenceLength * 80)
         let sequenceStride: Int64 = 80

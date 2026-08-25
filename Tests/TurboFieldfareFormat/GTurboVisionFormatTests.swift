@@ -156,4 +156,101 @@ private enum VisionFormatFixture {
             try GTurboVisionReceiptCodec.encode(missing)
         }
     }
+
+    @Test func qwenFamilyPinsCompleteArchitectureAndArtifactKind() throws {
+        let manifest = qwenManifest()
+        let data = try GTurboVisionManifestCodec.encode(manifest)
+        let decoded = try GTurboVisionManifestCodec.decode(data)
+        #expect(decoded.resolvedFamily == .qwen36)
+        #expect(decoded.artifactKind == GTurboVisionFormatV1.qwen36ArtifactKind)
+        #expect(decoded.tensors.count == 333)
+
+        var corrupt = decoded.tensors
+        let first = corrupt[0]
+        corrupt[0] = GTurboVisionTensorRegionV1(
+            name: first.name, executionPosition: first.executionPosition,
+            offset: first.offset, size: 2, shape: [1], dtype: .bf16)
+        let badShape = qwenManifest(tensors: corrupt)
+        #expect(throws: GTurboFormatError.self) {
+            try GTurboVisionManifestCodec.encode(badShape)
+        }
+
+        let wrongArtifact = GTurboVisionManifestV1(
+            artifactKind: GTurboVisionFormatV1.artifactKind,
+            family: .qwen36,
+            modelID: manifest.modelID,
+            sourceRevision: manifest.sourceRevision,
+            sourceIndexSha256: manifest.sourceIndexSha256,
+            processorConfigSha256: manifest.processorConfigSha256,
+            compatibleTextSourceSnapshotHash: manifest.compatibleTextSourceSnapshotHash,
+            compatibleTextManifestSha256: manifest.compatibleTextManifestSha256,
+            files: manifest.files, tensors: manifest.tensors)
+        #expect(throws: GTurboFormatError.self) {
+            try GTurboVisionManifestCodec.encode(wrongArtifact)
+        }
+    }
+
+    private func qwenManifest(
+        tensors supplied: [GTurboVisionTensorRegionV1]? = nil
+    ) -> GTurboVisionManifestV1 {
+        var shapes: [(String, [UInt64])] = [
+            ("vision_tower.patch_embed.proj.weight", [1_152, 2, 16, 16, 3]),
+            ("vision_tower.patch_embed.proj.bias", [1_152]),
+            ("vision_tower.pos_embed.weight", [2_304, 1_152]),
+        ]
+        for layer in 0..<27 {
+            let p = "vision_tower.blocks.\(layer)."
+            shapes += [
+                (p + "attn.qkv.weight", [3_456, 1_152]),
+                (p + "attn.qkv.bias", [3_456]),
+                (p + "attn.proj.weight", [1_152, 1_152]),
+                (p + "attn.proj.bias", [1_152]),
+                (p + "mlp.linear_fc1.weight", [4_304, 1_152]),
+                (p + "mlp.linear_fc1.bias", [4_304]),
+                (p + "mlp.linear_fc2.weight", [1_152, 4_304]),
+                (p + "mlp.linear_fc2.bias", [1_152]),
+                (p + "norm1.weight", [1_152]),
+                (p + "norm1.bias", [1_152]),
+                (p + "norm2.weight", [1_152]),
+                (p + "norm2.bias", [1_152]),
+            ]
+        }
+        shapes += [
+            ("vision_tower.merger.norm.weight", [1_152]),
+            ("vision_tower.merger.norm.bias", [1_152]),
+            ("vision_tower.merger.linear_fc1.weight", [4_608, 4_608]),
+            ("vision_tower.merger.linear_fc1.bias", [4_608]),
+            ("vision_tower.merger.linear_fc2.weight", [2_048, 4_608]),
+            ("vision_tower.merger.linear_fc2.bias", [2_048]),
+        ]
+        var offset: UInt64 = 0
+        let tensors = supplied ?? shapes.enumerated().map { index, item in
+            offset = ((offset + GTurboVisionFormatV1.alignmentBytes - 1)
+                / GTurboVisionFormatV1.alignmentBytes)
+                * GTurboVisionFormatV1.alignmentBytes
+            let elements = item.1.reduce(UInt64(1), *)
+            defer { offset += elements * 2 }
+            return GTurboVisionTensorRegionV1(
+                name: item.0, executionPosition: index,
+                offset: offset, size: elements * 2,
+                shape: item.1, dtype: .bf16)
+        }
+        let size = tensors.map { $0.offset + $0.size }.max() ?? 0
+        return GTurboVisionManifestV1(
+            artifactKind: GTurboVisionFormatV1.qwen36ArtifactKind,
+            family: .qwen36,
+            modelID: "mlx-community/Qwen3.6-35B-A3B-4bit",
+            sourceRevision: "fixture-revision",
+            sourceIndexSha256: VisionFormatFixture.zeroSHA,
+            processorConfigSha256: VisionFormatFixture.zeroSHA,
+            compatibleTextSourceSnapshotHash: "qwen-text-snapshot",
+            compatibleTextManifestSha256: VisionFormatFixture.zeroSHA,
+            files: [
+                GTurboVisionFormatV1.weightsFile: .init(
+                    size: size, sha256: VisionFormatFixture.zeroSHA),
+                GTurboVisionFormatV1.processorFile: .init(
+                    size: 2, sha256: VisionFormatFixture.zeroSHA),
+            ],
+            tensors: tensors)
+    }
 }

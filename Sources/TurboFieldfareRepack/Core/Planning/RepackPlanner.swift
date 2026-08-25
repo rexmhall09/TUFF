@@ -122,17 +122,25 @@ enum RepackPlanner {
                 detail: "vision companion requires MLX affine 4-bit group-64 source metadata")
         }
 
+        guard let modelID = SourceFingerprint.modelID(
+            forIndexSha256: meta.indexSha256Hex) else {
+            throw RepackError.sourceFingerprintRejected(
+                path: meta.indexPath, sha256: meta.indexSha256Hex)
+        }
+        let isQwen36 = modelID == SupportedModelSource.qwen36.modelID
         let tensors = shardHeaders.flatMap(\.tensors).filter {
             isMultimodalTensorName($0.name)
         }
-        guard tensors.count == 358 else {
+        let expectedTensorCount = isQwen36 ? 333 : 358
+        let expectedSourceBytes: UInt64 = isQwen36 ? 893_142_496 : 1_140_925_536
+        guard tensors.count == expectedTensorCount else {
             throw RepackError.configurationInvalid(
-                detail: "expected 358 vision tensors, found \(tensors.count)")
+                detail: "expected \(expectedTensorCount) vision tensors for \(modelID), found \(tensors.count)")
         }
         let sourceBytes = tensors.reduce(UInt64(0)) { $0 + $1.sizeBytes }
-        guard sourceBytes == 1_140_925_536 else {
+        guard sourceBytes == expectedSourceBytes else {
             throw RepackError.configurationInvalid(
-                detail: "expected 1140925536 vision bytes, found \(sourceBytes)")
+                detail: "expected \(expectedSourceBytes) vision bytes for \(modelID), found \(sourceBytes)")
         }
 
         let ordered = tensors.sorted { visionExecutionKey($0.name) < visionExecutionKey($1.name) }
@@ -171,11 +179,20 @@ enum RepackPlanner {
     }
 
     private static func visionExecutionKey(_ name: String) -> String {
+        if name.hasPrefix("vision_tower.patch_embed.") {
+            return "0000/\(name)"
+        }
         if name.hasPrefix("vision_tower.patch_embedder.") {
             return "0000/\(name)"
         }
+        if let layer = layerIndex(in: name), name.hasPrefix("vision_tower.blocks.") {
+            return String(format: "1000/%03d/%@", layer, name)
+        }
         if let layer = layerIndex(in: name), name.hasPrefix("vision_tower.encoder.layers.") {
             return String(format: "1000/%03d/%@", layer, name)
+        }
+        if name.hasPrefix("vision_tower.merger.") || name == "vision_tower.pos_embed.weight" {
+            return "3000/\(name)"
         }
         if name == "vision_tower.std_bias" || name == "vision_tower.std_scale" {
             return "2000/\(name)"
@@ -230,8 +247,11 @@ enum RepackPlanner {
     }
 
     private static func layerIndex(in name: String) -> Int? {
-        // matches "...layers.<N>...."
-        guard let r = name.range(of: ".layers.") else { return nil }
+        // matches either language/legacy vision "...layers.<N>..." or the
+        // Qwen vision tower's "...blocks.<N>...".
+        guard let r = name.range(of: ".layers.") ?? name.range(of: ".blocks.") else {
+            return nil
+        }
         let tail = name[r.upperBound...]
         guard let dot = tail.firstIndex(of: ".") else { return nil }
         return Int(tail[tail.startIndex..<dot])

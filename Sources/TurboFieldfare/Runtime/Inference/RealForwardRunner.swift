@@ -166,6 +166,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let gdnState: GDNStateManager?
     private let rope: RoPE?
     private let int8ScalarGate: DequantInt8GEMV?
+    /// Difference between Qwen's logical multimodal RoPE position and the
+    /// physical KV index. It remains zero for text-only and every Gemma run.
+    private var qwenMultimodalRopeDelta: Int32 = 0
 
     // Prefill kernels. These are initialized once per runner so the chunk path
     // cannot accidentally rebuild PSOs inside a per-layer loop.
@@ -274,7 +277,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      slidingWindow: cfg.slidingWindow,
                                      maxPrefillChunkTokens: max(
                                         PrefillRuntimeConfig.maxChunkTokens,
-                                        VisionConfig().maximumPooledTokens))
+                                        min(maxContext, VisionConfig(
+                                            family: cfg.family).maximumPooledTokens)))
 
         let silu = cfg.hiddenActivation == "silu"
         self.embedInt4 = try EmbedLookupInt4(context: context)
@@ -492,6 +496,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     public func reset() {
         kv?.reset()
         gdnState?.reset()
+        qwenMultimodalRopeDelta = 0
         resetTransientState()
     }
 
@@ -694,7 +699,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         // Keying the single-slot cache on each item's exact chunk size made a
         // text-image-text prompt free and reallocate the entire chunk scratch at
         // every boundary, twice per image span, every turn.
-        let pooledTokens = VisionConfig().maximumPooledTokens
+        let pooledTokens = input.imageSpans.map(\.tokenRange.count).max() ?? 0
         let hasImages = work.contains(where: \.isImage)
         let layoutTokens = hasImages
             ? max(config.chunkTokens, pooledTokens)
@@ -705,6 +710,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         let scratch = try ensurePrefillScratch(
             config: config.replacingChunkTokens(layoutTokens),
             chunkTokenLimit: layoutLimit)
+
+        var resolvedPositions = input.positionIDs
+        var resolvedRopeDelta = input.ropeDelta
+        if let positions = resolvedPositions, startPosition > 0,
+           positions.temporal.first == 0,
+           positions.height.first == 0,
+           positions.width.first == 0 {
+            let base = Int32(startPosition) + qwenMultimodalRopeDelta
+            resolvedRopeDelta = qwenMultimodalRopeDelta + positions.ropeDelta
+            resolvedPositions = try positions.offsettingPositions(
+                by: base, ropeDelta: resolvedRopeDelta)
+        }
 
         var completed = 0
         for (index, item) in work.enumerated() {
@@ -725,11 +742,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 config: chunkConfig,
                 writeFinalHead: index == work.count - 1,
                 embeddingOverride: imageFeatures,
-                bidirectionalBlock: isImage
+                bidirectionalBlock: isImage && input.usesBidirectionalImageAttention
                     ? (startPosition + item.range.lowerBound)..<(startPosition + item.range.upperBound)
-                    : nil)
+                    : nil,
+                positionIDs: try resolvedPositions?.slice(item.range))
             completed += item.range.count
             onProgress(completed)
+        }
+        if input.family == .qwen36 {
+            qwenMultimodalRopeDelta = resolvedRopeDelta
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
@@ -763,7 +784,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      config: PrefillRuntimeConfig,
                                      writeFinalHead: Bool,
                                      embeddingOverride: MTLBuffer? = nil,
-                                     bidirectionalBlock: Range<Int>? = nil) async throws {
+                                     bidirectionalBlock: Range<Int>? = nil,
+                                     positionIDs: MultimodalPositionIDs? = nil) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires FP16 KV")
@@ -862,6 +884,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                       length: tokenIDs.count * MemoryLayout<UInt32>.stride,
                                                       options: .storageModeShared) else {
             throw ModelError.residentBufferWrapFailed
+        }
+        let mropeBuffers: (temporal: MTLBuffer, height: MTLBuffer, width: MTLBuffer)?
+        if let positionIDs {
+            guard positionIDs.count == tokens.count,
+                  let temporal = ctx.device.makeBuffer(
+                    bytes: positionIDs.temporal,
+                    length: positionIDs.count * MemoryLayout<Int32>.stride,
+                    options: .storageModeShared),
+                  let height = ctx.device.makeBuffer(
+                    bytes: positionIDs.height,
+                    length: positionIDs.count * MemoryLayout<Int32>.stride,
+                    options: .storageModeShared),
+                  let width = ctx.device.makeBuffer(
+                    bytes: positionIDs.width,
+                    length: positionIDs.count * MemoryLayout<Int32>.stride,
+                    options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            mropeBuffers = (temporal, height, width)
+        } else {
+            mropeBuffers = nil
         }
         let D = cfg.hiddenSize
         let eps: Float = 1e-6
@@ -1198,7 +1241,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
                 if cfg.ropeNeoxSubdim {
                     let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
-                    prefillQKVEpilogue.encodeNeoxSubdimNoVNorm(
+                    if let mropeBuffers {
+                        prefillQKVEpilogue.encodeMRoPENeoxSubdimNoVNorm(
+                            commandBuffer: cb,
+                            q: attnQ,
+                            k: scratch.kStage,
+                            qWeight: views.qNorm!.buffer,
+                            qWeightOffset: Int(views.qNorm!.offset),
+                            kWeight: views.kNorm!.buffer,
+                            kWeightOffset: Int(views.kNorm!.offset),
+                            queryCount: UInt32(t),
+                            headDim: UInt32(headDim),
+                            numQHeads: UInt32(cfg.numHeads),
+                            numKVHeads: UInt32(numKVHeads),
+                            qTokenStrideElements: UInt32(qDim),
+                            kvTokenStrideElements: UInt32(kvDim),
+                            theta: Float(cfg.fullRopeTheta),
+                            rotaryDim: rotaryDim,
+                            eps: eps,
+                            temporalPositions: mropeBuffers.temporal,
+                            heightPositions: mropeBuffers.height,
+                            widthPositions: mropeBuffers.width)
+                    } else {
+                        prefillQKVEpilogue.encodeNeoxSubdimNoVNorm(
                         commandBuffer: cb,
                         q: attnQ,
                         k: scratch.kStage,
@@ -1216,6 +1281,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         theta: Float(cfg.fullRopeTheta),
                         rotaryDim: rotaryDim,
                         eps: eps)
+                    }
                 } else {
                     let rotatedPairs = isFull
                         ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
@@ -2391,9 +2457,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                headDim: UInt32(headDim),
                                numHeads: numKV,
                                eps: eps)
+        let ropePosition = position + Int(qwenMultimodalRopeDelta)
+        precondition(ropePosition >= 0, "Qwen multimodal RoPE position must be nonnegative")
         rope.encodeNeoxSubdim(commandBuffer: cb,
                               data: qScratch,
-                              position: UInt32(position),
+                              position: UInt32(ropePosition),
                               headDim: UInt32(headDim),
                               numHeads: UInt32(cfg.numHeads),
                               rotaryDim: rotaryDim,
@@ -2401,7 +2469,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         rope.encodeNeoxSubdim(commandBuffer: cb,
                               data: kSlot.buffer,
                               dataOffset: kSlot.offset,
-                              position: UInt32(position),
+                              position: UInt32(ropePosition),
                               headDim: UInt32(headDim),
                               numHeads: UInt32(numKV),
                               rotaryDim: rotaryDim,

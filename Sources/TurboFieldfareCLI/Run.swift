@@ -52,6 +52,7 @@ public func run(args: Args,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
+        let modelFamily = try ManifestReader.peekFamily(directoryURL: modelURL)
         let input = try parseInput(args: args)
         var selectedDevice: MTLDevice?
         if input.hasImages {
@@ -110,7 +111,8 @@ public func run(args: Args,
         var effectiveArgs = args
         if args.prefillChunkTokensAuto {
             let promptTokens = try estimatedPromptTokens(
-                input: input, tokenizer: tokenizer, device: device)
+                input: input, tokenizer: tokenizer, device: device,
+                family: modelFamily)
             effectiveArgs.prefillChunkTokens =
                 PrefillRuntimeConfig.autoChunkTokens(promptTokens: promptTokens)
             if !args.quiet {
@@ -144,7 +146,8 @@ public func run(args: Args,
             // The device from the guard above, not a fresh `MetalContext`:
             // building one compiles every shader module, and planning never
             // touches the GPU.
-            let preprocessor = Gemma4ImagePreprocessor(device: device, config: VisionConfig())
+            let preprocessor = Gemma4ImagePreprocessor(
+                device: device, config: VisionConfig(family: modelFamily))
             var projected = 0
             for id in ordered {
                 guard let url = imageURLs[id] else { continue }
@@ -225,7 +228,8 @@ public func run(args: Args,
             let rendered = try MultimodalPromptRenderer.render(
                 messages: multimodalMessages,
                 featuresByID: features,
-                tokenizer: tokenizer)
+                tokenizer: tokenizer,
+                family: model.config.family)
             promptIds = rendered.effectiveTokenIDs
             multimodalInput = rendered
             guard promptIds.count < args.maxContext else {
@@ -329,7 +333,8 @@ func orderedImageIDs(messages: [MultimodalMessage],
 func estimatedPromptTokens(
     input: PromptInput,
     tokenizer: GFTokenizer,
-    device: MTLDevice
+    device: MTLDevice,
+    family: ModelFamily = .gemma4
 ) throws -> Int {
     switch input {
     case .raw(let text):
@@ -347,7 +352,7 @@ func estimatedPromptTokens(
             }
         }
         let preprocessor = Gemma4ImagePreprocessor(
-            device: device, config: VisionConfig())
+            device: device, config: VisionConfig(family: family))
         for url in images.values {
             // Not `try?`: an image that cannot be planned would count as zero
             // soft tokens, so `auto` would size the chunk for the text alone and

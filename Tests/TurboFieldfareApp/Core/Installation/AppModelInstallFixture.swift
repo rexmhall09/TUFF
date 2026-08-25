@@ -5,11 +5,9 @@ import TurboFieldfare
 
 /// A complete, probe-passing `.gturbo` directory.
 ///
-/// The architecture written is always Gemma 4; `stampedAs` only changes the
-/// recorded source snapshot hash, which is what the probe compares against a
-/// descriptor. That is enough to stand in for another catalog model in tests
-/// about install plumbing, and the probe's own family detection is covered
-/// separately by `AppModelInstallationProbeTests`.
+/// The architecture and recorded source snapshot both follow `stampedAs`, so
+/// family-sensitive app paths (including optional vision packs) can exercise a
+/// real Qwen-shaped manifest without any model weights.
 func makeCompleteModelInstall(
     _ tag: String,
     stampedAs descriptor: AppModelInstallDescriptor = .default
@@ -20,7 +18,9 @@ func makeCompleteModelInstall(
     try FileManager.default.createDirectory(at: experts, withIntermediateDirectories: true)
     try Data("{}".utf8).write(to: experts.appendingPathComponent("layout.json"))
 
-    let arch = ArchConfig.gemma4_26B_A4B
+    let arch = descriptor.family == .qwen36
+        ? ArchConfig.qwen36_35B_A3B
+        : ArchConfig.gemma4_26B_A4B
     var files: [String: Any] = [
         "model_weights.bin": ["size": 0, "sha256": String(repeating: "0", count: 64)],
         "packed_experts/layout.json": ["size": 2, "sha256": String(repeating: "0", count: 64)],
@@ -31,12 +31,55 @@ func makeCompleteModelInstall(
             "sha256": String(repeating: "0", count: 64),
         ]
     }
+    var archObject: [String: Any] = [
+        "hiddenSize": arch.hiddenSize,
+        "ffnIntermediate": arch.intermediateSize,
+        "moeIntermediateSize": arch.moeIntermediateSize,
+        "numHeads": arch.numHeads,
+        "numKVHeads": arch.numKVHeads,
+        "numFullKVHeads": arch.numFullKVHeads,
+        "headDim": arch.headDim,
+        "fullHeadDim": arch.fullHeadDim,
+        "vocabSize": arch.vocabSize,
+        "slidingWindow": arch.slidingWindow,
+        "finalLogitSoftcap": arch.finalLogitSoftcap,
+        "ropeTheta": arch.ropeTheta,
+        "fullRopeTheta": arch.fullRopeTheta,
+        "partialRotaryFactor": arch.partialRotaryFactor,
+        "numLayers": arch.numLayers,
+        "numExperts": arch.numExperts,
+        "topKExperts": arch.topKExperts,
+        "tieWordEmbeddings": arch.tieWordEmbeddings,
+        "attentionKEqV": arch.attentionKEqV,
+        "hiddenActivation": arch.hiddenActivation,
+        "fullAttentionLayerMask": arch.fullAttentionLayerMask.map(Int.init),
+    ]
+    if descriptor.family == .qwen36 {
+        let linear = arch.linearAttention
+        archObject.merge([
+            "family": ModelFamily.qwen36.rawValue,
+            "attnOutputGate": arch.attnOutputGate,
+            "attentionScale": arch.attentionScale,
+            "embeddingScaledBySqrtHidden": arch.embeddingScaledBySqrtHidden,
+            "routerScaled": arch.routerScaled,
+            "ffnSandwichNorms": arch.ffnSandwichNorms,
+            "sharedExpertGated": arch.sharedExpertGated,
+            "ropeNeoxSubdim": arch.ropeNeoxSubdim,
+            "linearNumKHeads": linear.numKHeads,
+            "linearNumVHeads": linear.numVHeads,
+            "linearKeyHeadDim": linear.keyHeadDim,
+            "linearValueHeadDim": linear.valueHeadDim,
+            "linearConvKernelSize": linear.convKernelSize,
+        ]) { _, new in new }
+    }
     let manifest: [String: Any] = [
         "magic": "GTURBO",
         "versionMajor": 1,
         "versionMinor": 0,
         "flags": ["streamingPresent": true],
-        "modelID": "test/gemma-4-26b-a4b",
+        "modelID": descriptor.family == .qwen36
+            ? "test/qwen3.6-35b-a3b"
+            : "test/gemma-4-26b-a4b",
         "sourceSnapshotHash": "sha256:" + descriptor.sourceIndexSHA256,
         "quant": [
             "embedding": quantSlot(4),
@@ -45,29 +88,7 @@ func makeCompleteModelInstall(
             "sharedExpert": quantSlot(4),
             "routedExpert": quantSlot(4),
         ],
-        "arch": [
-            "hiddenSize": arch.hiddenSize,
-            "ffnIntermediate": arch.intermediateSize,
-            "moeIntermediateSize": arch.moeIntermediateSize,
-            "numHeads": arch.numHeads,
-            "numKVHeads": arch.numKVHeads,
-            "numFullKVHeads": arch.numFullKVHeads,
-            "headDim": arch.headDim,
-            "fullHeadDim": arch.fullHeadDim,
-            "vocabSize": arch.vocabSize,
-            "slidingWindow": arch.slidingWindow,
-            "finalLogitSoftcap": arch.finalLogitSoftcap,
-            "ropeTheta": arch.ropeTheta,
-            "fullRopeTheta": arch.fullRopeTheta,
-            "partialRotaryFactor": arch.partialRotaryFactor,
-            "numLayers": arch.numLayers,
-            "numExperts": arch.numExperts,
-            "topKExperts": arch.topKExperts,
-            "tieWordEmbeddings": arch.tieWordEmbeddings,
-            "attentionKEqV": arch.attentionKEqV,
-            "hiddenActivation": arch.hiddenActivation,
-            "fullAttentionLayerMask": arch.fullAttentionLayerMask.map(Int.init),
-        ],
+        "arch": archObject,
         "files": files,
         "expertsPerLayer": arch.numExperts,
         "numLayers": arch.numLayers,

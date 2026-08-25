@@ -13,4 +13,17 @@ public enum SourceFingerprint {
         for (id, sha) in knownFingerprints where sha == sha256Hex { return id }
         return nil
     }
+
+    /// Resolves a fingerprint only when it belongs to the requested supported
+    /// repository. Model IDs are manifest identifiers and are not required to
+    /// equal Hugging Face repository IDs (Qwen intentionally uses different
+    /// values for the two).
+    public static func modelID(forIndexSha256 sha256Hex: String,
+                               repoID: String) -> String? {
+        guard let modelID = modelID(forIndexSha256: sha256Hex),
+              SupportedModelSource.all.contains(where: {
+                  $0.repoID == repoID && $0.modelID == modelID
+              }) else { return nil }
+        return modelID
+    }
 }

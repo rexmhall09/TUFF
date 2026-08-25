@@ -54,12 +54,42 @@ public enum MultimodalPromptRenderer {
     public static let beginImageTokenID = Int32(255_999)
     public static let endImageTokenID = Int32(258_882)
 
+    public struct FamilyPolicy: Sendable, Equatable {
+        public let family: ModelFamily
+        public let placeholder: String
+        public let imageTokenID: Int32
+        public let beginImageTokenID: Int32
+        public let endImageTokenID: Int32
+        public let rendererAddsBoundaryTokens: Bool
+
+        public static let gemma4 = FamilyPolicy(
+            family: .gemma4,
+            placeholder: MultimodalPromptRenderer.placeholder,
+            imageTokenID: MultimodalPromptRenderer.imageTokenID,
+            beginImageTokenID: MultimodalPromptRenderer.beginImageTokenID,
+            endImageTokenID: MultimodalPromptRenderer.endImageTokenID,
+            rendererAddsBoundaryTokens: true)
+        public static let qwen36 = FamilyPolicy(
+            family: .qwen36,
+            placeholder: "<|vision_start|><|image_pad|><|vision_end|>",
+            imageTokenID: 248_056,
+            beginImageTokenID: 248_053,
+            endImageTokenID: 248_054,
+            rendererAddsBoundaryTokens: false)
+
+        public static func forFamily(_ family: ModelFamily) -> FamilyPolicy {
+            family == .qwen36 ? .qwen36 : .gemma4
+        }
+    }
+
     public static func render(
         messages: [MultimodalMessage],
         featuresByID: [UUID: VisionFeatures],
         tokenizer: GFTokenizer,
-        tools: [GFTokenizer.FunctionDefinition] = []
+        tools: [GFTokenizer.FunctionDefinition] = [],
+        family: ModelFamily = .gemma4
     ) throws -> MultimodalPrefillInput {
+        let policy = FamilyPolicy.forFamily(family)
         guard !messages.isEmpty else { throw MultimodalPromptRendererError.emptyMessages }
         var orderedImages: [(UUID, VisionFeatures)] = []
         let tokenizerMessages = try messages.map { message in
@@ -70,7 +100,10 @@ public enum MultimodalPromptRenderer {
             for part in message.content {
                 switch part {
                 case .text(let value):
-                    guard !value.contains(placeholder) else {
+                    guard !value.contains(policy.placeholder),
+                          !value.contains("<|image_pad|>"),
+                          !value.contains("<|vision_start|>"),
+                          !value.contains("<|vision_end|>") else {
                         throw MultimodalPromptRendererError.reservedImageMarker
                     }
                     text += value
@@ -78,7 +111,10 @@ public enum MultimodalPromptRenderer {
                     guard let features = featuresByID[id] else {
                         throw MultimodalPromptRendererError.missingImage(id)
                     }
-                    text += placeholder
+                    guard features.family == family else {
+                        throw MultimodalPromptRendererError.placeholderMismatch
+                    }
+                    text += policy.placeholder
                     orderedImages.append((id, features))
                 }
             }
@@ -108,7 +144,7 @@ public enum MultimodalPromptRenderer {
             templateTokens = tokenizer.encode(rendered, addBOS: false)
         }
         let placeholders = templateTokens.indices.filter {
-            templateTokens[$0] == imageTokenID
+            templateTokens[$0] == policy.imageTokenID
         }
         guard placeholders.count == orderedImages.count else {
             throw MultimodalPromptRendererError.placeholderMismatch
@@ -122,27 +158,33 @@ public enum MultimodalPromptRenderer {
         embedding.reserveCapacity(effective.capacity)
         var imageIndex = 0
         for token in templateTokens {
-            guard token == imageTokenID else {
+            guard token == policy.imageTokenID else {
                 effective.append(token)
                 embedding.append(token)
                 continue
             }
             let features = orderedImages[imageIndex].1
-            effective.append(beginImageTokenID)
-            embedding.append(beginImageTokenID)
+            if policy.rendererAddsBoundaryTokens {
+                effective.append(policy.beginImageTokenID)
+                embedding.append(policy.beginImageTokenID)
+            }
             let lower = effective.count
-            effective.append(contentsOf: repeatElement(imageTokenID, count: features.tokenCount))
+            effective.append(contentsOf: repeatElement(
+                policy.imageTokenID, count: features.tokenCount))
             embedding.append(contentsOf: repeatElement(Int32(0), count: features.tokenCount))
             spans.append(MultimodalImageSpan(
                 tokenRange: lower..<effective.count,
                 features: features))
-            effective.append(endImageTokenID)
-            embedding.append(endImageTokenID)
+            if policy.rendererAddsBoundaryTokens {
+                effective.append(policy.endImageTokenID)
+                embedding.append(policy.endImageTokenID)
+            }
             imageIndex += 1
         }
         return try MultimodalPrefillInput(
             effectiveTokenIDs: effective,
             embeddingTokenIDs: embedding,
-            imageSpans: spans)
+            imageSpans: spans,
+            family: family)
     }
 }

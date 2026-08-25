@@ -34,6 +34,27 @@ import Testing
         #expect(mapped.mappedLength == 2)
     }
 
+    @Test func receiptAtTargetAllowsARootAliasWithoutRebinding() throws {
+        let fixture = try makeFixture()
+        let alias = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vision-pack-root-\(UUID().uuidString).vision.gturbo")
+        defer {
+            try? FileManager.default.removeItem(at: alias)
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+        try FileManager.default.createSymbolicLink(
+            at: alias,
+            withDestinationURL: fixture.root
+        )
+
+        let store = try VisionWeightStore.open(
+            directoryURL: alias,
+            compatibleTextSourceSnapshotHash: "text-snapshot",
+            compatibleTextManifestSha256: zeroSHA
+        )
+        #expect(store.directoryURL.standardizedFileURL == alias.standardizedFileURL)
+    }
+
     @Test func rejectsWrongTextBindingReceiptPathAndUnexpectedEntry() throws {
         let incompatible = try makeFixture()
         defer { try? FileManager.default.removeItem(at: incompatible.root) }

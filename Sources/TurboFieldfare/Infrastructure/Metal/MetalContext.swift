@@ -105,10 +105,23 @@ public final class MetalContext: @unchecked Sendable {
         "vision_resize": "Metal/Vision",
     ]
 
+    private static let shaderBundle: Bundle = {
+        if let resources = Bundle.main.resourceURL,
+           let packaged = Bundle(
+               url: resources.appendingPathComponent(
+                   "TurboFieldfare_TurboFieldfare.bundle",
+                   isDirectory: true
+               )
+           ) {
+            return packaged
+        }
+        return Bundle.module
+    }()
+
     private static func shaderURL(module: String) -> URL? {
         guard let subdirectory = shaderSubdirectories[module] else { return nil }
-        return Bundle.module.url(forResource: module, withExtension: "metal",
-                                 subdirectory: subdirectory)
+        return shaderBundle.url(forResource: module, withExtension: "metal",
+                                subdirectory: subdirectory)
     }
 
     private static func compileShaderLibrary(device: MTLDevice) throws -> MTLLibrary {

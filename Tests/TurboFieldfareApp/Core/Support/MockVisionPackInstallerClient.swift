@@ -15,8 +15,12 @@ final class MockVisionPackInstallerClient: AppVisionPackInstallerClient, Sendabl
     let activationProgress: [Double]
     private let task = Mutex<Task<Void, Never>?>(nil)
     private let activations = Mutex(0)
+    private let installTargets = Mutex<[URL]>([])
 
     var activationCount: Int { activations.withLock { $0 } }
+    var installedTextModelDirectories: [URL] {
+        installTargets.withLock { $0 }
+    }
 
     init(
         descriptor: AppModelInstallDescriptor = .visionCompanion,
@@ -48,7 +52,10 @@ final class MockVisionPackInstallerClient: AppVisionPackInstallerClient, Sendabl
     func install(
         textModelDirectory: URL
     ) -> AsyncThrowingStream<AppModelInstallEvent, Error> {
-        AsyncThrowingStream { continuation in
+        installTargets.withLock {
+            $0.append(textModelDirectory.standardizedFileURL)
+        }
+        return AsyncThrowingStream { continuation in
             let task = Task { [events, holdOpen] in
                 do {
                     for event in events {

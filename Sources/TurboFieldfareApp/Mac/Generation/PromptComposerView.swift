@@ -108,11 +108,59 @@ struct PromptComposerView: View {
                     || model.imageAttachments.count
                         >= model.maximumImageAttachments)
                 .help("Add images")
+            } else if model.isModelInstalled && model.isVisionRuntimeSupported {
+                imageSupportAction
             }
             promptTips
             Spacer()
             clearAction
             GenerateControl(model: model)
+        }
+    }
+
+    @ViewBuilder
+    private var imageSupportAction: some View {
+        if !model.selectedModelOwnsVisionInstallState {
+            EmptyView()
+        } else if model.isInstallingVisionPack {
+            Button(action: model.cancelVisionInstall) {
+                Label("Cancel image-support download", systemImage: "xmark.circle")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!model.canCancelVisionInstall)
+            .help(model.visionInstallPhaseLabel)
+        } else if case .readyToActivate = model.visionInstallState {
+            if model.loadState.isReady {
+                Button(action: model.unloadModel) {
+                    Label("Unload to activate image support", systemImage: "arrow.down.circle")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!model.canUnloadModel)
+                .help("Image support downloaded separately. Unload the text model once to activate it.")
+            } else {
+                Button(action: model.activateVisionPack) {
+                    Label("Activate image support", systemImage: "checkmark.circle")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!model.canActivateVisionPack)
+                .help("Activate the downloaded image-support pack")
+            }
+        } else {
+            Button(action: model.installVisionPack) {
+                Label("Download \(model.visionInstallDescriptor.displayName)",
+                      systemImage: "photo.badge.plus")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!model.canInstallVisionPack)
+            .help("Download optional \(model.visionInstallDescriptor.displayName) separately; the text model is not reinstalled")
         }
     }
 

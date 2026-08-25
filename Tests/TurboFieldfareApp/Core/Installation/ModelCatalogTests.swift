@@ -138,23 +138,120 @@ import TurboFieldfareRepackCore
     }
 
     @MainActor
-    @Test func selectingQwenKeepsGemmaVisionUnavailable() {
-        let model = makeModel(
-            selectedDirectory: temporaryInstallPath("vision-gemma"),
-            selectedInstaller: MockModelInstallerClient(descriptor: .default),
-            otherDirectory: temporaryInstallPath("vision-qwen"),
-            otherInstaller: MockModelInstallerClient(descriptor: .qwen36))
-        let qwen = try! #require(model.installs.first { $0.descriptor == .qwen36 })
+    @Test func installedQwenOffersItsOwnOptionalVisionPack() throws {
+        let directory = try makeCompleteModelInstall(
+            "vision-qwen", stampedAs: .qwen36)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = AppModel(
+            modelDirectory: directory,
+            client: MockLifecycleInferenceClient(),
+            installer: MockModelInstallerClient(descriptor: .qwen36),
+            visionInstaller: MockVisionPackInstallerClient(
+                descriptor: .qwen36VisionCompanion))
 
+        #expect(model.selectedDescriptor == .qwen36)
+        #expect(model.visionInstallDescriptor == .qwen36VisionCompanion)
+        #expect(!model.isImageInputAvailable)
+        #expect(model.canInstallVisionPack)
+        #expect(model.visionInstallReadiness.requirement?.canInstall == true)
+
+        // Preparing the optional companion is a separate download. It may run
+        // while the text model stays loaded; only activation needs an unload.
+        model.loadState = .ready(modelDirectory: directory, loadSeconds: 0)
+        #expect(model.canInstallVisionPack)
+        model.visionInstallState = .readyToActivate(directory)
+        #expect(!model.canActivateVisionPack)
+        model.loadState = .notLoaded
+        #expect(model.canActivateVisionPack)
+    }
+
+    @MainActor
+    @Test func catalogOffersSeparateVisionDownloadsWithoutSwitchingModels() async throws {
+        let gemmaDirectory = try makeCompleteModelInstall(
+            "separate-vision-gemma", stampedAs: .default)
+        let qwenDirectory = try makeCompleteModelInstall(
+            "separate-vision-qwen", stampedAs: .qwen36)
+        defer {
+            try? FileManager.default.removeItem(at: gemmaDirectory)
+            try? FileManager.default.removeItem(at: qwenDirectory)
+        }
+        let qwenInstall = ModelInstallCoordinator(
+            descriptor: .qwen36,
+            directoryURL: qwenDirectory,
+            client: MockModelInstallerClient(descriptor: .qwen36))
+        let visionInstaller = MockVisionPackInstallerClient(holdOpen: true)
+        let model = AppModel(
+            modelDirectory: gemmaDirectory,
+            client: MockLifecycleInferenceClient(),
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [qwenInstall],
+            visionInstaller: visionInstaller)
+        let gemma = try #require(model.installs.first { $0.descriptor == .default })
+        let qwen = try #require(model.installs.first { $0.descriptor == .qwen36 })
+
+        #expect(model.visionDownloadButtonLabel(for: gemma)
+            == "Download Gemma 4 Image Support")
+        #expect(model.visionDownloadButtonLabel(for: qwen)
+            == "Download Qwen3.6 Image Support")
+        #expect(model.canInstallVisionPack(for: gemma))
+        #expect(model.canInstallVisionPack(for: qwen))
+
+        model.installVisionPack(for: qwen)
+        await Task.yield()
+
+        #expect(model.selectedModelID == gemma.id)
+        #expect(model.visionInstallTargetModelID == qwen.id)
+        #expect(!model.selectedModelOwnsVisionInstallState)
+        #expect(visionInstaller.installedTextModelDirectories == [
+            qwenDirectory.standardizedFileURL,
+        ])
+        #expect(!model.canSelectModel(qwen))
+
+        model.cancelVisionInstall()
+        try await waitUntil { !model.isInstallingVisionPack }
+    }
+
+    @MainActor
+    @Test func preparedVisionDownloadFollowsOnlyItsMatchingModel() async throws {
+        let gemmaDirectory = try makeCompleteModelInstall(
+            "prepared-vision-gemma", stampedAs: .default)
+        let qwenDirectory = try makeCompleteModelInstall(
+            "prepared-vision-qwen", stampedAs: .qwen36)
+        defer {
+            try? FileManager.default.removeItem(at: gemmaDirectory)
+            try? FileManager.default.removeItem(at: qwenDirectory)
+        }
+        let qwenInstall = ModelInstallCoordinator(
+            descriptor: .qwen36,
+            directoryURL: qwenDirectory,
+            client: MockModelInstallerClient(descriptor: .qwen36))
+        let preparedDirectory = qwenDirectory.deletingPathExtension()
+            .appendingPathExtension("vision.gturbo")
+        let model = AppModel(
+            modelDirectory: gemmaDirectory,
+            client: MockLifecycleInferenceClient(),
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [qwenInstall],
+            visionInstaller: MockVisionPackInstallerClient(events: [
+                .readyToActivate(preparedDirectory),
+            ]))
+        let qwen = try #require(model.installs.first { $0.descriptor == .qwen36 })
+
+        model.installVisionPack(for: qwen)
+        try await waitUntil {
+            if case .readyToActivate = model.visionInstallState { return true }
+            return false
+        }
+
+        #expect(model.selectedDescriptor == .default)
+        #expect(model.canSelectModel(qwen))
         model.selectModel(qwen)
 
-        #expect(!model.isImageInputAvailable)
-        #expect(!model.canInstallVisionPack)
-        if case .failed(let reason) = model.visionInstallReadiness {
-            #expect(reason.contains("only for Gemma 4"))
-        } else {
-            Issue.record("expected Qwen vision readiness to be unavailable")
-        }
+        #expect(model.selectedDescriptor == .qwen36)
+        #expect(model.modelPathText == qwenDirectory.standardizedFileURL.path)
+        #expect(model.visionInstallTargetModelID == qwen.id)
+        #expect(model.selectedModelOwnsVisionInstallState)
+        #expect(model.canActivateVisionPack)
     }
 
     @MainActor

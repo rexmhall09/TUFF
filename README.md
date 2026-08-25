@@ -68,9 +68,9 @@ of tracking a fork rather than hard-forking.
 
 ## Try it
 
-Download `TUFF-v1.0.0-macos-arm64.zip` from the
-[v1.0.0 release](https://github.com/rexmhall09/TUFF/releases/tag/v1.0.0),
-unzip it, and move `TUFF.app` to Applications. This first release's executables
+Download `TUFF-v1.2.0-macos-arm64.zip` from the
+[v1.2.0 release](https://github.com/rexmhall09/TUFF/releases/tag/v1.2.0),
+unzip it, and move `TUFF.app` to Applications. This release's executables
 are ad-hoc signed, but the app is not Apple-notarized. On first launch,
 Control-click the app and choose **Open**; if macOS still blocks it, use
 **Open Anyway** in Privacy & Security settings.
@@ -87,7 +87,7 @@ swift build -c release
 Maintainers can reproduce the release archive and checksum with:
 
 ```bash
-Scripts/package_app.sh 1.0.0
+Scripts/package_app.sh 1.2.0
 ```
 
 On the first run, Swift Package Manager downloads and builds the Swift packages
@@ -106,7 +106,7 @@ Qwen 3.6). Once it is ready, choose **Load Model**, type your prompt, and press
 | Models          | Gemma 4 26B-A4B IT (26B total, ~3.88B active per token) and Qwen 3.6 35B-A3B (35B total, ~3B active per token)           |
 | Weights         | MLX affine 4-bit, group 64; 8-bit router; 4-bit shared and routed experts                                                |
 | Memory          | ~2 GB of weights and 4K KV cache for Gemma 4; ~1.45 GB for Qwen 3.6                                                      |
-| Storage         | About 14.3 GB for Gemma 4 text plus ~1.1 GB for its optional image pack; about 19.6 GB for Qwen 3.6                      |
+| Storage         | About 14.3 GB for Gemma 4 text plus ~1.1 GB for images; about 19.6 GB for Qwen 3.6 text plus ~0.9 GB for images          |
 | Hardware        | Apple Silicon Mac; 8 GB of RAM                                                                                            |
 | Platform        | macOS 15+, Metal 3.2+, Swift 6.2                                                                                          |
 | M2 measured decode | [5.1-6.3 tok/s](docs/BENCHMARKS.md#m2-measured-decode) on an 8 GB M2 MacBook Air |
@@ -167,12 +167,19 @@ and execute. Audio and video are not supported.
 
 ### Images
 
-Images are supported through a vision tower, which installs as a companion
-pack beside a Gemma 4 text model. Install it once and the app, CLI, and server
-accept images with Gemma 4. Qwen 3.6 remains text-only. Without the pack they
-tell you image support is unavailable, and the text runtime is untouched. The
+Still images are supported through a family-specific vision tower, installed
+as a companion pack beside either a Gemma 4 or Qwen 3.6 text model. Install it
+once and the app, CLI, and server accept images with that model. Without the
+matching pack they tell you image support is unavailable, and the text runtime
+is untouched. A missing, corrupt, incompatible, or wrong-family pack fails
+closed; an image is never silently discarded. The
 image tower requires an M2 or newer Apple Silicon Mac; text-only inference
 remains available on M1.
+
+The Mac app exposes two separate optional downloads: **Download Gemma 4 Image
+Support** and **Download Qwen3.6 Image Support**. Each control installs only the
+pack for that row's text model. Neither pack is included in, or required by,
+the normal text-model download.
 
 [System design](docs/SYSTEM_DESIGN.md#images) covers how the tower runs and
 what it costs on an 8 GB machine.
@@ -279,16 +286,31 @@ swift run -c release TUFFRepack \
 The companion pack installs beside the text model:
 
 ```bash
-swift run -c release TurboFieldfareRepack \
+swift run -c release TUFFRepack \
   --vision-output scratch/gemma4.vision.gturbo \
   --text-model scratch/gemma4.gturbo
 ```
 
-The pack adds about 1.1 GB. Verify it with `--verify-vision-install`, remove an
+This is an optional, separate download. It does not reinstall or replace the
+text model, and a normal text-only install continues to work without it.
+
+For Qwen, point the same command at the Qwen text model; the source family is
+read from its manifest:
+
+```bash
+swift run -c release TUFFRepack \
+  --vision-output scratch/qwen36.vision.gturbo \
+  --text-model scratch/qwen36.gturbo
+```
+
+The Gemma pack adds about 1.1 GB and the Qwen pack about 0.9 GB. Verify either
+with `--verify-vision-install`, remove an
 installed one with `--remove-vision-install`, and drop a cancelled download with
 `--discard-partial --vision-output <dir>`. A cancelled transfer can also be
 continued with `--resume`. The Mac app installs the same pack from its
-**Image Support** section.
+photo control beside the prompt or from **Image Support** in Settings. The
+download may be prepared while the text model remains loaded; unload the model
+once only when the finished pack is ready to activate.
 
 #### Send an image
 
@@ -368,6 +390,14 @@ Run the public test suite serially:
 Scripts/test.sh
 ```
 
+With both local Qwen packs installed, maintainers can opt into the real still-
+image tower check without making ordinary tests download or map a model:
+
+```bash
+TURBO_FIELDFARE_VALIDATE_QWEN_VISION=1 Scripts/test.sh \
+  --filter optInRealQwenStillImageTowerProducesFiniteLanguageFeatures
+```
+
 Before starting a model run, close memory-heavy apps and check
 `memory_pressure -Q`. If it reports little free memory, postpone the run. Run
 only one TUFF app, decode service, CLI, server, test, or other
@@ -418,13 +448,12 @@ TUFF currently includes:
   OpenAI-compatible server, and native SwiftUI/AppKit Mac app with a one-shot
   local decode service
 - Optional image input from a separately installed companion pack: the vision
-  tower runs on bounded scratch, image rows attend in both directions inside
-  the sliding-window layers, and routed experts are released while the tower
-  runs
+  tower runs on bounded scratch, family-specific prompt and position behavior
+  is preserved, and routed experts are released while the tower runs
 
-Current scope is text input from the pinned Gemma 4 26B-A4B instruction
-checkpoint on Apple Silicon Macs with at least 8 GB of RAM, plus image input
-on M2 or newer Macs. Audio and video are out of scope.
+Current scope is text and still-image input for the pinned Gemma 4 26B-A4B and
+Qwen 3.6 35B-A3B instruction checkpoints on Apple Silicon Macs with at least
+8 GB of RAM. Image input requires M2 or newer. Audio and video are out of scope.
 
 ### Qwen 3.6 35B-A3B
 
@@ -434,8 +463,8 @@ TUFF also runs
 gated-DeltaNet linear-attention layers and 10 gated full-attention layers,
 with 256 routed experts (top-8) plus a sigmoid-gated shared expert. Linear
 layers keep a fixed ~2 MiB recurrent state per layer instead of per-token KV,
-so only the 10 full-attention layers grow with context. The text-only install
-is about 19.5 GB; the vision tower is omitted.
+so only the 10 full-attention layers grow with context. The text install is
+about 19.5 GB; its optional Qwen vision companion is about 0.9 GB.
 
 ```bash
 swift run -c release TUFFRepack \

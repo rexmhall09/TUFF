@@ -90,6 +90,45 @@ final class PrefillQKVEpilogue {
                               theta: theta)
     }
 
+    func encodeMRoPENeoxSubdimNoVNorm(
+        commandBuffer: MTLCommandBuffer,
+        q: MTLBuffer, k: MTLBuffer,
+        qWeight: MTLBuffer, qWeightOffset: Int,
+        kWeight: MTLBuffer, kWeightOffset: Int,
+        queryCount: UInt32, headDim: UInt32,
+        numQHeads: UInt32, numKVHeads: UInt32,
+        qTokenStrideElements: UInt32, kvTokenStrideElements: UInt32,
+        theta: Float, rotaryDim: UInt32, eps: Float,
+        temporalPositions: MTLBuffer,
+        heightPositions: MTLBuffer,
+        widthPositions: MTLBuffer
+    ) {
+        perHeadNorm.encodeBF16W(
+            commandBuffer: commandBuffer, x: q,
+            weight: qWeight, weightOffset: qWeightOffset,
+            out: q, queryCount: queryCount, headDim: headDim,
+            numHeads: numQHeads, tokenStrideElements: qTokenStrideElements,
+            eps: eps)
+        perHeadNorm.encodeBF16W(
+            commandBuffer: commandBuffer, x: k,
+            weight: kWeight, weightOffset: kWeightOffset,
+            out: k, queryCount: queryCount, headDim: headDim,
+            numHeads: numKVHeads, tokenStrideElements: kvTokenStrideElements,
+            eps: eps)
+        for (data, heads, stride) in [
+            (q, numQHeads, qTokenStrideElements),
+            (k, numKVHeads, kvTokenStrideElements),
+        ] {
+            rope.encodeMRoPENeoxSubdim(
+                commandBuffer: commandBuffer, data: data,
+                queryCount: queryCount, headDim: headDim, numHeads: heads,
+                rotaryDim: rotaryDim, tokenStrideElements: stride, theta: theta,
+                temporalPositions: temporalPositions,
+                heightPositions: heightPositions,
+                widthPositions: widthPositions)
+        }
+    }
+
     func encode(commandBuffer: MTLCommandBuffer,
                        q: MTLBuffer,
                        qOffset: Int = 0,

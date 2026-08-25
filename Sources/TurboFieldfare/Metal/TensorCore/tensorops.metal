@@ -424,6 +424,7 @@ struct VisionAttentionLayout {
     /// reduction and is therefore not bit-identical; 2 spreads max and exp but
     /// keeps the tile sum sequential per query, which is bit-identical to 0.
     uint parallelSoftmax;
+    float scoreScale;
 };
 
 /// `PVOutputDim` is how many head lanes the PV matmul produces. Threadgroup
@@ -520,7 +521,7 @@ inline void mpp_vision_attention_bf16_impl(
             const auto position = scores.get_multidimensional_index(element);
             scoreTile[
                 uint(position[1]) * uint(kVisionAttentionKeys)
-                + uint(position[0])] = scores[element];
+                + uint(position[0])] = scores[element] * layout.scoreScale;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 

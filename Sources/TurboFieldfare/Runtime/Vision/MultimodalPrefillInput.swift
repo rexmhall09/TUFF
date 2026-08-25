@@ -6,6 +6,90 @@ public enum MultimodalPrefillInputError: Error, Equatable {
     case featureShapeMismatch
 }
 
+/// Three-axis positions consumed by Qwen's multimodal RoPE. Text tokens use
+/// the same value on all axes; image tokens advance height and width inside the
+/// merged patch grid. `ropeDelta` is retained for later generated text.
+public struct MultimodalPositionIDs: Sendable, Equatable {
+    public let temporal: [Int32]
+    public let height: [Int32]
+    public let width: [Int32]
+    public let ropeDelta: Int32
+
+    public var count: Int { temporal.count }
+
+    public init(temporal: [Int32], height: [Int32], width: [Int32],
+                ropeDelta: Int32) throws {
+        guard temporal.count == height.count, height.count == width.count else {
+            throw MultimodalPrefillInputError.tokenCountMismatch
+        }
+        self.temporal = temporal
+        self.height = height
+        self.width = width
+        self.ropeDelta = ropeDelta
+    }
+
+    func slice(_ range: Range<Int>) throws -> MultimodalPositionIDs {
+        try MultimodalPositionIDs(
+            temporal: Array(temporal[range]),
+            height: Array(height[range]),
+            width: Array(width[range]),
+            ropeDelta: ropeDelta)
+    }
+
+    func offsettingPositions(by offset: Int32, ropeDelta newDelta: Int32)
+        throws -> MultimodalPositionIDs {
+        try MultimodalPositionIDs(
+            temporal: temporal.map { $0 + offset },
+            height: height.map { $0 + offset },
+            width: width.map { $0 + offset },
+            ropeDelta: newDelta)
+    }
+
+    public static func qwen36(
+        tokenCount: Int,
+        imageSpans: [MultimodalImageSpan]
+    ) throws -> MultimodalPositionIDs {
+        var temporal = [Int32](repeating: 0, count: tokenCount)
+        var height = temporal
+        var width = temporal
+        var token = 0
+        var position: Int32 = 0
+
+        func writeText(until end: Int) {
+            while token < end {
+                temporal[token] = position
+                height[token] = position
+                width[token] = position
+                token += 1
+                position += 1
+            }
+        }
+
+        for span in imageSpans {
+            writeText(until: span.tokenRange.lowerBound)
+            let gridHeight = span.features.patchGridHeight / 2
+            let gridWidth = span.features.patchGridWidth / 2
+            guard gridHeight > 0, gridWidth > 0,
+                  gridHeight * gridWidth == span.tokenRange.count else {
+                throw MultimodalPrefillInputError.featureShapeMismatch
+            }
+            for y in 0..<gridHeight {
+                for x in 0..<gridWidth {
+                    temporal[token] = position
+                    height[token] = position + Int32(y)
+                    width[token] = position + Int32(x)
+                    token += 1
+                }
+            }
+            position += Int32(max(gridHeight, gridWidth))
+        }
+        writeText(until: tokenCount)
+        return try MultimodalPositionIDs(
+            temporal: temporal, height: height, width: width,
+            ropeDelta: position - Int32(tokenCount))
+    }
+}
+
 public struct MultimodalImageSpan: Sendable {
     public let tokenRange: Range<Int>
     public let features: VisionFeatures
@@ -20,6 +104,10 @@ public struct MultimodalPrefillInput: Sendable {
     public let effectiveTokenIDs: [Int32]
     public let embeddingTokenIDs: [Int32]
     public let imageSpans: [MultimodalImageSpan]
+    public let family: ModelFamily
+    public let positionIDs: MultimodalPositionIDs?
+    public var usesBidirectionalImageAttention: Bool { family == .gemma4 }
+    public var ropeDelta: Int32 { positionIDs?.ropeDelta ?? 0 }
 
     public var imageTokenRange: Range<Int> { imageSpans[0].tokenRange }
     public var imageFeatures: VisionFeatures { imageSpans[0].features }
@@ -39,7 +127,8 @@ public struct MultimodalPrefillInput: Sendable {
                     tokenRange: ($0.tokenRange.lowerBound + shift)
                         ..< ($0.tokenRange.upperBound + shift),
                     features: $0.features)
-            })
+            },
+            family: family)
     }
 
     /// The tail of a rendered prompt, for resuming on a cached KV prefix. Spans
@@ -70,24 +159,31 @@ public struct MultimodalPrefillInput: Sendable {
                     tokenRange: ($0.tokenRange.lowerBound - cachedTokens)
                         ..< ($0.tokenRange.upperBound - cachedTokens),
                     features: $0.features)
-            })
+            },
+            family: family,
+            positionIDs: try positionIDs?.slice(
+                cachedTokens..<effectiveTokenIDs.count))
     }
 
     public init(effectiveTokenIDs: [Int32],
                 embeddingTokenIDs: [Int32],
                 imageTokenRange: Range<Int>,
-                imageFeatures: VisionFeatures) throws {
+                imageFeatures: VisionFeatures,
+                family: ModelFamily = .gemma4) throws {
         try self.init(
             effectiveTokenIDs: effectiveTokenIDs,
             embeddingTokenIDs: embeddingTokenIDs,
             imageSpans: [MultimodalImageSpan(
                 tokenRange: imageTokenRange,
-                features: imageFeatures)])
+                features: imageFeatures)],
+            family: family)
     }
 
     public init(effectiveTokenIDs: [Int32],
                 embeddingTokenIDs: [Int32],
-                imageSpans: [MultimodalImageSpan]) throws {
+                imageSpans: [MultimodalImageSpan],
+                family: ModelFamily = .gemma4,
+                positionIDs explicitPositionIDs: MultimodalPositionIDs? = nil) throws {
         guard effectiveTokenIDs.count == embeddingTokenIDs.count else {
             throw MultimodalPrefillInputError.tokenCountMismatch
         }
@@ -102,14 +198,15 @@ public struct MultimodalPrefillInput: Sendable {
             guard !range.isEmpty,
                   range.lowerBound >= previousUpperBound,
                   range.upperBound <= embeddingTokenIDs.count,
-                  range.count <= VisionConfig().maximumPooledTokens else {
+                  range.count <= VisionConfig(family: family).maximumPooledTokens,
+                  span.features.family == family else {
                 throw MultimodalPrefillInputError.invalidImageTokenRange
             }
             let featureBytes = range.count
-                * VisionConfig().textHiddenSize
+                * VisionConfig(family: family).textHiddenSize
                 * MemoryLayout<Float16>.stride
             guard span.features.tokenCount == range.count,
-                  span.features.hiddenSize == VisionConfig().textHiddenSize,
+                  span.features.hiddenSize == VisionConfig(family: family).textHiddenSize,
                   span.features.buffer.length >= featureBytes else {
                 throw MultimodalPrefillInputError.featureShapeMismatch
             }
@@ -118,5 +215,14 @@ public struct MultimodalPrefillInput: Sendable {
         self.effectiveTokenIDs = effectiveTokenIDs
         self.embeddingTokenIDs = embeddingTokenIDs
         self.imageSpans = imageSpans
+        self.family = family
+        let positions = try explicitPositionIDs ?? (family == .qwen36
+            ? MultimodalPositionIDs.qwen36(
+                tokenCount: effectiveTokenIDs.count, imageSpans: imageSpans)
+            : nil)
+        guard positions?.count == nil || positions?.count == effectiveTokenIDs.count else {
+            throw MultimodalPrefillInputError.tokenCountMismatch
+        }
+        self.positionIDs = positions
     }
 }
