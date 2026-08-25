@@ -61,3 +61,71 @@ kernel void mxfp4_gemv_simd(
         output[row] = half(sum + (has_bias != 0u ? float(bias[row]) : 0.0f));
     }
 }
+
+// GPT-OSS leaves embeddings, attention projections, routers, and the output
+// head in BF16. One SIMD group reduces one output row while eight groups share
+// a threadgroup. Activations remain FP16, matching the rest of the runtime.
+static inline float bf16_gemv_row(
+    device const bfloat* weights,
+    device const half* input,
+    uint row,
+    uint columns,
+    uint lane
+) {
+    device const bfloat* rowWeights = weights + row * columns;
+    float sum = 0.0f;
+    for (uint column = lane; column < columns; column += 32u) {
+        sum = fma(float(rowWeights[column]), float(input[column]), sum);
+    }
+    return simd_sum(sum);
+}
+
+kernel void bf16_gemv_half_simd(
+    device const bfloat* weights [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    device const bfloat* bias [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& columns [[buffer(5)]],
+    constant uint& has_bias [[buffer(6)]],
+    uint threadgroupIndex [[threadgroup_position_in_grid]],
+    uint simdgroupIndex [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rowsPerThreadgroup = 8;
+    const uint row = threadgroupIndex * rowsPerThreadgroup + simdgroupIndex;
+    if (row >= rows) return;
+    const float sum = bf16_gemv_row(weights, input, row, columns, lane);
+    if (lane == 0u) {
+        output[row] = half(sum + (has_bias != 0u ? float(bias[row]) : 0.0f));
+    }
+}
+
+kernel void bf16_gemv_float_simd(
+    device const bfloat* weights [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    device const bfloat* bias [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& columns [[buffer(5)]],
+    constant uint& has_bias [[buffer(6)]],
+    uint threadgroupIndex [[threadgroup_position_in_grid]],
+    uint simdgroupIndex [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rowsPerThreadgroup = 8;
+    const uint row = threadgroupIndex * rowsPerThreadgroup + simdgroupIndex;
+    if (row >= rows) return;
+    const float sum = bf16_gemv_row(weights, input, row, columns, lane);
+    if (lane == 0u) {
+        output[row] = sum + (has_bias != 0u ? float(bias[row]) : 0.0f);
+    }
+}
+
+kernel void bf16_embedding_lookup_half(
+    device const bfloat* table [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& token [[buffer(2)]],
+    constant uint& hidden_size [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]) {
+    if (gid >= hidden_size) return;
+    output[gid] = half(table[token * hidden_size + gid]);
+}

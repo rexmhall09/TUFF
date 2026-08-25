@@ -70,6 +70,13 @@ extension GenerationConfig {
 
 }
 
+protocol GreedyHeadReporting: Sendable {
+    var usesFusedGreedyHead: Bool { get }
+    var lastGreedyToken: UInt32 { get }
+}
+
+extension RealForwardRunner: GreedyHeadReporting {}
+
 /// Raw-completion prefill + decode loop shared by the CLI and the Mac app.
 /// Consumes pre-encoded `promptIds` (BOS + verbatim encode upstream — no chat
 /// template). Stop handling, detokenizer flush ordering, and history append
@@ -94,7 +101,7 @@ public func runRawCompletion(producer: any LogitProducer,
     guard !promptIds.isEmpty else {
         throw GeneratorError.emptyPrompt
     }
-    let fusedRunner = producer as? RealForwardRunner
+    let fusedRunner = producer as? any GreedyHeadReporting
     let fusedGreedy = fusedRunner?.usesFusedGreedyHead == true
     guard !fusedGreedy || config.isPureGreedy else {
         throw PrefillError.unsupportedPrefillSeed(

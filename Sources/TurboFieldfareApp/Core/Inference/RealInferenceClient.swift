@@ -159,7 +159,7 @@ actor RealInferenceSession {
     private var ctx: MetalContext?
     private var tokenizer: GFTokenizer?
     private var tokenizerDirectoryCache = TokenizerDirectoryCache()
-    private var runner: RealForwardRunner?
+    private var runner: ModelForwardRunner?
     private var scratch: RawCompletionScratch?
     private var model: Model?
 
@@ -227,7 +227,7 @@ actor RealInferenceSession {
             try Task.checkCancellation()
 
             onState(.loading(.preparingRunner))
-            let loadedRunner = try RealForwardRunner(
+            let loadedRunner = try ModelForwardRunner(
                 model: loadedModel,
                 context: context,
                 maxContext: key.maxContext,
@@ -718,7 +718,7 @@ private struct RunnerCounterSnapshot {
     let rdadviseFailures: UInt64
     let rdadviseSkipped: UInt64
 
-    init(_ runner: RealForwardRunner) {
+    init(_ runner: ModelForwardRunner) {
         cb1 = runner.totalCb1Nanos
         io = runner.totalIoNanos
         cb2 = runner.totalCb2Nanos

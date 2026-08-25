@@ -192,7 +192,7 @@ public func run(args: Args,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
-        let runner = try RealForwardRunner(
+        let runner = try ModelForwardRunner(
             model: model,
             context: context,
             maxContext: args.maxContext,

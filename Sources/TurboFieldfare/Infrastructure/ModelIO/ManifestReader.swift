@@ -177,6 +177,33 @@ public enum ManifestReader {
         _ quant: ManifestQuant,
         mxfp4Weights: Bool
     ) throws {
+        if mxfp4Weights {
+            for (name, slot) in [
+                ("embedding", quant.embedding),
+                ("attention", quant.attention),
+                ("router", quant.router),
+                ("sharedExpert", quant.sharedExpert),
+            ] {
+                guard slot.weightBits == 16,
+                      slot.scheme.lowercased() == "bf16",
+                      slot.scaleType.lowercased() == "none",
+                      slot.biasType.lowercased() == "none",
+                      slot.groupSize == 1 else {
+                    throw ModelError.indexCorrupt(
+                        detail: "unsupported quantization for \(name)")
+                }
+            }
+            let routed = quant.routedExpert
+            guard routed.weightBits == 4,
+                  routed.scheme.lowercased() == "mxfp4",
+                  routed.scaleType.lowercased() == "ue8m0",
+                  routed.biasType.lowercased() == "none",
+                  routed.groupSize == Quantization.mxfp4GroupSize else {
+                throw ModelError.indexCorrupt(
+                    detail: "unsupported quantization for routedExpert")
+            }
+            return
+        }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
             ("embedding", quant.embedding, [4]),
             ("attention", quant.attention, [4]),
@@ -193,24 +220,13 @@ public enum ManifestReader {
             }
         }
         let routed = quant.routedExpert
-        if mxfp4Weights {
-            guard routed.weightBits == 4,
-                  routed.scheme.lowercased() == "mxfp4",
-                  routed.scaleType.lowercased() == "ue8m0",
-                  routed.biasType.lowercased() == "none",
-                  routed.groupSize == Quantization.mxfp4GroupSize else {
-                throw ModelError.indexCorrupt(
-                    detail: "unsupported quantization for routedExpert")
-            }
-        } else {
-            guard routed.weightBits == 4,
-                  routed.scheme.lowercased() == "affine",
-                  routed.scaleType.lowercased() == "bf16",
-                  routed.biasType.lowercased() == "bf16",
-                  routed.groupSize == Quantization.groupSize else {
-                throw ModelError.indexCorrupt(
-                    detail: "unsupported quantization for routedExpert")
-            }
+        guard routed.weightBits == 4,
+              routed.scheme.lowercased() == "affine",
+              routed.scaleType.lowercased() == "bf16",
+              routed.biasType.lowercased() == "bf16",
+              routed.groupSize == Quantization.groupSize else {
+            throw ModelError.indexCorrupt(
+                detail: "unsupported quantization for routedExpert")
         }
     }
 

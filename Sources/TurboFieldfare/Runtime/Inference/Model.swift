@@ -125,6 +125,21 @@ public struct Model {
     public func oProj(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
     }
+    public func qProjBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.q_proj.bias")
+    }
+    public func kProjBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.k_proj.bias")
+    }
+    public func vProjBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.v_proj.bias")
+    }
+    public func oProjBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.bias")
+    }
+    public func attentionSinks(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).self_attn.sinks")
+    }
     /// Gemma's writer emits `.router.proj.weight` (no `.mlp.` segment);
     /// Qwen's router is the source-named `.mlp.gate.weight`.
     public func router(layer L: Int) throws -> TensorView {
@@ -136,6 +151,9 @@ public struct Model {
         case .gptOss:
             return try resident(name: "language_model.model.layers.\(L).mlp.router.weight")
         }
+    }
+    public func routerBias(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).mlp.router.bias")
     }
     /// Shared-expert FFN. Gemma emits `.mlp.{gate,up,down}_proj.weight`
     /// without a `.shared_expert.` segment; Qwen keeps the source's
@@ -748,18 +766,30 @@ extension Model {
             }
         }
 
-        try requireAffine(
-            "language_model.model.embed_tokens.weight",
-            rows: config.vocabSize,
-            columns: config.hiddenSize,
-            slot: quant.embedding)
+        if config.family == .gptOss {
+            try requireBF16Shaped(
+                "language_model.model.embed_tokens.weight",
+                shape: [UInt32(config.vocabSize), UInt32(config.hiddenSize)])
+        } else {
+            try requireAffine(
+                "language_model.model.embed_tokens.weight",
+                rows: config.vocabSize,
+                columns: config.hiddenSize,
+                slot: quant.embedding)
+        }
         try requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
         // Gemma ties lm_head to the embedding; an untied family carries its own.
         if !config.tieWordEmbeddings {
-            try requireAffine("language_model.lm_head.weight",
-                              rows: config.vocabSize,
-                              columns: config.hiddenSize,
-                              slot: quant.embedding)
+            if config.family == .gptOss {
+                try requireBF16Shaped(
+                    "language_model.lm_head.weight",
+                    shape: [UInt32(config.vocabSize), UInt32(config.hiddenSize)])
+            } else {
+                try requireAffine("language_model.lm_head.weight",
+                                  rows: config.vocabSize,
+                                  columns: config.hiddenSize,
+                                  slot: quant.embedding)
+            }
         }
 
         // Dense Gemma has no router or packed-expert files. Its resident
@@ -770,6 +800,41 @@ extension Model {
                 requireBF16: requireBF16,
                 requireAffine: requireAffine,
                 checkedIntMultiply: checkedIntMultiply)
+        } else if config.family == .gptOss {
+            for layer in 0..<config.numLayers {
+                let prefix = "language_model.model.layers.\(layer)"
+                try requireBF16("\(prefix).input_layernorm.weight",
+                                count: config.hiddenSize)
+                try requireBF16("\(prefix).post_attention_layernorm.weight",
+                                count: config.hiddenSize)
+                try requireBF16Shaped(
+                    "\(prefix).self_attn.q_proj.weight",
+                    shape: [UInt32(config.numHeads * config.headDim),
+                            UInt32(config.hiddenSize)])
+                try requireBF16("\(prefix).self_attn.q_proj.bias",
+                                count: config.numHeads * config.headDim)
+                for projection in ["k_proj", "v_proj"] {
+                    try requireBF16Shaped(
+                        "\(prefix).self_attn.\(projection).weight",
+                        shape: [UInt32(config.numKVHeads * config.headDim),
+                                UInt32(config.hiddenSize)])
+                    try requireBF16("\(prefix).self_attn.\(projection).bias",
+                                    count: config.numKVHeads * config.headDim)
+                }
+                try requireBF16Shaped(
+                    "\(prefix).self_attn.o_proj.weight",
+                    shape: [UInt32(config.hiddenSize),
+                            UInt32(config.numHeads * config.headDim)])
+                try requireBF16("\(prefix).self_attn.o_proj.bias",
+                                count: config.hiddenSize)
+                try requireBF16("\(prefix).self_attn.sinks",
+                                count: config.numHeads)
+                try requireBF16Shaped(
+                    "\(prefix).mlp.router.weight",
+                    shape: [UInt32(config.numExperts), UInt32(config.hiddenSize)])
+                try requireBF16("\(prefix).mlp.router.bias",
+                                count: config.numExperts)
+            }
         } else if config.family == .qwen36 {
             try validateQwen36LayerSchema(
                 config: config, quant: quant,
@@ -844,6 +909,11 @@ extension Model {
             return
         }
 
+        if config.family == .gptOss {
+            try validateGPTOSSRoutedLayout(config: config, layout: layout)
+            return
+        }
+
         let routedShapes: [(String, Int, Int)] = [
             ("gate", config.moeIntermediateSize, config.hiddenSize),
             ("up", config.moeIntermediateSize, config.hiddenSize),
@@ -892,6 +962,63 @@ extension Model {
                         throw ModelError.indexCorrupt(
                             detail: "routed layer \(layer.layer) role \(name) metadata differs across experts")
                     }
+                }
+            }
+        }
+    }
+
+    private static func validateGPTOSSRoutedLayout(
+        config: ArchConfig,
+        layout: PackedExpertsLayout
+    ) throws {
+        let hidden = config.hiddenSize
+        let intermediate = config.moeIntermediateSize
+        let expected: [(String, String, [UInt32], Int?, UInt64, UInt64)] = [
+            ("mlp1", "U8", [UInt32(2 * intermediate), UInt32(hidden)], 4,
+             UInt64(2 * intermediate * hidden / 2), 1),
+            ("mlp1_scales", "U8",
+             [UInt32(2 * intermediate), UInt32(hidden / 32)], nil,
+             UInt64(2 * intermediate * hidden / 32), 1),
+            ("mlp1_bias", "BF16", [UInt32(2 * intermediate)], nil,
+             UInt64(2 * intermediate * MemoryLayout<UInt16>.stride), 2),
+            ("mlp2", "U8", [UInt32(hidden), UInt32(intermediate)], 4,
+             UInt64(hidden * intermediate / 2), 1),
+            ("mlp2_scales", "U8",
+             [UInt32(hidden), UInt32(intermediate / 32)], nil,
+             UInt64(hidden * intermediate / 32), 1),
+            ("mlp2_bias", "BF16", [UInt32(hidden)], nil,
+             UInt64(hidden * MemoryLayout<UInt16>.stride), 2),
+        ]
+        guard layout.numLayers == config.numLayers,
+              layout.expertsPerLayer == config.numExperts else {
+            throw ModelError.indexCorrupt(
+                detail: "GPT-OSS routed layout dimensions do not match the architecture")
+        }
+        for layer in layout.layers {
+            guard let reference = layer.experts.first else {
+                throw ModelError.indexCorrupt(
+                    detail: "GPT-OSS routed layer \(layer.layer) has no experts")
+            }
+            for (name, dtype, shape, bits, size, alignment) in expected {
+                guard let tensor = reference.subTensors[name] else {
+                    throw ModelError.indexCorrupt(
+                        detail: "GPT-OSS routed layer \(layer.layer) is missing \(name)")
+                }
+                let (end, overflow) = tensor.offset.addingReportingOverflow(tensor.size)
+                guard tensor.dtype == dtype,
+                      tensor.shape == shape,
+                      tensor.bits == bits,
+                      tensor.size == size,
+                      tensor.offset % alignment == 0,
+                      !overflow,
+                      end <= reference.size else {
+                    throw ModelError.indexCorrupt(
+                        detail: "GPT-OSS routed layer \(layer.layer) role \(name) does not match the required schema")
+                }
+                for expert in layer.experts.dropFirst()
+                    where expert.subTensors[name] != tensor {
+                    throw ModelError.indexCorrupt(
+                        detail: "GPT-OSS routed layer \(layer.layer) role \(name) differs across experts")
                 }
             }
         }
