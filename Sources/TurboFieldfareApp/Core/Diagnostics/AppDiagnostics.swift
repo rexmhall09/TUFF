@@ -105,6 +105,12 @@ public struct AppTokenEvent: Equatable, Sendable {
     public var index: Int
     public var textDelta: String
     public var elapsedDecodeSeconds: Double
+
+    public init(index: Int, textDelta: String, elapsedDecodeSeconds: Double) {
+        self.index = index
+        self.textDelta = textDelta
+        self.elapsedDecodeSeconds = elapsedDecodeSeconds
+    }
 }
 
 public enum AppInferenceEvent: Equatable, Sendable {

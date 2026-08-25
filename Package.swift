@@ -95,6 +95,15 @@ let package = Package(
             ],
             path: "Sources/TurboFieldfareServer/Core"
         ),
+        .target(
+            name: "TurboFieldfareAppServer",
+            dependencies: [
+                "TurboFieldfareAppCore",
+                "TurboFieldfareServerCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+            ],
+            path: "Sources/TurboFieldfareApp/Server"
+        ),
         .executableTarget(
             name: "TurboFieldfareServer",
             dependencies: ["TurboFieldfareServerCore"],
@@ -102,7 +111,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "TurboFieldfareMac",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfareMacPresentation"],
+            dependencies: [
+                "TurboFieldfareAppCore",
+                "TurboFieldfareAppServer",
+                "TurboFieldfareMacPresentation",
+            ],
             path: "Sources/TurboFieldfareApp/Mac",
             resources: [
                 .copy("Resources/tuff-app-icon.png"),
@@ -178,6 +191,15 @@ let package = Package(
             ],
             path: "Tests/TurboFieldfareServer",
             resources: [.copy("Fixtures")]
+        ),
+        .testTarget(
+            name: "TurboFieldfareAppServerTests",
+            dependencies: [
+                "TurboFieldfareAppCore",
+                "TurboFieldfareAppServer",
+                "TurboFieldfareServerCore",
+            ],
+            path: "Tests/TurboFieldfareAppServer"
         ),
     ]
 )
