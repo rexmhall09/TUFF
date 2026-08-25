@@ -733,8 +733,10 @@ struct StreamingStopMatcherTests {
 
 @Suite("Server arguments")
 struct ServerArgumentTests {
-    @Test func helpListsTheE4BRegistryModelID() {
+    @Test func helpListsRegistryModelIDs() {
         #expect(ServerArguments.usage.contains("gemma-4-e4b-it"))
+        #expect(ServerArguments.usage.contains("gpt-oss-20b"))
+        #expect(ServerArguments.usage.contains("gpt-oss-120b"))
     }
 
     @Test func defaults() throws {

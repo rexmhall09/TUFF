@@ -1,8 +1,8 @@
 # Local OpenAI-compatible server
 
-`TUFFServer` exposes a local Chat Completions API for one installed Gemma 4 or
-Qwen 3.6 model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
-through a proxy or tunnel.
+`TUFFServer` exposes a local Chat Completions API for one installed TUFF model.
+It binds to `127.0.0.1` without authentication or TLS. Do not expose it through
+a proxy or tunnel.
 
 ## Start the server
 
@@ -71,6 +71,22 @@ requires `--prefill off`.
 
 The settings are fixed for the life of the process. Restart the server to
 change them.
+
+## Reasoning controls
+
+Gemma 4 and Qwen use TUFF's binary `enable_thinking` request field. GPT-OSS
+uses `reasoning_effort` with `low`, `medium`, or `high`; omitting the field
+defaults to `medium`. The server rejects a family's unsupported control rather
+than approximating it. Analysis remains private, so Chat Completions content
+contains only the final answer.
+
+```json
+{
+  "model": "gpt-oss-20b",
+  "messages": [{"role": "user", "content": "What is 2+2?"}],
+  "reasoning_effort": "low"
+}
+```
 
 ## Connect a client
 

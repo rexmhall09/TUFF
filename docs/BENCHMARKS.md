@@ -88,6 +88,12 @@ generated tokens, prefilling 80 tokens in 16.50 seconds and decoding at 2.822
 tok/s. Peak RSS was 1,912,078,336 bytes and peak footprint was 5,385,082,256
 bytes.
 
+The release server at commit `4fe67d4` passed `/health`, advertised
+`gpt-oss-20b` from `/v1/models`, and returned only `4` for the same prompt sent
+to `/v1/chat/completions` with `reasoning_effort: "low"`. The response reported
+80 prompt tokens, 16 completion tokens, and `finish_reason: "stop"`; the server
+then shut down cleanly.
+
 The frozen short qualification case used a 4,096-token context, Low reasoning,
 greedy decoding, and no experimental controls. Its 113-token Harmony prompt
 prefilled in 20.23 seconds. The generated explanation was coherent but reached
