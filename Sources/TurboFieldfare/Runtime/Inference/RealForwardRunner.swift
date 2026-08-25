@@ -153,7 +153,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let int4: DequantInt4GEMV
     private let attention: Attention
     private let shared: SharedExpertRuntime
-    private let moe: MoE
+    private let moe: MoE?
     private let fusionHead: LMHeadChainInt4
     private let fusedQKVGEMV: FusedQKVGEMV
     private let fusedQKVEpilogue: FusedQKVEpilogue
@@ -165,6 +165,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let gdn: GDN?
     private let gdnState: GDNStateManager?
     private let rope: RoPE?
+    private let perLayerEmbeddingKernel: PerLayerEmbedding?
     private let int8ScalarGate: DequantInt8GEMV?
     /// Difference between Qwen's logical multimodal RoPE position and the
     /// physical KV index. It remains zero for text-only and every Gemma run.
@@ -221,6 +222,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let gdnY: MTLBuffer?             // [valueDim] delta-rule output
     private let gdnOut: MTLBuffer?           // [valueDim] gated-norm output
     private let sharedScalarGateBuf: MTLBuffer? // [1] shared-expert gate logit
+    private let pleIdentity: MTLBuffer?       // [numLayers * P] token PLE lookup
+    private let pleContext: MTLBuffer?        // [numLayers * P] context projection
+    private let pleLayer: MTLBuffer?          // [P] selected, combined PLE row
+    private let pleGate: MTLBuffer?           // [P] mapping gate / activation
     /// BF16 ones over [numExperts]; neutral per_expert_scale when the router
     /// has no auxiliary scale tensors.
     private let onesPerExpertScale: MTLBuffer?
@@ -290,11 +295,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
                                                   siluActivation: silu)
-        self.moe       = try MoE(context: context,
-                                 siluActivation: silu,
-                                 specializedD: UInt32(cfg.hiddenSize),
-                                 specializedF: UInt32(cfg.moeIntermediateSize),
-                                 specializedNumExperts: UInt32(cfg.numExperts))
+        self.moe       = cfg.feedForwardKind == .mixtureOfExperts
+            ? try MoE(context: context,
+                      siluActivation: silu,
+                      specializedD: UInt32(cfg.hiddenSize),
+                      specializedF: UInt32(cfg.moeIntermediateSize),
+                      specializedNumExperts: UInt32(cfg.numExperts))
+            : nil
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
                                               maxVocab: cfg.vocabSize)
@@ -327,6 +334,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             || cfg.sharedExpertGated
             || !cfg.ffnSandwichNorms
             || cfg.hasLinearAttentionLayers
+            || cfg.feedForwardKind == .dense
+            || cfg.hasPerLayerInputs
         self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
         if cfg.hasLinearAttentionLayers {
             self.gdn = try GDN(context: context, config: cfg.linearAttention,
@@ -336,7 +345,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             self.gdn = nil
             self.gdnState = nil
         }
-        self.rope = cfg.ropeNeoxSubdim ? try RoPE(context: context) : nil
+        self.rope = (cfg.ropeNeoxSubdim || cfg.numKVSharedLayers > 0)
+            ? try RoPE(context: context) : nil
+        self.perLayerEmbeddingKernel = cfg.hasPerLayerInputs
+            ? try PerLayerEmbedding(context: context) : nil
         self.int8ScalarGate = cfg.sharedExpertGated
             ? try DequantInt8GEMV(context: context,
                                   additionalShapes: cfg.decodeInt8GEMVShapes)
@@ -414,6 +426,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             self.gdnOut = nil
         }
         self.sharedScalarGateBuf = cfg.sharedExpertGated ? try buf(1) : nil
+        if cfg.hasPerLayerInputs {
+            let packedPLE = cfg.numLayers * cfg.hiddenSizePerLayerInput
+            self.pleIdentity = try buf(packedPLE)
+            self.pleContext = try buf(packedPLE)
+            self.pleLayer = try buf(cfg.hiddenSizePerLayerInput)
+            self.pleGate = try buf(cfg.hiddenSizePerLayerInput)
+        } else {
+            self.pleIdentity = nil
+            self.pleContext = nil
+            self.pleLayer = nil
+            self.pleGate = nil
+        }
 
         func sharedProj(_ view: TensorView, rows: UInt32, cols: UInt32) -> SharedExpertProjection {
             SharedExpertProjection(weights: view.buffer,
@@ -435,7 +459,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 gate: sharedProj(gate, rows: UInt32(F), cols: UInt32(D)),
                 up: sharedProj(up, rows: UInt32(F), cols: UInt32(D)),
                 down: sharedProj(down, rows: UInt32(D), cols: UInt32(F)),
-                postF1: cfg.ffnSandwichNorms ? try model.postFFN1(layer: L) : nil,
+                postF1: cfg.feedForwardKind == .dense
+                    ? try model.postFFN(layer: L)
+                    : (cfg.ffnSandwichNorms ? try model.postFFN1(layer: L) : nil),
                 scalarGate: cfg.sharedExpertGated
                     ? try model.sharedExpertScalarGate(layer: L) : nil))
         }
@@ -452,7 +478,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             return buf
         }
 
-        if cfg.routerScaled {
+        if cfg.feedForwardKind == .dense {
+            self.effectiveScaleBuffers = []
+            self.onesPerExpertScale = nil
+        } else if cfg.routerScaled {
             // Pre-fold 1/sqrt(D) into router.scale per layer. Each layer gets
             // its own BF16 [D] buffer — the kernel reads `effective_scale[i]`
             // and we pay for the multiply once per generation, not per token.
@@ -817,7 +846,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         struct LayerPrefillQKVViews {
             let inputNorm: TensorView
             let postAttention: TensorView
-            let router: TensorView
+            let router: TensorView?
             // Softmax-attention layers only (nil on linear-attention layers).
             let q: TensorView?
             let k: TensorView?
@@ -832,6 +861,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let postFFN: TensorView?
             let layerScalar: TensorView?
             let routerPerExpertScale: TensorView?
+            // Dense Gemma PLE mapping.
+            let perLayerInputGate: TensorView?
+            let perLayerProjection: TensorView?
+            let postPerLayerInputNorm: TensorView?
             // Gated-DeltaNet linear-attention layers only.
             let linQKV: TensorView?
             let linZ: TensorView?
@@ -847,27 +880,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         let layerViews = try (0..<cfg.numLayers).map { L in
             let isFull = cfg.fullAttentionLayerMask[L] == 1
             let isLinear = cfg.layerIsLinear(L)
-            let sandwich = cfg.ffnSandwichNorms
+            let dense = cfg.feedForwardKind == .dense
+            let sandwich = cfg.ffnSandwichNorms && !dense
+            let sharesKV = cfg.layerSharesKV(L)
             return LayerPrefillQKVViews(
                 inputNorm: try model.inputNorm(layer: L),
                 postAttention: try model.postAttnNorm(layer: L),
-                router: try model.router(layer: L),
+                router: dense ? nil : try model.router(layer: L),
                 q: isLinear ? nil : try model.qProj(layer: L),
-                k: isLinear ? nil : try model.kProj(layer: L),
-                v: isLinear ? nil
+                k: (isLinear || sharesKV) ? nil : try model.kProj(layer: L),
+                v: (isLinear || sharesKV) ? nil
                     : ((isFull && cfg.attentionKEqV)
                         ? (try model.kProj(layer: L))
                         : (try model.vProj(layer: L))),
                 o: isLinear ? nil : try model.oProj(layer: L),
                 qNorm: isLinear ? nil : try model.qNorm(layer: L),
-                kNorm: isLinear ? nil : try model.kNorm(layer: L),
-                preFFN: sandwich ? try model.preFFN(layer: L) : nil,
+                kNorm: (isLinear || sharesKV) ? nil : try model.kNorm(layer: L),
+                preFFN: (sandwich || dense) ? try model.preFFN(layer: L) : nil,
                 preFFN2: sandwich ? try model.preFFN2(layer: L) : nil,
                 postFFN2: sandwich ? try model.postFFN2(layer: L) : nil,
-                postFFN: sandwich ? try model.postFFN(layer: L) : nil,
-                layerScalar: sandwich ? try model.layerScalar(layer: L) : nil,
+                postFFN: (sandwich || dense) ? try model.postFFN(layer: L) : nil,
+                layerScalar: (sandwich || dense) ? try model.layerScalar(layer: L) : nil,
                 routerPerExpertScale: cfg.routerScaled
-                    ? try model.routerPerExpertScale(layer: L) : nil,
+                    && !dense ? try model.routerPerExpertScale(layer: L) : nil,
+                perLayerInputGate: dense ? try model.perLayerInputGate(layer: L) : nil,
+                perLayerProjection: dense ? try model.perLayerProjection(layer: L) : nil,
+                postPerLayerInputNorm: dense
+                    ? try model.postPerLayerInputNorm(layer: L) : nil,
                 linQKV: isLinear ? try model.linearInProjQKV(layer: L) : nil,
                 linZ: isLinear ? try model.linearInProjZ(layer: L) : nil,
                 linA: isLinear ? try model.linearInProjA(layer: L) : nil,
@@ -1076,8 +1115,39 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                 outScale: embedOutScale)
         }
 
+        if cfg.hasPerLayerInputs {
+            let plan = PerLayerEmbeddingPlan(config: cfg)
+            let identity = model.perLayerEmbedding
+            prefillEmbed.encode(
+                commandBuffer: cb,
+                table: identity.buffer,
+                tableOffset: Int(identity.offset),
+                scales: identity.buffer,
+                scalesOffset: Int(identity.scaleOffset),
+                biases: identity.buffer,
+                biasesOffset: Int(identity.biasOffset),
+                tokens: tokenBuffer,
+                out: scratch.pleIdentity,
+                t: UInt32(t),
+                d: UInt32(plan.packedWidth),
+                outScale: plan.tokenIdentityScale)
+            encodeInt4Projection(
+                commandBuffer: cb,
+                family: .shared,
+                weights: model.perLayerModelProjection,
+                x: scratch.hidden,
+                y: scratch.pleContext,
+                rows: plan.packedWidth,
+                columns: D,
+                tokenCount: t,
+                xStrideElements: D,
+                yStrideElements: plan.packedWidth)
+        }
+
         for L in 0..<cfg.numLayers {
-            model.beginOpeningRoutedExpertStreamer(layer: L)
+            if cfg.feedForwardKind == .mixtureOfExperts {
+                model.beginOpeningRoutedExpertStreamer(layer: L)
+            }
             let views = layerViews[L]
             let isLinear = cfg.layerIsLinear(L)
             let isFull = cfg.fullAttentionLayerMask[L] == 1
@@ -1202,26 +1272,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      tokenCount: t,
                                      xStrideElements: D,
                                      yStrideElements: qProjRows)
-                encodeInt4Projection(commandBuffer: cb,
-                                     family: .kv,
-                                     weights: views.k!,
-                                     x: scratch.normed,
-                                     y: scratch.kStage,
-                                     rows: kvDim,
-                                     columns: D,
-                                     tokenCount: t,
-                                     xStrideElements: D,
-                                     yStrideElements: kvDim)
-                encodeInt4Projection(commandBuffer: cb,
-                                     family: .kv,
-                                     weights: views.v!,
-                                     x: scratch.normed,
-                                     y: scratch.vStage,
-                                     rows: kvDim,
-                                     columns: D,
-                                     tokenCount: t,
-                                     xStrideElements: D,
-                                     yStrideElements: kvDim)
+                if !cfg.layerSharesKV(L) {
+                    encodeInt4Projection(commandBuffer: cb,
+                                         family: .kv,
+                                         weights: views.k!,
+                                         x: scratch.normed,
+                                         y: scratch.kStage,
+                                         rows: kvDim,
+                                         columns: D,
+                                         tokenCount: t,
+                                         xStrideElements: D,
+                                         yStrideElements: kvDim)
+                    encodeInt4Projection(commandBuffer: cb,
+                                         family: .kv,
+                                         weights: views.v!,
+                                         x: scratch.normed,
+                                         y: scratch.vStage,
+                                         rows: kvDim,
+                                         columns: D,
+                                         tokenCount: t,
+                                         xStrideElements: D,
+                                         yStrideElements: kvDim)
+                }
 
                 // The attention input Q: the packed q_proj output is split
                 // into per-head query/gate halves for gated architectures.
@@ -1239,7 +1311,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     attnQ = scratch.q
                 }
 
-                if cfg.ropeNeoxSubdim {
+                if cfg.layerSharesKV(L) {
+                    let rotatedPairs = isFull
+                        ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
+                        : UInt32(headDim / 2)
+                    prefillQKVEpilogue.encodeGemmaQOnly(
+                        commandBuffer: cb,
+                        q: attnQ,
+                        qWeight: views.qNorm!.buffer,
+                        qWeightOffset: Int(views.qNorm!.offset),
+                        startPosition: UInt32(startPosition),
+                        queryCount: UInt32(t),
+                        headDim: UInt32(headDim),
+                        numQHeads: UInt32(cfg.numHeads),
+                        qTokenStrideElements: UInt32(qDim),
+                        theta: isFull ? Float(cfg.fullRopeTheta) : Float(cfg.ropeTheta),
+                        rotatedPairs: rotatedPairs,
+                        eps: eps)
+                } else if cfg.ropeNeoxSubdim {
                     let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
                     if let mropeBuffers {
                         prefillQKVEpilogue.encodeMRoPENeoxSubdimNoVNorm(
@@ -1306,7 +1395,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                eps: eps)
                 }
 
-                if let kv {
+                if let kv, !cfg.layerSharesKV(L) {
                     let bytes = t * kvDim * MemoryLayout<Float16>.stride
                     try copyPrefillKVToCache(commandBuffer: cb,
                                              kv: kv,
@@ -1334,9 +1423,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         bidirectionalBlockEnd: UInt32(
                             isFull ? 0 : bidirectionalBlock?.upperBound ?? 0))
                 if let kv {
-                        let keyBuffer = kv.keyBuffer(layer: L, validTokenCount: startPosition + t)
-                        let valueBuffer = kv.valueBuffer(layer: L, validTokenCount: startPosition + t)
-                        let ringCapacity = kv.ringCapacity(layer: L)
+                        let kvLayer = cfg.kvSourceLayer(for: L) ?? L
+                        let keyBuffer = kv.keyBuffer(layer: kvLayer, validTokenCount: startPosition + t)
+                        let valueBuffer = kv.valueBuffer(layer: kvLayer, validTokenCount: startPosition + t)
+                        let ringCapacity = kv.ringCapacity(layer: kvLayer)
                         let activeRingCapacity = ringCapacity > 0 && startPosition + t > ringCapacity
                             ? UInt32(ringCapacity)
                             : 0
@@ -1369,6 +1459,118 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                          tokenCount: t,
                                          xStrideElements: qDim,
                                          yStrideElements: D)
+            }
+            if cfg.feedForwardKind == .dense {
+                // Official Gemma 4 dense order: post-normalized attention
+                // residual, dense FFN sandwich, PLE mapping residual, scale.
+                prefillRMS.encodeBF16W(
+                    commandBuffer: cb,
+                    x: scratch.h1,
+                    weight: views.postAttention.buffer,
+                    weightOffset: Int(views.postAttention.offset),
+                    out: scratch.h2,
+                    t: UInt32(t), d: UInt32(D), eps: eps)
+                elementwise!.encodeResidualAdd(commandBuffer: cb,
+                                               hidden: scratch.hidden,
+                                               delta: scratch.h2,
+                                               count: t * D)
+                prefillRMS.encodeBF16W(
+                    commandBuffer: cb,
+                    x: scratch.hidden,
+                    weight: views.preFFN!.buffer,
+                    weightOffset: Int(views.preFFN!.offset),
+                    out: scratch.denseX,
+                    t: UInt32(t), d: UInt32(D), eps: eps)
+                let denseProjections = sharedExpertProjections[L]
+                try prefillSharedExpert.encodeBlock(
+                    commandBuffer: cb,
+                    x: scratch.denseX,
+                    y: scratch.h1,
+                    gate: denseProjections.gate,
+                    up: denseProjections.up,
+                    down: denseProjections.down,
+                    scratchGate: scratch.sharedGateScratch,
+                    scratchUp: scratch.sharedUpScratch,
+                    scratchAct: scratch.sharedActScratch,
+                    queryCount: t,
+                    d: D,
+                    intermediate: cfg.intermediateSize,
+                    xStrideElements: D,
+                    yStrideElements: D)
+                prefillRMS.encodeBF16W(
+                    commandBuffer: cb,
+                    x: scratch.h1,
+                    weight: views.postFFN!.buffer,
+                    weightOffset: Int(views.postFFN!.offset),
+                    out: scratch.h1,
+                    t: UInt32(t), d: UInt32(D), eps: eps)
+                elementwise!.encodeResidualAdd(commandBuffer: cb,
+                                               hidden: scratch.hidden,
+                                               delta: scratch.h1,
+                                               count: t * D)
+
+                let plePlan = PerLayerEmbeddingPlan(config: cfg)
+                let pleNorm = model.perLayerProjectionNorm
+                perLayerEmbeddingKernel!.encodePrepareLayer(
+                    commandBuffer: cb,
+                    identity: scratch.pleIdentity,
+                    context: scratch.pleContext,
+                    normWeight: pleNorm.buffer,
+                    normWeightOffset: Int(pleNorm.offset),
+                    out: scratch.pleLayer,
+                    rows: t,
+                    packedWidth: plePlan.packedWidth,
+                    pleWidth: plePlan.perLayerHiddenSize,
+                    layer: L,
+                    contextScale: plePlan.contextProjectionScale,
+                    combinedScale: plePlan.combinedScale,
+                    eps: eps)
+                encodeInt4Projection(
+                    commandBuffer: cb,
+                    family: .shared,
+                    weights: views.perLayerInputGate!,
+                    x: scratch.hidden,
+                    y: scratch.pleGate,
+                    rows: plePlan.perLayerHiddenSize,
+                    columns: D,
+                    tokenCount: t,
+                    xStrideElements: D,
+                    yStrideElements: plePlan.perLayerHiddenSize)
+                elementwise!.encodeGELUMul(
+                    commandBuffer: cb,
+                    gate: scratch.pleGate,
+                    value: scratch.pleLayer,
+                    out: scratch.pleGate,
+                    count: t * plePlan.perLayerHiddenSize)
+                encodeInt4Projection(
+                    commandBuffer: cb,
+                    family: .shared,
+                    weights: views.perLayerProjection!,
+                    x: scratch.pleGate,
+                    y: scratch.h1,
+                    rows: D,
+                    columns: plePlan.perLayerHiddenSize,
+                    tokenCount: t,
+                    xStrideElements: plePlan.perLayerHiddenSize,
+                    yStrideElements: D)
+                prefillRMS.encodeBF16W(
+                    commandBuffer: cb,
+                    x: scratch.h1,
+                    weight: views.postPerLayerInputNorm!.buffer,
+                    weightOffset: Int(views.postPerLayerInputNorm!.offset),
+                    out: scratch.h1,
+                    t: UInt32(t), d: UInt32(D), eps: eps)
+                let scalarView = views.layerScalar!
+                let scalarBits = scalarView.buffer.contents()
+                    .advanced(by: Int(scalarView.offset))
+                    .assumingMemoryBound(to: UInt16.self)[0]
+                elementwise!.encodeResidualAddScale(
+                    commandBuffer: cb,
+                    hidden: scratch.hidden,
+                    delta: scratch.h1,
+                    count: t * D,
+                    scale: Quantization.bf16ToFloat(scalarBits))
+                continue
             }
             if cfg.ffnSandwichNorms {
                 prefillPostAttention.encode(commandBuffer: cb,
@@ -1417,12 +1619,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             }
             prefillRouter.encodeGemma4Block(
                         commandBuffer: cb,
-                        weights: views.router.buffer,
-                        weightsOffset: Int(views.router.offset),
-                        scales: views.router.buffer,
-                        scalesOffset: Int(views.router.scaleOffset),
-                        biases: views.router.buffer,
-                        biasesOffset: Int(views.router.biasOffset),
+                        weights: views.router!.buffer,
+                        weightsOffset: Int(views.router!.offset),
+                        scales: views.router!.buffer,
+                        scalesOffset: Int(views.router!.scaleOffset),
+                        biases: views.router!.buffer,
+                        biasesOffset: Int(views.router!.biasOffset),
                         hidden: cfg.ffnSandwichNorms ? scratch.routerX : scratch.routedX,
                         effectiveScale: effectiveScaleBuffers[L],
                         perExpertScale: perExpertScale.buffer,
@@ -1729,6 +1931,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     continue
         }
 
+        if cfg.feedForwardKind == .dense {
+            cb.commit()
+            try waitForCompletion(cb)
+        }
+
         if writeFinalHead {
             let finalNorm = model.finalNorm
             let lm = model.lmHead
@@ -1847,6 +2054,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                  tokenId: UInt32(bitPattern: token),
                                  d: D,
                                  outScale: embedOutScale)
+                if cfg.hasPerLayerInputs {
+                    let plan = PerLayerEmbeddingPlan(config: cfg)
+                    let identity = model.perLayerEmbedding
+                    embedInt4.encode(
+                        commandBuffer: cb,
+                        table: identity.buffer, tableOffset: Int(identity.offset),
+                        scales: identity.buffer, scalesOffset: Int(identity.scaleOffset),
+                        biases: identity.buffer, biasesOffset: Int(identity.biasOffset),
+                        out: pleIdentity!,
+                        tokenId: UInt32(bitPattern: token),
+                        d: UInt32(plan.packedWidth),
+                        outScale: plan.tokenIdentityScale)
+                    let projection = model.perLayerModelProjection
+                    int4.encode(
+                        commandBuffer: cb,
+                        weights: projection.buffer, weightsOffset: Int(projection.offset),
+                        scales: projection.buffer, scalesOffset: Int(projection.scaleOffset),
+                        biases: projection.buffer, biasesOffset: Int(projection.biasOffset),
+                        x: hidden, y: pleContext!,
+                        m: UInt32(plan.packedWidth), n: D)
+                }
             }
         }
 
@@ -1862,14 +2090,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let inNorm   = try model.inputNorm(layer: L)
             let postAttn = try model.postAttnNorm(layer: L)
             let sharedProj = sharedExpertProjections[L]
-            let routerW  = try model.router(layer: L)
-            let perExpertScale: (buffer: MTLBuffer, offset: Int)
-            if cfg.routerScaled {
-                let view = try model.routerPerExpertScale(layer: L)
-                perExpertScale = (view.buffer, Int(view.offset))
-            } else {
-                perExpertScale = (onesPerExpertScale!, 0)
-            }
 
             let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             // Everything up to and including the router runs in a single CB:
@@ -1892,6 +2112,78 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 try encodeGatedFullAttentionDecode(cb, layer: L,
                                                    position: position,
                                                    seqLen: seqLen)
+            } else if let kvSourceLayer = cfg.kvSourceLayer(for: L) {
+                guard let kv, let rope else {
+                    preconditionFailure("shared-KV attention requires KV and RoPE kernels")
+                }
+                let q = try model.qProj(layer: L)
+                let o = try model.oProj(layer: L)
+                let qNorm = try model.qNorm(layer: L)
+                int4.encode(commandBuffer: cb,
+                            weights: q.buffer, weightsOffset: Int(q.offset),
+                            scales: q.buffer, scalesOffset: Int(q.scaleOffset),
+                            biases: q.buffer, biasesOffset: Int(q.biasOffset),
+                            x: normed, y: qScratch, m: qDim, n: D)
+                rms.encodeBF16WPerHead(commandBuffer: cb,
+                                       x: qScratch,
+                                       weight: qNorm.buffer,
+                                       weightOffset: Int(qNorm.offset),
+                                       out: qScratch,
+                                       headDim: UInt32(headDimL),
+                                       numHeads: cfg.numHeads,
+                                       eps: eps)
+                let rotated = isFull
+                    ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
+                    : UInt32(headDimL / 2)
+                if isFull {
+                    rope.encodeProportionalNeox(
+                        commandBuffer: cb, data: qScratch,
+                        position: UInt32(position), headDim: UInt32(headDimL),
+                        numHeads: UInt32(cfg.numHeads), rotatedPairs: rotated,
+                        theta: Float(cfg.fullRopeTheta))
+                } else {
+                    rope.encodeDefaultNeox(
+                        commandBuffer: cb, data: qScratch,
+                        position: UInt32(position), headDim: UInt32(headDimL),
+                        numHeads: UInt32(cfg.numHeads), theta: Float(cfg.ropeTheta))
+                }
+                let keyBuffer = kv.keyBuffer(layer: kvSourceLayer,
+                                             validTokenCount: position + 1)
+                let valueBuffer = kv.valueBuffer(layer: kvSourceLayer,
+                                                 validTokenCount: position + 1)
+                if isFull {
+                    attention.encodeFull(commandBuffer: cb,
+                                         q: qScratch,
+                                         k: keyBuffer, kOffset: 0,
+                                         v: valueBuffer, vOffset: 0,
+                                         out: attnOut,
+                                         headDim: UInt32(headDimL),
+                                         numQHeads: UInt32(cfg.numHeads),
+                                         numKVHeads: UInt32(numKVL),
+                                         seqLen: seqLen,
+                                         scale: Float(cfg.attentionScale))
+                } else {
+                    let ringCapacity = kv.ringCapacity(layer: kvSourceLayer)
+                    let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
+                        ? UInt32(ringCapacity) : 0
+                    attention.encodeSWA(commandBuffer: cb,
+                                        q: qScratch,
+                                        k: keyBuffer, kOffset: 0,
+                                        v: valueBuffer, vOffset: 0,
+                                        out: attnOut,
+                                        headDim: UInt32(headDimL),
+                                        numQHeads: UInt32(cfg.numHeads),
+                                        numKVHeads: UInt32(numKVL),
+                                        seqLen: seqLen,
+                                        window: UInt32(cfg.slidingWindow),
+                                        scale: Float(cfg.attentionScale),
+                                        ringCapacity: activeRingCapacity)
+                }
+                int4.encode(commandBuffer: cb,
+                            weights: o.buffer, weightsOffset: Int(o.offset),
+                            scales: o.buffer, scalesOffset: Int(o.scaleOffset),
+                            biases: o.buffer, biasesOffset: Int(o.biasOffset),
+                            x: attnOut, y: oOut, m: D, n: qDim)
             } else {
                 let kSlot = kv?.kSlot(layer: L, position: position) ?? (buffer: kStage, offset: 0)
                 let vSlot = kv?.vSlot(layer: L, position: position) ?? (buffer: vStage, offset: 0)
@@ -1982,6 +2274,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             x: attnOut, y: oOut, m: D, n: qDim)
             }
 
+            if cfg.feedForwardKind == .dense {
+                try encodeDenseGemmaLayerDecode(
+                    cb, layer: L, postAttention: postAttn,
+                    projections: sharedProj, d: D, eps: eps)
+                cb.commit()
+                let waitStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                waitUntilCompleted(cb)
+                let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - waitStart
+                try checkCommandBufferError(cb.error)
+                totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                    - tCb1Start - waitNanos
+                continue
+            }
+
             if cfg.ffnSandwichNorms {
                 let preFFN   = try model.preFFN(layer: L)
                 let preFFN2  = try model.preFFN2(layer: L)
@@ -2013,6 +2319,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                 weightOffset: Int(postAttn.offset),
                                 out: routedX,
                                 d: D, eps: eps)
+            }
+
+            let moe = self.moe!
+            let routerW = try model.router(layer: L)
+            let perExpertScale: (buffer: MTLBuffer, offset: Int)
+            if cfg.routerScaled {
+                let view = try model.routerPerExpertScale(layer: L)
+                perExpertScale = (view.buffer, Int(view.offset))
+            } else {
+                perExpertScale = (onesPerExpertScale!, 0)
             }
 
             moe.encodeRouterGemma4(commandBuffer: cb,
@@ -2328,6 +2644,104 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
 
         kv?.advance()
+    }
+
+    /// Dense Gemma 4 tail, including the per-layer embedding mapping:
+    /// post-attention sandwich, dense gated MLP, PLE residual, layer scale.
+    private func encodeDenseGemmaLayerDecode(
+        _ cb: MTLCommandBuffer,
+        layer: Int,
+        postAttention: TensorView,
+        projections: LayerSharedExpertProjections,
+        d: UInt32,
+        eps: Float
+    ) throws {
+        guard let elementwise, let perLayerEmbeddingKernel,
+              let pleIdentity, let pleContext, let pleLayer, let pleGate else {
+            preconditionFailure("dense Gemma layer requires PLE kernels and scratch")
+        }
+        let preFFN = try model.preFFN(layer: layer)
+        rms.encodeBF16W(commandBuffer: cb,
+                        x: oOut,
+                        weight: postAttention.buffer,
+                        weightOffset: Int(postAttention.offset),
+                        out: h1Buf, d: d, eps: eps)
+        elementwise.encodeResidualAdd(commandBuffer: cb,
+                                      hidden: hidden, delta: h1Buf,
+                                      count: cfg.hiddenSize)
+        rms.encodeBF16W(commandBuffer: cb,
+                        x: hidden,
+                        weight: preFFN.buffer,
+                        weightOffset: Int(preFFN.offset),
+                        out: denseX, d: d, eps: eps)
+        try shared.encode(commandBuffer: cb,
+                          x: denseX,
+                          gate: projections.gate,
+                          up: projections.up,
+                          down: projections.down,
+                          y: h1Buf,
+                          scratchGate: denseScratchGate,
+                          scratchUp: denseScratchUp,
+                          scratchAct: denseScratchAct)
+        let postFFN = projections.postF1!
+        rms.encodeBF16W(commandBuffer: cb,
+                        x: h1Buf,
+                        weight: postFFN.buffer,
+                        weightOffset: Int(postFFN.offset),
+                        out: h1Buf, d: d, eps: eps)
+        elementwise.encodeResidualAdd(commandBuffer: cb,
+                                      hidden: hidden, delta: h1Buf,
+                                      count: cfg.hiddenSize)
+
+        let plan = PerLayerEmbeddingPlan(config: cfg)
+        let pleNorm = model.perLayerProjectionNorm
+        perLayerEmbeddingKernel.encodePrepareLayer(
+            commandBuffer: cb,
+            identity: pleIdentity,
+            context: pleContext,
+            normWeight: pleNorm.buffer,
+            normWeightOffset: Int(pleNorm.offset),
+            out: pleLayer,
+            rows: 1,
+            packedWidth: plan.packedWidth,
+            pleWidth: plan.perLayerHiddenSize,
+            layer: layer,
+            contextScale: plan.contextProjectionScale,
+            combinedScale: plan.combinedScale,
+            eps: eps)
+        let inputGate = try model.perLayerInputGate(layer: layer)
+        int4.encode(commandBuffer: cb,
+                    weights: inputGate.buffer, weightsOffset: Int(inputGate.offset),
+                    scales: inputGate.buffer, scalesOffset: Int(inputGate.scaleOffset),
+                    biases: inputGate.buffer, biasesOffset: Int(inputGate.biasOffset),
+                    x: hidden, y: pleGate,
+                    m: UInt32(plan.perLayerHiddenSize), n: d)
+        elementwise.encodeGELUMul(commandBuffer: cb,
+                                  gate: pleGate, value: pleLayer, out: pleGate,
+                                  count: plan.perLayerHiddenSize)
+        let projection = try model.perLayerProjection(layer: layer)
+        int4.encode(commandBuffer: cb,
+                    weights: projection.buffer, weightsOffset: Int(projection.offset),
+                    scales: projection.buffer, scalesOffset: Int(projection.scaleOffset),
+                    biases: projection.buffer, biasesOffset: Int(projection.biasOffset),
+                    x: pleGate, y: h2Buf,
+                    m: d, n: UInt32(plan.perLayerHiddenSize))
+        let postPLE = try model.postPerLayerInputNorm(layer: layer)
+        rms.encodeBF16W(commandBuffer: cb,
+                        x: h2Buf,
+                        weight: postPLE.buffer,
+                        weightOffset: Int(postPLE.offset),
+                        out: h2Buf, d: d, eps: eps)
+        let layerScalar = try model.layerScalar(layer: layer)
+        let scalarBits = layerScalar.buffer.contents()
+            .advanced(by: Int(layerScalar.offset))
+            .assumingMemoryBound(to: UInt16.self)[0]
+        elementwise.encodeResidualAddScale(
+            commandBuffer: cb,
+            hidden: hidden,
+            delta: h2Buf,
+            count: cfg.hiddenSize,
+            scale: Quantization.bf16ToFloat(scalarBits))
     }
 
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step.

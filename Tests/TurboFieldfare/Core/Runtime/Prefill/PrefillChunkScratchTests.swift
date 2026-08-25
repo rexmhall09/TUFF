@@ -122,4 +122,16 @@ import Metal
         #expect(layout.totalPersistentBytes < 100 * 1_048_576)
     }
 
+    @Test func denseGemmaScratchIncludesBoundedPLEStorage() {
+        let layout = PrefillChunkScratchLayout(
+            config: .gemma4_E4B, chunkTokens: 32)
+        #expect(layout.plePackedWidth == 42 * 256)
+        #expect(layout.pleWidth == 256)
+        #expect(layout.pleIdentityElements == 32 * 42 * 256)
+        #expect(layout.pleContextElements == layout.pleIdentityElements)
+        #expect(layout.pleLayerElements == 32 * 256)
+        #expect(layout.pleGateElements == 32 * 256)
+        #expect(layout.totalPersistentBytes < 32 * 1_048_576)
+    }
+
 }

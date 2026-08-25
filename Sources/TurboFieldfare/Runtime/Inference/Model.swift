@@ -89,6 +89,22 @@ public struct Model {
         try! resident(name: "language_model.model.embed_tokens.weight")
     }
 
+    /// Gemma 4 E2B/E4B token-identity PLE table. Its logical row width is
+    /// `numLayers * hiddenSizePerLayerInput`.
+    public var perLayerEmbedding: TensorView {
+        try! resident(name: "language_model.model.embed_tokens_per_layer.weight")
+    }
+
+    /// Context projection from the main embedding into all packed PLE rows.
+    public var perLayerModelProjection: TensorView {
+        try! resident(name: "language_model.model.per_layer_model_projection.weight")
+    }
+
+    /// One shared gain vector applied independently to every packed PLE row.
+    public var perLayerProjectionNorm: TensorView {
+        try! resident(name: "language_model.model.per_layer_projection_norm.weight")
+    }
+
     /// Gemma 4 ties lm_head to the embedding; Qwen 3.6 carries a separate
     /// `lm_head` tensor. The transpose for the lm_head GEMV path is the
     /// kernel's job, not the loader's.
@@ -191,6 +207,18 @@ public struct Model {
     }
     public func postFFN(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).post_feedforward_layernorm.weight")
+    }
+
+    // MARK: - Per-layer embedding mapping (dense Gemma 4)
+
+    public func perLayerInputGate(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).per_layer_input_gate.weight")
+    }
+    public func perLayerProjection(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).per_layer_projection.weight")
+    }
+    public func postPerLayerInputNorm(layer L: Int) throws -> TensorView {
+        try resident(name: "language_model.model.layers.\(L).post_per_layer_input_norm.weight")
     }
 
     // MARK: - Router auxiliaries
@@ -480,22 +508,8 @@ extension Model {
         guard let weightsEntry = manifest.files["model_weights.bin"] else {
             throw ModelError.missingFile(name: "model_weights.bin")
         }
-        guard let layoutEntry = manifest.files["packed_experts/layout.json"] else {
-            throw ModelError.missingFile(name: "packed_experts/layout.json")
-        }
         let weightsFD = try modelDirectory.openFile("model_weights.bin")
         defer { close(weightsFD) }
-        let layoutFD = try modelDirectory.openFile("packed_experts/layout.json")
-        defer { close(layoutFD) }
-        let layoutData = try modelDirectory.readMetadata(
-            fileDescriptor: layoutFD, relativePath: "packed_experts/layout.json",
-            maxBytes: PackedExpertsLayoutReader.defaultMaxBytes)
-        guard UInt64(layoutData.count) == layoutEntry.size else {
-            throw ModelError.tensorSizeMismatch(
-                name: "packed_experts/layout.json",
-                expected: layoutEntry.size,
-                actual: UInt64(layoutData.count))
-        }
         let weightsSize = try modelDirectory.fileSize(
             fileDescriptor: weightsFD, relativePath: "model_weights.bin")
         guard weightsSize == weightsEntry.size else {
@@ -508,15 +522,35 @@ extension Model {
         try Sha256Verifier.verifyFile(fileDescriptor: weightsFD,
                                       named: "model_weights.bin",
                                       expectedHex: weightsEntry.sha256)
-        guard Sha256Verifier.hashData(layoutData).lowercased()
-                == layoutEntry.sha256.lowercased() else {
-            throw ModelError.checksumMismatch(file: "packed_experts/layout.json")
+        let layout: PackedExpertsLayout
+        if expecting.feedForwardKind == .dense {
+            layout = .dense(numLayers: expecting.numLayers)
+        } else {
+            guard let layoutEntry = manifest.files["packed_experts/layout.json"] else {
+                throw ModelError.missingFile(name: "packed_experts/layout.json")
+            }
+            let layoutFD = try modelDirectory.openFile("packed_experts/layout.json")
+            defer { close(layoutFD) }
+            let layoutData = try modelDirectory.readMetadata(
+                fileDescriptor: layoutFD, relativePath: "packed_experts/layout.json",
+                maxBytes: PackedExpertsLayoutReader.defaultMaxBytes)
+            guard UInt64(layoutData.count) == layoutEntry.size else {
+                throw ModelError.tensorSizeMismatch(
+                    name: "packed_experts/layout.json",
+                    expected: layoutEntry.size,
+                    actual: UInt64(layoutData.count))
+            }
+            guard Sha256Verifier.hashData(layoutData).lowercased()
+                    == layoutEntry.sha256.lowercased() else {
+                throw ModelError.checksumMismatch(file: "packed_experts/layout.json")
+            }
+            layout = try PackedExpertsLayoutReader.decode(data: layoutData,
+                                                           manifest: manifest)
         }
         stats.eagerSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - eagerShaStart
 
-        let layout = try PackedExpertsLayoutReader.decode(data: layoutData,
-                                                          manifest: manifest)
-        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
+        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt,
+           expecting.feedForwardKind == .mixtureOfExperts {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try validateTrustedReceiptLayerLayout(modelDirectory: modelDirectory,
                                                   manifest: manifest,
@@ -724,9 +758,15 @@ extension Model {
                               slot: quant.embedding)
         }
 
-        // The routed-expert layout below is family-independent; only the
-        // per-layer resident contract differs between families.
-        if config.family == .qwen36 {
+        // Dense Gemma has no router or packed-expert files. Its resident
+        // contract also includes the packed PLE tables and per-layer mapping.
+        if config.feedForwardKind == .dense {
+            try validateDenseGemma4LayerSchema(
+                config: config, quant: quant,
+                requireBF16: requireBF16,
+                requireAffine: requireAffine,
+                checkedIntMultiply: checkedIntMultiply)
+        } else if config.family == .qwen36 {
             try validateQwen36LayerSchema(
                 config: config, quant: quant,
                 requireBF16: requireBF16,
@@ -790,6 +830,16 @@ extension Model {
         }
         }
 
+        guard config.feedForwardKind == .mixtureOfExperts else {
+            guard layout.layers.isEmpty,
+                  layout.expertsPerLayer == 0,
+                  layout.expertStride == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "dense architecture must not carry routed experts")
+            }
+            return
+        }
+
         let routedShapes: [(String, Int, Int)] = [
             ("gate", config.moeIntermediateSize, config.hiddenSize),
             ("up", config.moeIntermediateSize, config.hiddenSize),
@@ -840,6 +890,70 @@ extension Model {
                     }
                 }
             }
+        }
+    }
+
+    private static func validateDenseGemma4LayerSchema(
+        config: ArchConfig,
+        quant: ManifestQuant,
+        requireBF16: (String, Int) throws -> Void,
+        requireAffine: (String, Int, Int, ManifestQuantSlot) throws -> Void,
+        checkedIntMultiply: (Int, Int, String) throws -> Int
+    ) throws {
+        let packedPLE = try checkedIntMultiply(
+            config.numLayers, config.hiddenSizePerLayerInput, "packed PLE width")
+        try requireAffine("language_model.model.embed_tokens_per_layer.weight",
+                          config.vocabSizePerLayerInput, packedPLE, quant.embedding)
+        try requireAffine("language_model.model.per_layer_model_projection.weight",
+                          packedPLE, config.hiddenSize, quant.sharedExpert)
+        try requireBF16("language_model.model.per_layer_projection_norm.weight",
+                        config.hiddenSizePerLayerInput)
+
+        for layer in 0..<config.numLayers {
+            let prefix = "language_model.model.layers.\(layer)"
+            let isFull = config.layerIsFull(layer)
+            let headDimension = isFull ? config.fullHeadDim : config.headDim
+            let kvHeads = isFull ? config.numFullKVHeads : config.numKVHeads
+            let queryDimension = try checkedIntMultiply(
+                config.numHeads, headDimension, "layer \(layer) query")
+            let kvDimension = try checkedIntMultiply(
+                kvHeads, headDimension, "layer \(layer) key/value")
+
+            for name in [
+                "input_layernorm.weight",
+                "post_attention_layernorm.weight",
+                "pre_feedforward_layernorm.weight",
+                "post_feedforward_layernorm.weight",
+                "post_per_layer_input_norm.weight",
+            ] {
+                try requireBF16("\(prefix).\(name)", config.hiddenSize)
+            }
+            try requireBF16("\(prefix).self_attn.q_norm.weight", headDimension)
+            try requireBF16("\(prefix).layer_scalar", 1)
+            try requireAffine("\(prefix).self_attn.q_proj.weight",
+                              queryDimension, config.hiddenSize, quant.attention)
+
+            if !config.layerSharesKV(layer) {
+                try requireAffine("\(prefix).self_attn.k_proj.weight",
+                                  kvDimension, config.hiddenSize, quant.attention)
+                try requireAffine("\(prefix).self_attn.v_proj.weight",
+                                  kvDimension, config.hiddenSize, quant.attention)
+                try requireBF16("\(prefix).self_attn.k_norm.weight", headDimension)
+            }
+            try requireAffine("\(prefix).self_attn.o_proj.weight",
+                              config.hiddenSize, queryDimension, quant.attention)
+            try requireAffine("\(prefix).mlp.gate_proj.weight",
+                              config.intermediateSize, config.hiddenSize, quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.up_proj.weight",
+                              config.intermediateSize, config.hiddenSize, quant.sharedExpert)
+            try requireAffine("\(prefix).mlp.down_proj.weight",
+                              config.hiddenSize, config.intermediateSize, quant.sharedExpert)
+            try requireAffine("\(prefix).per_layer_input_gate.weight",
+                              config.hiddenSizePerLayerInput, config.hiddenSize,
+                              quant.sharedExpert)
+            try requireAffine("\(prefix).per_layer_projection.weight",
+                              config.hiddenSize, config.hiddenSizePerLayerInput,
+                              quant.sharedExpert)
         }
     }
 

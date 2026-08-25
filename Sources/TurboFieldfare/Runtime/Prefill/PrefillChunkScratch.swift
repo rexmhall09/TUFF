@@ -22,6 +22,9 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     let gdnVHeads: Int
     /// Non-zero when the shared expert output is scalar-gated (Qwen).
     let sharedScalarGateElements: Int
+    /// Gemma 4 dense PLE dimensions (zero on architectures without PLE).
+    let plePackedWidth: Int
+    let pleWidth: Int
 
     init(config: ArchConfig,
                 chunkTokens: Int,
@@ -45,6 +48,9 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
         self.gdnValueDim = hasLinear ? config.linearAttention.valueDim : 0
         self.gdnVHeads = hasLinear ? config.linearAttention.numVHeads : 0
         self.sharedScalarGateElements = config.sharedExpertGated ? 1 : 0
+        self.plePackedWidth = config.hasPerLayerInputs
+            ? config.numLayers * config.hiddenSizePerLayerInput : 0
+        self.pleWidth = config.hiddenSizePerLayerInput
     }
 
 
@@ -60,6 +66,10 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var gdnBElements: Int { gdnAElements }
     var gdnYElements: Int { gdnZElements }
     var sharedScalarGateBufferElements: Int { chunkTokens * sharedScalarGateElements }
+    var pleIdentityElements: Int { chunkTokens * plePackedWidth }
+    var pleContextElements: Int { pleIdentityElements }
+    var pleLayerElements: Int { chunkTokens * pleWidth }
+    var pleGateElements: Int { pleLayerElements }
     var kStageElements: Int { chunkTokens * maxKVElementsPerToken }
     var vStageElements: Int { kStageElements }
     var attentionOutputElements: Int { attnElements }
@@ -99,6 +109,10 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             + gdnBElements
             + gdnYElements
             + sharedScalarGateBufferElements
+            + pleIdentityElements
+            + pleContextElements
+            + pleLayerElements
+            + pleGateElements
         return fp16Elements * MemoryLayout<Float16>.stride
     }
 
@@ -143,6 +157,10 @@ struct PrefillChunkScratchBuffers {
     let gdnB: MTLBuffer
     let gdnY: MTLBuffer
     let sharedScalarGate: MTLBuffer
+    let pleIdentity: MTLBuffer
+    let pleContext: MTLBuffer
+    let pleLayer: MTLBuffer
+    let pleGate: MTLBuffer
 
     static func allocate(device: MTLDevice,
                          layout: PrefillChunkScratchLayout) throws -> PrefillChunkScratchBuffers {
@@ -202,6 +220,14 @@ struct PrefillChunkScratchBuffers {
             gdnB: try privateBuffer(layout.gdnBElements, label: "prefill.gdnB"),
             gdnY: try privateBuffer(layout.gdnYElements, label: "prefill.gdnY"),
             sharedScalarGate: try privateBuffer(layout.sharedScalarGateBufferElements,
-                                                label: "prefill.sharedScalarGate"))
+                                                label: "prefill.sharedScalarGate"),
+            pleIdentity: try privateBuffer(layout.pleIdentityElements,
+                                           label: "prefill.pleIdentity"),
+            pleContext: try privateBuffer(layout.pleContextElements,
+                                          label: "prefill.pleContext"),
+            pleLayer: try privateBuffer(layout.pleLayerElements,
+                                        label: "prefill.pleLayer"),
+            pleGate: try privateBuffer(layout.pleGateElements,
+                                       label: "prefill.pleGate"))
     }
 }

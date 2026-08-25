@@ -52,6 +52,13 @@ struct PackedExpertsLayout: Sendable {
     func expert(layer: Int, expert: Int) -> ExpertEntry {
         return layers[layer].experts[expert]
     }
+
+    static func dense(numLayers: Int) -> PackedExpertsLayout {
+        PackedExpertsLayout(expertStride: 0,
+                            numLayers: numLayers,
+                            expertsPerLayer: 0,
+                            layers: [])
+    }
 }
 
 enum PackedExpertsLayoutReader {

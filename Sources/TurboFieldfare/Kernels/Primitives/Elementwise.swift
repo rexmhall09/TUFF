@@ -9,12 +9,16 @@ final class Elementwise {
     private let sigmoidScalarMulPSO: MTLComputePipelineState
     private let residualAddPSO: MTLComputePipelineState
     private let splitQGatePSO: MTLComputePipelineState
+    private let geluMulPSO: MTLComputePipelineState
+    private let residualAddScalePSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
         self.sigmoidScalarMulPSO = try context.pipeline("sigmoid_scalar_mul_fp16")
         self.residualAddPSO = try context.pipeline("residual_add_fp16")
         self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
+        self.geluMulPSO = try context.pipeline("gelu_mul_fp16")
+        self.residualAddScalePSO = try context.pipeline("residual_add_scale_fp16")
     }
 
     /// packed [H, 2D] per-head [query ; gate] → q [H, D], gate [H, D].
@@ -83,6 +87,41 @@ final class Elementwise {
         var elementCount = UInt32(count)
         encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
         dispatch(encoder, pipeline: residualAddPSO, threads: count)
+        encoder.endEncoding()
+    }
+
+    /// out[i] = GELU(gate[i]) * value[i]
+    func encodeGELUMul(commandBuffer: MTLCommandBuffer,
+                       gate: MTLBuffer, gateOffset: Int = 0,
+                       value: MTLBuffer, valueOffset: Int = 0,
+                       out: MTLBuffer, outOffset: Int = 0,
+                       count: Int) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(geluMulPSO)
+        encoder.setBuffer(gate, offset: gateOffset, index: 0)
+        encoder.setBuffer(value, offset: valueOffset, index: 1)
+        encoder.setBuffer(out, offset: outOffset, index: 2)
+        var elementCount = UInt32(count)
+        encoder.setBytes(&elementCount, length: 4, index: 3)
+        dispatch(encoder, pipeline: geluMulPSO, threads: count)
+        encoder.endEncoding()
+    }
+
+    /// hidden[i] = (hidden[i] + delta[i]) * scale
+    func encodeResidualAddScale(commandBuffer: MTLCommandBuffer,
+                                hidden: MTLBuffer, hiddenOffset: Int = 0,
+                                delta: MTLBuffer, deltaOffset: Int = 0,
+                                count: Int,
+                                scale: Float) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(residualAddScalePSO)
+        encoder.setBuffer(hidden, offset: hiddenOffset, index: 0)
+        encoder.setBuffer(delta, offset: deltaOffset, index: 1)
+        var elementCount = UInt32(count)
+        var factor = scale
+        encoder.setBytes(&elementCount, length: 4, index: 2)
+        encoder.setBytes(&factor, length: 4, index: 3)
+        dispatch(encoder, pipeline: residualAddScalePSO, threads: count)
         encoder.endEncoding()
     }
 

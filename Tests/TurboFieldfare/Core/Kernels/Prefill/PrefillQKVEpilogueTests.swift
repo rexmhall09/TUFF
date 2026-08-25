@@ -31,6 +31,59 @@ import TurboFieldfareValidationSupport
                 "full-layer K/V must diverge after K norm+RoPE and V no-scale norm")
     }
 
+    @Test func qOnlySharedKVPathMatchesScalarReference() throws {
+        let rows = 3, heads = 2, headDim = 64
+        let stride = heads * headDim
+        let q = Self.makeBlock(rows: rows, rowStride: stride,
+                               usedPerRow: stride, seed: 0xE4B0_0A11, label: "shared-q")
+        var rng = SeedTree(0xE4B0_0A12).key("q-norm")
+        let weights = (0..<headDim).map {
+            _ in Quantization.bf16Bits(rng.uniform(0.5, 1.5))
+        }
+        let context = try MetalContext()
+        let scalarNorm = try RMSNorm(context: context)
+        let scalarRoPE = try RoPE(context: context)
+        let block = try PrefillQKVEpilogue(context: context)
+        let reference = Fp16Buffer.make(context.device, halves: q)!
+        let actual = Fp16Buffer.make(context.device, halves: q)!
+        let weightBuffer = context.device.makeBuffer(
+            bytes: weights, length: weights.count * 2, options: .storageModeShared)!
+        let commandBuffer = context.queue.makeCommandBuffer()!
+        for row in 0..<rows {
+            let offset = row * stride * 2
+            scalarNorm.encodeBF16WPerHead(
+                commandBuffer: commandBuffer,
+                x: reference, xOffset: offset,
+                weight: weightBuffer,
+                out: reference, outOffset: offset,
+                headDim: UInt32(headDim), numHeads: heads, eps: 1e-6)
+            scalarRoPE.encodeProportionalNeox(
+                commandBuffer: commandBuffer,
+                data: reference, dataOffset: offset,
+                position: UInt32(19 + row),
+                headDim: UInt32(headDim), numHeads: UInt32(heads),
+                rotatedPairs: 8, theta: 1_000_000)
+        }
+        block.encodeGemmaQOnly(
+            commandBuffer: commandBuffer,
+            q: actual,
+            qWeight: weightBuffer,
+            startPosition: 19,
+            queryCount: UInt32(rows),
+            headDim: UInt32(headDim),
+            numQHeads: UInt32(heads),
+            qTokenStrideElements: UInt32(stride),
+            theta: 1_000_000,
+            rotatedPairs: 8,
+            eps: 1e-6)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try #require(commandBuffer.error == nil)
+        Self.expectClose(Fp16Buffer.read(actual, count: rows * stride),
+                         Fp16Buffer.read(reference, count: rows * stride),
+                         label: "shared-KV Q")
+    }
+
     private static func expectMatchesRepeatedScalar(rows: Int,
                                                     numQHeads: Int,
                                                     numKVHeads: Int,

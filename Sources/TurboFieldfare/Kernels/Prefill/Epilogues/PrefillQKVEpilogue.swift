@@ -10,6 +10,52 @@ final class PrefillQKVEpilogue {
         self.rope = try PrefillRoPE(context: context)
     }
 
+    /// Q-only Gemma epilogue for decoder layers that reuse a prior layer's
+    /// already-normalized and rotated K/V cache.
+    func encodeGemmaQOnly(commandBuffer: MTLCommandBuffer,
+                          q: MTLBuffer,
+                          qOffset: Int = 0,
+                          qWeight: MTLBuffer,
+                          qWeightOffset: Int = 0,
+                          startPosition: UInt32,
+                          queryCount: UInt32,
+                          headDim: UInt32,
+                          numQHeads: UInt32,
+                          qTokenStrideElements: UInt32,
+                          theta: Float,
+                          rotatedPairs: UInt32,
+                          eps: Float) {
+        perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
+                                x: q, xOffset: qOffset,
+                                weight: qWeight, weightOffset: qWeightOffset,
+                                out: q, outOffset: qOffset,
+                                queryCount: queryCount,
+                                headDim: headDim,
+                                numHeads: numQHeads,
+                                tokenStrideElements: qTokenStrideElements,
+                                eps: eps)
+        if rotatedPairs * 2 == headDim {
+            rope.encodeDefaultNeox(commandBuffer: commandBuffer,
+                                   data: q, dataOffset: qOffset,
+                                   startPosition: startPosition,
+                                   queryCount: queryCount,
+                                   headDim: headDim,
+                                   numHeads: numQHeads,
+                                   tokenStrideElements: qTokenStrideElements,
+                                   theta: theta)
+        } else {
+            rope.encodeProportionalNeox(commandBuffer: commandBuffer,
+                                        data: q, dataOffset: qOffset,
+                                        startPosition: startPosition,
+                                        queryCount: queryCount,
+                                        headDim: headDim,
+                                        numHeads: numQHeads,
+                                        rotatedPairs: rotatedPairs,
+                                        tokenStrideElements: qTokenStrideElements,
+                                        theta: theta)
+        }
+    }
+
     /// Qwen 3.6 full-attention epilogue: per-head weighted RMS norm on Q and K
     /// only (no V norm at all), then NeoX sub-dim partial RoPE (rotation
     /// confined to the first `rotaryDim` elements, frequency divisor =
