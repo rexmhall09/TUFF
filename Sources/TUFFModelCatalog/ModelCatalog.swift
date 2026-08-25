@@ -12,6 +12,7 @@ public enum TUFFModelFamily: String, Codable, Sendable {
 }
 
 public enum TUFFArchitectureID: String, Codable, Sendable {
+    case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
 }
@@ -41,6 +42,26 @@ public struct TUFFArchitectureProfile: Codable, Equatable, Sendable {
         self.feedForwardKind = feedForwardKind
         self.weightLayout = weightLayout
     }
+}
+
+public extension TUFFArchitectureProfile {
+    static let gemma4E4B = TUFFArchitectureProfile(
+        id: .gemma4_E4B,
+        family: .gemma4,
+        feedForwardKind: .dense,
+        weightLayout: .affine)
+
+    static let gemma4_26B_A4B = TUFFArchitectureProfile(
+        id: .gemma4_26B_A4B,
+        family: .gemma4,
+        feedForwardKind: .mixtureOfExperts,
+        weightLayout: .affine)
+
+    static let qwen36_35B_A3B = TUFFArchitectureProfile(
+        id: .qwen36_35B_A3B,
+        family: .qwen36,
+        feedForwardKind: .mixtureOfExperts,
+        weightLayout: .affine)
 }
 
 public enum TUFFReasoningControl: String, Codable, Sendable {
@@ -403,11 +424,7 @@ public enum TUFFModelCatalog {
         summary: "26B total, 3.9B active. The original TurboFieldfare target; "
             + "smallest install and lowest resident footprint.",
         family: .gemma4,
-        architecture: TUFFArchitectureProfile(
-            id: .gemma4_26B_A4B,
-            family: .gemma4,
-            feedForwardKind: .mixtureOfExperts,
-            weightLayout: .affine),
+        architecture: .gemma4_26B_A4B,
         installDirectoryName: "gemma4.gturbo",
         source: gemmaSource,
         hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),
@@ -445,11 +462,7 @@ public enum TUFFModelCatalog {
         summary: "35B total, 3B active. Hybrid linear/full attention, so its "
             + "KV cache stays small at long context; larger install.",
         family: .qwen36,
-        architecture: TUFFArchitectureProfile(
-            id: .qwen36_35B_A3B,
-            family: .qwen36,
-            feedForwardKind: .mixtureOfExperts,
-            weightLayout: .affine),
+        architecture: .qwen36_35B_A3B,
         installDirectoryName: "qwen36.gturbo",
         source: qwenSource,
         hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),

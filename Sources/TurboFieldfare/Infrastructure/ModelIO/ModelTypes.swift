@@ -11,6 +11,7 @@ public enum ModelFamily: String, Sendable, Equatable {
 }
 
 public enum ModelVariant: String, Sendable, Equatable {
+    case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
 
@@ -85,6 +86,14 @@ public struct ArchConfig: Sendable, Equatable {
     public let fullAttentionLayerMask: [UInt8]
     public let hiddenActivation: String
 
+    /// Per-layer embeddings (PLE) used by Gemma 4 E2B/E4B. Zero means the
+    /// architecture does not carry the auxiliary per-token residual stream.
+    public let hiddenSizePerLayerInput: Int
+    public let vocabSizePerLayerInput: Int
+    /// Final decoder layers that reuse K/V projections from the most recent
+    /// non-sharing layer of the same attention kind.
+    public let numKVSharedLayers: Int
+
     // Family-dependent extensions. Defaults describe Gemma 4 so that legacy
     // manifests (which omit them) validate unchanged.
     public let family: ModelFamily
@@ -139,6 +148,9 @@ public struct ArchConfig: Sendable, Equatable {
         attentionKEqV: Bool,
         fullAttentionLayerMask: [UInt8],
         hiddenActivation: String,
+        hiddenSizePerLayerInput: Int = 0,
+        vocabSizePerLayerInput: Int = 0,
+        numKVSharedLayers: Int = 0,
         family: ModelFamily = .gemma4,
         variant: ModelVariant? = nil,
         feedForwardKind: FeedForwardKind = .mixtureOfExperts,
@@ -172,6 +184,9 @@ public struct ArchConfig: Sendable, Equatable {
         self.attentionKEqV = attentionKEqV
         self.fullAttentionLayerMask = fullAttentionLayerMask
         self.hiddenActivation = hiddenActivation
+        self.hiddenSizePerLayerInput = hiddenSizePerLayerInput
+        self.vocabSizePerLayerInput = vocabSizePerLayerInput
+        self.numKVSharedLayers = numKVSharedLayers
         self.family = family
         self.variant = variant ?? ModelVariant.legacyDefault(for: family)
         self.feedForwardKind = feedForwardKind
@@ -212,9 +227,46 @@ public struct ArchConfig: Sendable, Equatable {
         hiddenActivation: "gelu_pytorch_tanh"
     )
 
+    /// Canonical Gemma 4 E4B text architecture. The final 18 layers reuse K/V
+    /// projections by attention kind, and every layer consumes a 256-wide PLE
+    /// signal alongside the main 2,560-wide residual stream.
+    public static let gemma4_E4B = ArchConfig(
+        hiddenSize: 2560,
+        intermediateSize: 10_240,
+        moeIntermediateSize: 0,
+        numHeads: 8,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 256,
+        fullHeadDim: 512,
+        vocabSize: 262_144,
+        slidingWindow: 512,
+        finalLogitSoftcap: 30.0,
+        ropeTheta: 10_000.0,
+        fullRopeTheta: 1_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 42,
+        numExperts: 0,
+        topKExperts: 0,
+        tieWordEmbeddings: true,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.gemma4E4BLayerMask(),
+        hiddenActivation: "gelu_pytorch_tanh",
+        hiddenSizePerLayerInput: 256,
+        vocabSizePerLayerInput: 262_144,
+        numKVSharedLayers: 18,
+        variant: .gemma4_E4B,
+        feedForwardKind: .dense)
+
     private static func gemma4LayerMask() -> [UInt8] {
         var mask = [UInt8](repeating: 0, count: 30)
         for i in stride(from: 5, to: 30, by: 6) { mask[i] = 1 }
+        return mask
+    }
+
+    private static func gemma4E4BLayerMask() -> [UInt8] {
+        var mask = [UInt8](repeating: 0, count: 42)
+        for i in stride(from: 5, to: 42, by: 6) { mask[i] = 1 }
         return mask
     }
 
@@ -275,6 +327,7 @@ public struct ArchConfig: Sendable, Equatable {
     /// resolver. Family alone is intentionally not a registry key because
     /// multiple checkpoints can share prompt behavior without sharing shapes.
     public static let registeredArchitectures: [ModelVariant: ArchConfig] = [
+        .gemma4_E4B: .gemma4_E4B,
         .gemma4_26B_A4B: .gemma4_26B_A4B,
         .qwen36_35B_A3B: .qwen36_35B_A3B,
     ]
@@ -299,13 +352,21 @@ public struct ArchConfig: Sendable, Equatable {
         }
         shapes.append((m: intermediateSize, n: hiddenSize))
         shapes.append((m: hiddenSize, n: intermediateSize))
+        if hiddenSizePerLayerInput > 0 {
+            shapes.append((m: numLayers * hiddenSizePerLayerInput, n: hiddenSize))
+            shapes.append((m: hiddenSizePerLayerInput, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: hiddenSizePerLayerInput))
+        }
         return shapes
     }
 
     /// Resident INT8 GEMV shapes issued during decode (router and, when the
     /// architecture has one, the shared-expert scalar gate).
     public var decodeInt8GEMVShapes: [(m: Int, n: Int)] {
-        var shapes: [(m: Int, n: Int)] = [(m: numExperts, n: hiddenSize)]
+        var shapes: [(m: Int, n: Int)] = []
+        if feedForwardKind == .mixtureOfExperts {
+            shapes.append((m: numExperts, n: hiddenSize))
+        }
         if sharedExpertGated { shapes.append((m: 1, n: hiddenSize)) }
         return shapes
     }
@@ -314,6 +375,17 @@ public struct ArchConfig: Sendable, Equatable {
     public func layerIsFull(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 1 }
     public func layerIsLinear(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 2 }
     public var hasLinearAttentionLayers: Bool { fullAttentionLayerMask.contains(2) }
+    public var hasPerLayerInputs: Bool { hiddenSizePerLayerInput > 0 }
+    public var firstKVSharedLayer: Int { numLayers - numKVSharedLayers }
+    public func layerSharesKV(_ layer: Int) -> Bool {
+        numKVSharedLayers > 0 && layer >= firstKVSharedLayer
+    }
+    public func kvSourceLayer(for layer: Int) -> Int? {
+        guard layerSharesKV(layer) else { return nil }
+        let kind = fullAttentionLayerMask[layer]
+        return stride(from: firstKVSharedLayer - 1, through: 0, by: -1)
+            .first { fullAttentionLayerMask[$0] == kind }
+    }
 }
 
 /// Failure modes for the validation gates in `Model.load`.

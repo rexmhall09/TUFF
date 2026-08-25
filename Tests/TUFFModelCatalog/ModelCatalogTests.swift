@@ -37,6 +37,8 @@ import Testing
         let gemma = TUFFModelCatalog.gemma4_26B_A4B
         let qwen = TUFFModelCatalog.qwen36_35B_A3B
 
+        #expect(TUFFArchitectureProfile.gemma4E4B.feedForwardKind == .dense)
+        #expect(TUFFArchitectureProfile.gemma4E4B.weightLayout == .affine)
         #expect(gemma.architecture.id == .gemma4_26B_A4B)
         #expect(qwen.architecture.id == .qwen36_35B_A3B)
         #expect(gemma.architecture.feedForwardKind == .mixtureOfExperts)
