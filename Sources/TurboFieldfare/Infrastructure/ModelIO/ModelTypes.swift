@@ -16,6 +16,7 @@ public enum ModelVariant: String, Sendable, Equatable {
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
+    case gptOss_120B = "gpt-oss-120b"
 
     static func legacyDefault(for family: ModelFamily) -> ModelVariant {
         switch family {
@@ -382,7 +383,7 @@ public struct ArchConfig: Sendable, Equatable {
         topKExperts: 4,
         tieWordEmbeddings: false,
         attentionKEqV: false,
-        fullAttentionLayerMask: Self.gptOss20BLayerMask(),
+        fullAttentionLayerMask: Self.gptOssLayerMask(count: 24),
         hiddenActivation: "swiglu_capped",
         family: .gptOss,
         variant: .gptOss_20B,
@@ -400,8 +401,49 @@ public struct ArchConfig: Sendable, Equatable {
             betaSlow: 1),
         swigluLimit: 7)
 
-    private static func gptOss20BLayerMask() -> [UInt8] {
-        (0..<24).map { $0.isMultiple(of: 2) ? 0 : 1 }
+    /// Canonical GPT-OSS 120B profile from the pinned OpenAI checkpoint. It
+    /// shares the 20B attention geometry and Harmony behavior, while expanding
+    /// to 36 layers and 128 routed experts.
+    public static let gptOss_120B = ArchConfig(
+        hiddenSize: 2_880,
+        intermediateSize: 2_880,
+        moeIntermediateSize: 2_880,
+        numHeads: 64,
+        numKVHeads: 8,
+        numFullKVHeads: 8,
+        headDim: 64,
+        fullHeadDim: 64,
+        vocabSize: 201_088,
+        slidingWindow: 128,
+        finalLogitSoftcap: 0,
+        ropeTheta: 150_000,
+        fullRopeTheta: 150_000,
+        partialRotaryFactor: 1,
+        numLayers: 36,
+        numExperts: 128,
+        topKExperts: 4,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.gptOssLayerMask(count: 36),
+        hiddenActivation: "swiglu_capped",
+        family: .gptOss,
+        variant: .gptOss_120B,
+        attentionScale: 0.125,
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true,
+        attentionSinks: true,
+        yarnRope: YaRNRopeConfig(
+            originalContextLength: 4_096,
+            scalingFactor: 32,
+            betaFast: 32,
+            betaSlow: 1),
+        swigluLimit: 7)
+
+    private static func gptOssLayerMask(count: Int) -> [UInt8] {
+        (0..<count).map { $0.isMultiple(of: 2) ? 0 : 1 }
     }
 
     /// Variant registry used by both v1.1 manifests and the legacy-family
@@ -412,6 +454,7 @@ public struct ArchConfig: Sendable, Equatable {
         .gemma4_26B_A4B: .gemma4_26B_A4B,
         .qwen36_35B_A3B: .qwen36_35B_A3B,
         .gptOss_20B: .gptOss_20B,
+        .gptOss_120B: .gptOss_120B,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
