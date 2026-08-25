@@ -182,7 +182,15 @@ import TurboFieldfareValidationSupport
             scratch: scratch,
             residual: residualBuffer,
             output: output,
-            queryCount: queries)
+            queryStart: 0,
+            queryCount: 1)
+        try runtime.encodeReduce(
+            commandBuffer: commandBuffer,
+            scratch: scratch,
+            residual: residualBuffer,
+            output: output,
+            queryStart: 1,
+            queryCount: queries - 1)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         try checkCommandBufferError(commandBuffer.error)

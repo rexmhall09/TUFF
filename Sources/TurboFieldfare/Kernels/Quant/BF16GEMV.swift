@@ -22,6 +22,7 @@ final class BF16GEMV {
         commandBuffer: MTLCommandBuffer,
         weights: TensorView,
         input: MTLBuffer,
+        inputOffset: Int = 0,
         output: MTLBuffer,
         outputOffset: Int = 0,
         bias: TensorView? = nil,
@@ -32,6 +33,7 @@ final class BF16GEMV {
                pipeline: halfPipeline,
                weights: weights,
                input: input,
+               inputOffset: inputOffset,
                output: output,
                outputOffset: outputOffset,
                bias: bias,
@@ -43,6 +45,7 @@ final class BF16GEMV {
         commandBuffer: MTLCommandBuffer,
         weights: TensorView,
         input: MTLBuffer,
+        inputOffset: Int = 0,
         output: MTLBuffer,
         outputOffset: Int = 0,
         bias: TensorView? = nil,
@@ -53,6 +56,7 @@ final class BF16GEMV {
                pipeline: floatPipeline,
                weights: weights,
                input: input,
+               inputOffset: inputOffset,
                output: output,
                outputOffset: outputOffset,
                bias: bias,
@@ -65,12 +69,13 @@ final class BF16GEMV {
         table: TensorView,
         token: UInt32,
         output: MTLBuffer,
+        outputOffset: Int = 0,
         hiddenSize: Int
     ) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(embeddingPipeline)
         encoder.setBuffer(table.buffer, offset: Int(table.offset), index: 0)
-        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBuffer(output, offset: outputOffset, index: 1)
         var tokenValue = token
         var hiddenValue = UInt32(hiddenSize)
         encoder.setBytes(&tokenValue, length: MemoryLayout<UInt32>.size, index: 2)
@@ -87,6 +92,7 @@ final class BF16GEMV {
         pipeline: MTLComputePipelineState,
         weights: TensorView,
         input: MTLBuffer,
+        inputOffset: Int,
         output: MTLBuffer,
         outputOffset: Int,
         bias: TensorView?,
@@ -94,10 +100,12 @@ final class BF16GEMV {
         columns: Int
     ) {
         precondition(rows > 0 && columns > 0)
+        precondition(inputOffset % MemoryLayout<Float16>.alignment == 0)
+        precondition(outputOffset % MemoryLayout<Float16>.alignment == 0)
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(weights.buffer, offset: Int(weights.offset), index: 0)
-        encoder.setBuffer(input, offset: 0, index: 1)
+        encoder.setBuffer(input, offset: inputOffset, index: 1)
         encoder.setBuffer(output, offset: outputOffset, index: 2)
         encoder.setBuffer(bias?.buffer ?? weights.buffer,
                           offset: bias.map { Int($0.offset) } ?? Int(weights.offset),

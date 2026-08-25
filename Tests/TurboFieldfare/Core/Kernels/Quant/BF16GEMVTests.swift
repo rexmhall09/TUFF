@@ -49,8 +49,9 @@ import TurboFieldfareValidationSupport
             bytes: biases,
             length: biases.count * MemoryLayout<UInt16>.stride,
             options: .storageModeShared))
+        let inputPrefix: [Float16] = [99, -99]
         let inputBuffer = try #require(Fp16Buffer.make(
-            context.device, halves: input))
+            context.device, halves: inputPrefix + input))
         let halfOutput = try #require(context.device.makeBuffer(
             length: (rows + 4) * MemoryLayout<Float16>.stride,
             options: .storageModeShared))
@@ -67,6 +68,8 @@ import TurboFieldfareValidationSupport
         kernel.encodeHalf(commandBuffer: commandBuffer,
                           weights: weightsView,
                           input: inputBuffer,
+                          inputOffset: inputPrefix.count
+                            * MemoryLayout<Float16>.stride,
                           output: halfOutput,
                           outputOffset: 2 * MemoryLayout<Float16>.stride,
                           bias: biasView,
@@ -75,6 +78,8 @@ import TurboFieldfareValidationSupport
         kernel.encodeFloat(commandBuffer: commandBuffer,
                            weights: weightsView,
                            input: inputBuffer,
+                           inputOffset: inputPrefix.count
+                            * MemoryLayout<Float16>.stride,
                            output: floatOutput,
                            bias: biasView,
                            rows: rows,
@@ -109,7 +114,9 @@ import TurboFieldfareValidationSupport
             bytes: table,
             length: table.count * MemoryLayout<UInt16>.stride,
             options: .storageModeShared))
-        let output = try #require(Fp16Buffer.make(context.device, count: hidden))
+        let output = try #require(Fp16Buffer.make(
+            context.device, halves: [42, -42]
+                + [Float16](repeating: 0, count: hidden)))
         let commandBuffer = try #require(context.queue.makeCommandBuffer())
         kernel.encodeEmbedding(
             commandBuffer: commandBuffer,
@@ -117,12 +124,15 @@ import TurboFieldfareValidationSupport
                              rows: vocab, columns: hidden),
             token: 5,
             output: output,
+            outputOffset: 2 * MemoryLayout<Float16>.stride,
             hiddenSize: hidden)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         try checkCommandBufferError(commandBuffer.error)
 
-        let actual = Fp16Buffer.read(output, count: hidden)
+        let values = Fp16Buffer.read(output, count: hidden + 2)
+        #expect(Array(values[0..<2]) == [42, -42])
+        let actual = Array(values.dropFirst(2))
         let expected = table[(5 * hidden)..<(6 * hidden)].map {
             Quantization.bf16ToFloat($0)
         }

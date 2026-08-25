@@ -41,19 +41,23 @@ final class GPTOSSMoEPrimitives {
 
     func encodeRouteReduce(commandBuffer: MTLCommandBuffer,
                            routePartials: MTLBuffer,
+                           routePartialsOffset: Int = 0,
                            routeWeights: MTLBuffer,
+                           routeWeightsOffset: Int = 0,
                            residual: MTLBuffer,
+                           residualOffset: Int = 0,
                            output: MTLBuffer,
+                           outputOffset: Int = 0,
                            queryCount: UInt32,
                            hiddenSize: UInt32,
                            topK: UInt32 = 4) {
         precondition(queryCount > 0 && hiddenSize > 0 && topK > 0)
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(routeReduce)
-        encoder.setBuffer(routePartials, offset: 0, index: 0)
-        encoder.setBuffer(routeWeights, offset: 0, index: 1)
-        encoder.setBuffer(residual, offset: 0, index: 2)
-        encoder.setBuffer(output, offset: 0, index: 3)
+        encoder.setBuffer(routePartials, offset: routePartialsOffset, index: 0)
+        encoder.setBuffer(routeWeights, offset: routeWeightsOffset, index: 1)
+        encoder.setBuffer(residual, offset: residualOffset, index: 2)
+        encoder.setBuffer(output, offset: outputOffset, index: 3)
         var queries = queryCount
         var dimension = hiddenSize
         var expertCount = topK
@@ -97,15 +101,17 @@ final class GPTOSSMoEPrimitives {
                           logits: MTLBuffer,
                           logitsOffset: Int = 0,
                           outputIndices: MTLBuffer,
+                          outputIndicesOffset: Int = 0,
                           outputWeights: MTLBuffer,
+                          outputWeightsOffset: Int = 0,
                           numExperts: UInt32) {
         precondition((4...128).contains(numExperts),
                      "GPT-OSS supports 4...128 routed experts")
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(routerTop4)
         encoder.setBuffer(logits, offset: logitsOffset, index: 0)
-        encoder.setBuffer(outputIndices, offset: 0, index: 1)
-        encoder.setBuffer(outputWeights, offset: 0, index: 2)
+        encoder.setBuffer(outputIndices, offset: outputIndicesOffset, index: 1)
+        encoder.setBuffer(outputWeights, offset: outputWeightsOffset, index: 2)
         var expertCount = numExperts
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.size, index: 3)
         encoder.dispatchThreadgroups(

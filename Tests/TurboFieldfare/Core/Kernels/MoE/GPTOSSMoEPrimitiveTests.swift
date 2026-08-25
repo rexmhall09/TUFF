@@ -48,28 +48,39 @@ import TurboFieldfareValidationSupport
 
         let context = try MetalContext()
         let primitive = try GPTOSSMoEPrimitives(context: context)
+        let paddedLogits = [Float(99)] + logits
         let logitBuffer = try #require(context.device.makeBuffer(
-            bytes: logits,
-            length: logits.count * MemoryLayout<Float>.stride,
+            bytes: paddedLogits,
+            length: paddedLogits.count * MemoryLayout<Float>.stride,
             options: .storageModeShared))
         let indices = try #require(context.device.makeBuffer(
-            length: 4 * MemoryLayout<UInt32>.stride,
+            length: 6 * MemoryLayout<UInt32>.stride,
             options: .storageModeShared))
-        let weights = try #require(Fp16Buffer.make(context.device, count: 4))
+        let weights = try #require(Fp16Buffer.make(context.device, count: 6))
+        memset(indices.contents(), 0, indices.length)
+        memset(weights.contents(), 0, weights.length)
         let commandBuffer = try #require(context.queue.makeCommandBuffer())
         primitive.encodeRouterTop4(
             commandBuffer: commandBuffer,
             logits: logitBuffer,
+            logitsOffset: MemoryLayout<Float>.stride,
             outputIndices: indices,
+            outputIndicesOffset: 2 * MemoryLayout<UInt32>.stride,
             outputWeights: weights,
+            outputWeightsOffset: 2 * MemoryLayout<Float16>.stride,
             numExperts: UInt32(numExperts))
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         try checkCommandBufferError(commandBuffer.error)
 
         let pointer = indices.contents().bindMemory(to: UInt32.self, capacity: 4)
-        let actualIndices = (0..<4).map { pointer[$0] }
-        let actualWeights = Fp16Buffer.read(weights, count: 4)
+        #expect(pointer[0] == 0)
+        #expect(pointer[1] == 0)
+        let actualIndices = (0..<4).map { pointer[$0 + 2] }
+        let weightValues = Fp16Buffer.read(weights, count: 6)
+        #expect(weightValues[0] == 0)
+        #expect(weightValues[1] == 0)
+        let actualWeights = Array(weightValues.dropFirst(2))
         #expect(actualIndices == expected.indices)
         let error = RelError.compute(actual: actualWeights, reference: expected.weights)
         #expect(error < Tolerance.fp16Reduction, "rel=\(error)")

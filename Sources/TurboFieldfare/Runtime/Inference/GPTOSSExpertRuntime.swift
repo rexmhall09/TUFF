@@ -171,18 +171,27 @@ final class GPTOSSExpertRuntime {
                       scratch: GPTOSSExpertScratchBuffers,
                       residual: MTLBuffer,
                       output: MTLBuffer,
+                      queryStart: Int = 0,
                       queryCount: Int) throws {
-        guard queryCount > 0, queryCount <= scratch.layout.queryCapacity else {
+        let layout = scratch.layout
+        guard queryStart >= 0, queryCount > 0,
+              queryStart + queryCount <= layout.queryCapacity else {
             throw GPTOSSExpertRuntimeError.invalidScratchLayout
         }
+        let halfBytes = MemoryLayout<Float16>.stride
         primitives.encodeRouteReduce(
             commandBuffer: commandBuffer,
             routePartials: scratch.routePartials,
+            routePartialsOffset: queryStart * layout.topK
+                * layout.hiddenSize * halfBytes,
             routeWeights: scratch.routeWeights,
+            routeWeightsOffset: queryStart * layout.topK * halfBytes,
             residual: residual,
+            residualOffset: queryStart * layout.hiddenSize * halfBytes,
             output: output,
+            outputOffset: queryStart * layout.hiddenSize * halfBytes,
             queryCount: UInt32(queryCount),
-            hiddenSize: UInt32(scratch.layout.hiddenSize),
-            topK: UInt32(scratch.layout.topK))
+            hiddenSize: UInt32(layout.hiddenSize),
+            topK: UInt32(layout.topK))
     }
 }
