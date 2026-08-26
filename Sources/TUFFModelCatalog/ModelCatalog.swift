@@ -516,8 +516,7 @@ public enum TUFFModelCatalog {
         apiModelID: "gemma-4-26b-a4b-it",
         displayName: "Gemma 4 26B-A4B IT 4-bit",
         shortName: "Gemma 4 26B",
-        summary: "26B total, 3.9B active. The original TurboFieldfare target; "
-            + "smallest install and lowest resident footprint.",
+        summary: "26B total, 3.9B active. A balanced Gemma model with optional image input.",
         family: .gemma4,
         architecture: .gemma4_26B_A4B,
         installDirectoryName: "gemma4.gturbo",
