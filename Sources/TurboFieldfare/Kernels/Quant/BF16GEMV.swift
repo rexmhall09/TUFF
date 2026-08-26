@@ -7,6 +7,7 @@ final class BF16GEMV {
     private let halfPipeline: MTLComputePipelineState
     private let floatPipeline: MTLComputePipelineState
     private let embeddingPipeline: MTLComputePipelineState
+    private let floatEmbeddingPipeline: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         halfPipeline = try context.pipeline(
@@ -16,6 +17,7 @@ final class BF16GEMV {
             "bf16_gemv_float_simd", constants: [],
             maxTotalThreadsPerThreadgroup: 32 * Self.rowsPerThreadgroup)
         embeddingPipeline = try context.pipeline("bf16_embedding_lookup_half")
+        floatEmbeddingPipeline = try context.pipeline("bf16_embedding_lookup_float")
     }
 
     func encodeHalf(
@@ -81,6 +83,29 @@ final class BF16GEMV {
         encoder.setBytes(&tokenValue, length: MemoryLayout<UInt32>.size, index: 2)
         encoder.setBytes(&hiddenValue, length: MemoryLayout<UInt32>.size, index: 3)
         let width = min(hiddenSize, embeddingPipeline.maxTotalThreadsPerThreadgroup)
+        encoder.dispatchThreads(
+            MTLSize(width: hiddenSize, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: max(1, width), height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    func encodeFloatEmbedding(
+        commandBuffer: MTLCommandBuffer,
+        table: TensorView,
+        token: UInt32,
+        output: MTLBuffer,
+        outputOffset: Int = 0,
+        hiddenSize: Int
+    ) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(floatEmbeddingPipeline)
+        encoder.setBuffer(table.buffer, offset: Int(table.offset), index: 0)
+        encoder.setBuffer(output, offset: outputOffset, index: 1)
+        var tokenValue = token
+        var hiddenValue = UInt32(hiddenSize)
+        encoder.setBytes(&tokenValue, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&hiddenValue, length: MemoryLayout<UInt32>.size, index: 3)
+        let width = min(hiddenSize, floatEmbeddingPipeline.maxTotalThreadsPerThreadgroup)
         encoder.dispatchThreads(
             MTLSize(width: hiddenSize, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: max(1, width), height: 1, depth: 1))

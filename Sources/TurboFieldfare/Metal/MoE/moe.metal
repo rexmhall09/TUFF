@@ -126,6 +126,31 @@ kernel void gptoss_route_reduce(
     output[gid] = half(value);
 }
 
+kernel void gptoss_route_reduce_float_residual(
+    device const half* route_partials [[buffer(0)]],
+    device const half* route_weights [[buffer(1)]],
+    device const float* residual [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& query_count [[buffer(4)]],
+    constant uint& hidden_size [[buffer(5)]],
+    constant uint& top_k [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = query_count * hidden_size;
+    if (gid >= total) return;
+    const uint token = gid / hidden_size;
+    const uint dimension = gid - token * hidden_size;
+    float value = residual[gid];
+    const uint route_base = token * top_k;
+    for (uint slot = 0u; slot < top_k; ++slot) {
+        const uint route = route_base + slot;
+        value = fma(float(route_weights[route]),
+                    float(route_partials[route * hidden_size + dimension]),
+                    value);
+    }
+    output[gid] = value;
+}
+
 // GPT-OSS router selection: stable top-4 followed by a softmax over only the
 // selected logits. Ties prefer the lower expert index, matching the CPU and
 // official reference implementations.

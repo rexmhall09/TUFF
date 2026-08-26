@@ -160,6 +160,17 @@ import TurboFieldfareValidationSupport
         let inputBuffer = try #require(Fp16Buffer.make(context.device, halves: inputs))
         let residualBuffer = try #require(Fp16Buffer.make(context.device, halves: residual))
         let output = try #require(Fp16Buffer.make(context.device, count: queries * hidden))
+        let floatResidual = (0..<(queries * hidden)).map { index in
+            let magnitude = Float(70_000 + (index % hidden) * 8)
+            return index.isMultiple(of: 2) ? magnitude : -magnitude
+        }
+        let floatResidualBuffer = try #require(context.device.makeBuffer(
+            bytes: floatResidual,
+            length: floatResidual.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
+        let floatOutput = try #require(context.device.makeBuffer(
+            length: floatResidual.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
         let weightPointer = scratch.routeWeights.contents()
             .bindMemory(to: Float16.self, capacity: weights.count)
         for index in weights.indices { weightPointer[index] = weights[index] }
@@ -191,6 +202,20 @@ import TurboFieldfareValidationSupport
             output: output,
             queryStart: 1,
             queryCount: queries - 1)
+        try runtime.encodeFloatResidualReduce(
+            commandBuffer: commandBuffer,
+            scratch: scratch,
+            residual: floatResidualBuffer,
+            output: floatOutput,
+            queryStart: 0,
+            queryCount: 1)
+        try runtime.encodeFloatResidualReduce(
+            commandBuffer: commandBuffer,
+            scratch: scratch,
+            residual: floatResidualBuffer,
+            output: floatOutput,
+            queryStart: 1,
+            queryCount: queries - 1)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         try checkCommandBufferError(commandBuffer.error)
@@ -214,6 +239,30 @@ import TurboFieldfareValidationSupport
         let actual = Fp16Buffer.read(output, count: expected.count)
         let error = RelError.compute(actual: actual, reference: expected)
         #expect(error < Tolerance.fp16ChainedReduction, "rel=\(error)")
+
+        var floatExpected = [Float](repeating: 0, count: queries * hidden)
+        for query in 0..<queries {
+            let input = inputs[(query * hidden)..<((query + 1) * hidden)].map(Float.init)
+            let expertOutputs = fixtures.map {
+                Self.reference(fixture: $0, input: input,
+                               hidden: hidden, intermediate: intermediate)
+            }
+            for dimension in 0..<hidden {
+                var value = floatResidual[query * hidden + dimension]
+                for slot in 0..<topK {
+                    value += Float(weights[query * topK + slot])
+                        * expertOutputs[slot][dimension]
+                }
+                floatExpected[query * hidden + dimension] = value
+            }
+        }
+        let floatPointer = floatOutput.contents().assumingMemoryBound(to: Float.self)
+        let floatActual = (0..<floatExpected.count).map { floatPointer[$0] }
+        #expect(floatActual.allSatisfy { $0.isFinite })
+        #expect(floatActual.allSatisfy {
+            abs($0) > Float(Float16.greatestFiniteMagnitude)
+        })
+        #expect(RelError.maxAbsDiff(floatActual, floatExpected) < 0.02)
     }
 
     @Test func productionScratchStaysBoundedAcrossDecodeAndPrefill() {

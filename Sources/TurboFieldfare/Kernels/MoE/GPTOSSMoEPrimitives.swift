@@ -6,6 +6,7 @@ final class GPTOSSMoEPrimitives {
     private let cappedSwiGLUInterleaved: MTLComputePipelineState
     private let routerTop4: MTLComputePipelineState
     private let routeReduce: MTLComputePipelineState
+    private let floatResidualRouteReduce: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         cappedSwiGLU = try context.pipeline("gptoss_capped_swiglu")
@@ -13,6 +14,8 @@ final class GPTOSSMoEPrimitives {
             "gptoss_capped_swiglu_interleaved")
         routerTop4 = try context.pipeline("gptoss_router_top4")
         routeReduce = try context.pipeline("gptoss_route_reduce")
+        floatResidualRouteReduce = try context.pipeline(
+            "gptoss_route_reduce_float_residual")
     }
 
     func encodeCappedSwiGLUInterleaved(
@@ -66,6 +69,41 @@ final class GPTOSSMoEPrimitives {
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.size, index: 6)
         let total = Int(queryCount * hiddenSize)
         let width = min(total, routeReduce.maxTotalThreadsPerThreadgroup)
+        encoder.dispatchThreads(
+            MTLSize(width: total, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: max(1, width), height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    func encodeFloatResidualRouteReduce(
+        commandBuffer: MTLCommandBuffer,
+        routePartials: MTLBuffer,
+        routePartialsOffset: Int = 0,
+        routeWeights: MTLBuffer,
+        routeWeightsOffset: Int = 0,
+        residual: MTLBuffer,
+        residualOffset: Int = 0,
+        output: MTLBuffer,
+        outputOffset: Int = 0,
+        queryCount: UInt32,
+        hiddenSize: UInt32,
+        topK: UInt32 = 4
+    ) {
+        precondition(queryCount > 0 && hiddenSize > 0 && topK > 0)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(floatResidualRouteReduce)
+        encoder.setBuffer(routePartials, offset: routePartialsOffset, index: 0)
+        encoder.setBuffer(routeWeights, offset: routeWeightsOffset, index: 1)
+        encoder.setBuffer(residual, offset: residualOffset, index: 2)
+        encoder.setBuffer(output, offset: outputOffset, index: 3)
+        var queries = queryCount
+        var dimension = hiddenSize
+        var expertCount = topK
+        encoder.setBytes(&queries, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.size, index: 6)
+        let total = Int(queryCount * hiddenSize)
+        let width = min(total, floatResidualRouteReduce.maxTotalThreadsPerThreadgroup)
         encoder.dispatchThreads(
             MTLSize(width: total, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: max(1, width), height: 1, depth: 1))

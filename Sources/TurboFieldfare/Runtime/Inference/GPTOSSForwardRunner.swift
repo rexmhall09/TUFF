@@ -129,7 +129,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         let querySize = config.numHeads * config.headDim
         let queryCapacity = Self.prefillQueryCapacity
         hidden = try sharedBuffer(elements: queryCapacity * hiddenSize,
-                                  stride: MemoryLayout<Float16>.stride,
+                                  stride: MemoryLayout<Float>.stride,
                                   label: "gptoss.hidden")
         normed = try sharedBuffer(elements: queryCapacity * hiddenSize,
                                   stride: MemoryLayout<Float16>.stride,
@@ -236,24 +236,23 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 "GPT-OSS logits buffer is smaller than the model vocabulary")
         }
 
-        let halfBytes = MemoryLayout<Float16>.stride
+        let floatBytes = MemoryLayout<Float>.stride
         let embeddingCB = context.queue.makeCommandBuffer()!
         for (row, token) in tokens.enumerated() {
             guard token >= 0, Int(token) < config.vocabSize else {
                 throw GeneratorError.invalidGenerationConfig(
                     "GPT-OSS token ID \(token) is outside vocab \(config.vocabSize)")
             }
-            bf16.encodeEmbedding(
+            bf16.encodeFloatEmbedding(
                 commandBuffer: embeddingCB,
                 table: model.embedding,
                 token: UInt32(token),
                 output: hidden,
-                outputOffset: row * config.hiddenSize * halfBytes,
+                outputOffset: row * config.hiddenSize * floatBytes,
                 hiddenSize: config.hiddenSize)
         }
         embeddingCB.commit()
         try waitForCompletion(embeddingCB)
-
         for layer in 0..<config.numLayers {
             try Task.checkCancellation()
             try await executePrefillLayer(
@@ -263,7 +262,9 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
 
         if emitHead {
             try executeHead(
-                hiddenOffset: (queryCount - 1) * config.hiddenSize * halfBytes,
+                hiddenOffset: (queryCount - 1) * config.hiddenSize * floatBytes,
+                normedOffset: (queryCount - 1) * config.hiddenSize
+                    * MemoryLayout<Float16>.stride,
                 logits: logits)
         }
     }
@@ -283,38 +284,39 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         let cb1 = context.queue.makeCommandBuffer()!
         for row in 0..<queryCount {
             let position = startPosition + row
-            let hiddenOffset = row * hiddenSize * halfBytes
+            let hiddenOffset = row * hiddenSize * floatBytes
+            let normedOffset = row * hiddenSize * halfBytes
             let queryOffset = row * qRows * halfBytes
             let routerOffset = row * config.numExperts * floatBytes
             let routeOffset = row * config.topKExperts
             let kSlot = kv.kSlot(layer: layer, position: position)
             let vSlot = kv.vSlot(layer: layer, position: position)
 
-            rms.encodeBF16W(
+            rms.encodeFloatBF16W(
                 commandBuffer: cb1,
                 x: hidden, xOffset: hiddenOffset,
                 weight: views.inputNorm.buffer,
                 weightOffset: Int(views.inputNorm.offset),
-                out: normed, outOffset: hiddenOffset,
+                out: normed, outOffset: normedOffset,
                 d: UInt32(hiddenSize), eps: 1e-5)
             bf16.encodeHalf(
                 commandBuffer: cb1,
                 weights: views.qWeight,
-                input: normed, inputOffset: hiddenOffset,
+                input: normed, inputOffset: normedOffset,
                 output: query, outputOffset: queryOffset,
                 bias: views.qBias,
                 rows: qRows, columns: hiddenSize)
             bf16.encodeHalf(
                 commandBuffer: cb1,
                 weights: views.kWeight,
-                input: normed, inputOffset: hiddenOffset,
+                input: normed, inputOffset: normedOffset,
                 output: kSlot.buffer, outputOffset: kSlot.offset,
                 bias: views.kBias,
                 rows: kvRows, columns: hiddenSize)
             bf16.encodeHalf(
                 commandBuffer: cb1,
                 weights: views.vWeight,
-                input: normed, inputOffset: hiddenOffset,
+                input: normed, inputOffset: normedOffset,
                 output: vSlot.buffer, outputOffset: vSlot.offset,
                 bias: views.vBias,
                 rows: kvRows, columns: hiddenSize)
@@ -361,25 +363,25 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 commandBuffer: cb1,
                 weights: views.oWeight,
                 input: attentionOutput, inputOffset: queryOffset,
-                output: projectedAttention, outputOffset: hiddenOffset,
+                output: projectedAttention, outputOffset: normedOffset,
                 bias: views.oBias,
                 rows: hiddenSize, columns: qRows)
-            elementwise.encodeResidualAdd(
+            elementwise.encodeFloatResidualAdd(
                 commandBuffer: cb1,
                 hidden: hidden, hiddenOffset: hiddenOffset,
-                delta: projectedAttention, deltaOffset: hiddenOffset,
+                delta: projectedAttention, deltaOffset: normedOffset,
                 count: hiddenSize)
-            rms.encodeBF16W(
+            rms.encodeFloatBF16W(
                 commandBuffer: cb1,
                 x: hidden, xOffset: hiddenOffset,
                 weight: views.postAttentionNorm.buffer,
                 weightOffset: Int(views.postAttentionNorm.offset),
-                out: normed, outOffset: hiddenOffset,
+                out: normed, outOffset: normedOffset,
                 d: UInt32(hiddenSize), eps: 1e-5)
             bf16.encodeFloat(
                 commandBuffer: cb1,
                 weights: views.routerWeight,
-                input: normed, inputOffset: hiddenOffset,
+                input: normed, inputOffset: normedOffset,
                 output: routerLogits, outputOffset: routerOffset,
                 bias: views.routerBias,
                 rows: config.numExperts, columns: hiddenSize)
@@ -444,7 +446,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 }
             }
             if groupEnd == orderedExperts.count {
-                try expertRuntime.encodeReduce(
+                try expertRuntime.encodeFloatResidualReduce(
                     commandBuffer: cb2,
                     scratch: expertScratch,
                     residual: hidden,
@@ -480,11 +482,11 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         }
 
         let embeddingCB = context.queue.makeCommandBuffer()!
-        bf16.encodeEmbedding(commandBuffer: embeddingCB,
-                             table: model.embedding,
-                             token: UInt32(token),
-                             output: hidden,
-                             hiddenSize: config.hiddenSize)
+        bf16.encodeFloatEmbedding(commandBuffer: embeddingCB,
+                                  table: model.embedding,
+                                  token: UInt32(token),
+                                  output: hidden,
+                                  hiddenSize: config.hiddenSize)
         embeddingCB.commit()
         try waitForCompletion(embeddingCB)
 
@@ -495,22 +497,24 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         kv.advance()
 
         guard emitHead else { return }
-        try executeHead(hiddenOffset: 0, logits: logits)
+        try executeHead(hiddenOffset: 0, normedOffset: 0, logits: logits)
     }
 
-    private func executeHead(hiddenOffset: Int, logits: MTLBuffer) throws {
+    private func executeHead(hiddenOffset: Int,
+                             normedOffset: Int,
+                             logits: MTLBuffer) throws {
         let headStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let headCB = context.queue.makeCommandBuffer()!
-        rms.encodeBF16W(commandBuffer: headCB,
-                        x: hidden, xOffset: hiddenOffset,
-                        weight: model.finalNorm.buffer,
-                        weightOffset: Int(model.finalNorm.offset),
-                        out: normed, outOffset: hiddenOffset,
-                        d: UInt32(config.hiddenSize),
-                        eps: 1e-5)
+        rms.encodeFloatBF16W(commandBuffer: headCB,
+                             x: hidden, xOffset: hiddenOffset,
+                             weight: model.finalNorm.buffer,
+                             weightOffset: Int(model.finalNorm.offset),
+                             out: normed, outOffset: normedOffset,
+                             d: UInt32(config.hiddenSize),
+                             eps: 1e-5)
         bf16.encodeHalf(commandBuffer: headCB,
                         weights: model.lmHead,
-                        input: normed, inputOffset: hiddenOffset,
+                        input: normed, inputOffset: normedOffset,
                         output: logits,
                         rows: config.vocabSize,
                         columns: config.hiddenSize)
@@ -529,13 +533,13 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
 
         let cb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let cb1 = context.queue.makeCommandBuffer()!
-        rms.encodeBF16W(commandBuffer: cb1,
-                        x: hidden,
-                        weight: views.inputNorm.buffer,
-                        weightOffset: Int(views.inputNorm.offset),
-                        out: normed,
-                        d: UInt32(hiddenSize),
-                        eps: 1e-5)
+        rms.encodeFloatBF16W(commandBuffer: cb1,
+                             x: hidden,
+                             weight: views.inputNorm.buffer,
+                             weightOffset: Int(views.inputNorm.offset),
+                             out: normed,
+                             d: UInt32(hiddenSize),
+                             eps: 1e-5)
         bf16.encodeHalf(commandBuffer: cb1,
                         weights: views.qWeight,
                         input: normed,
@@ -604,17 +608,17 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                         bias: views.oBias,
                         rows: hiddenSize,
                         columns: qRows)
-        elementwise.encodeResidualAdd(commandBuffer: cb1,
-                                      hidden: hidden,
-                                      delta: projectedAttention,
-                                      count: hiddenSize)
-        rms.encodeBF16W(commandBuffer: cb1,
-                        x: hidden,
-                        weight: views.postAttentionNorm.buffer,
-                        weightOffset: Int(views.postAttentionNorm.offset),
-                        out: normed,
-                        d: UInt32(hiddenSize),
-                        eps: 1e-5)
+        elementwise.encodeFloatResidualAdd(commandBuffer: cb1,
+                                           hidden: hidden,
+                                           delta: projectedAttention,
+                                           count: hiddenSize)
+        rms.encodeFloatBF16W(commandBuffer: cb1,
+                             x: hidden,
+                             weight: views.postAttentionNorm.buffer,
+                             weightOffset: Int(views.postAttentionNorm.offset),
+                             out: normed,
+                             d: UInt32(hiddenSize),
+                             eps: 1e-5)
         bf16.encodeFloat(commandBuffer: cb1,
                          weights: views.routerWeight,
                          input: normed,
@@ -654,7 +658,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 scratch: expertScratch,
                 swigluLimit: Float(config.swigluLimit))
         }
-        try expertRuntime.encodeReduce(
+        try expertRuntime.encodeFloatResidualReduce(
             commandBuffer: cb2,
             scratch: expertScratch,
             residual: hidden,

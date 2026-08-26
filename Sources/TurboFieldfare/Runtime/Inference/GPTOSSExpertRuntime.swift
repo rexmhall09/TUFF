@@ -194,4 +194,33 @@ final class GPTOSSExpertRuntime {
             hiddenSize: UInt32(layout.hiddenSize),
             topK: UInt32(layout.topK))
     }
+
+    func encodeFloatResidualReduce(commandBuffer: MTLCommandBuffer,
+                                   scratch: GPTOSSExpertScratchBuffers,
+                                   residual: MTLBuffer,
+                                   output: MTLBuffer,
+                                   queryStart: Int = 0,
+                                   queryCount: Int) throws {
+        let layout = scratch.layout
+        guard queryStart >= 0, queryCount > 0,
+              queryStart + queryCount <= layout.queryCapacity else {
+            throw GPTOSSExpertRuntimeError.invalidScratchLayout
+        }
+        let halfBytes = MemoryLayout<Float16>.stride
+        let floatBytes = MemoryLayout<Float>.stride
+        primitives.encodeFloatResidualRouteReduce(
+            commandBuffer: commandBuffer,
+            routePartials: scratch.routePartials,
+            routePartialsOffset: queryStart * layout.topK
+                * layout.hiddenSize * halfBytes,
+            routeWeights: scratch.routeWeights,
+            routeWeightsOffset: queryStart * layout.topK * halfBytes,
+            residual: residual,
+            residualOffset: queryStart * layout.hiddenSize * floatBytes,
+            output: output,
+            outputOffset: queryStart * layout.hiddenSize * floatBytes,
+            queryCount: UInt32(queryCount),
+            hiddenSize: UInt32(layout.hiddenSize),
+            topK: UInt32(layout.topK))
+    }
 }

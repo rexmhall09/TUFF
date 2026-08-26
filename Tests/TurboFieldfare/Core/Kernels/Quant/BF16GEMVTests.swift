@@ -138,4 +138,50 @@ import TurboFieldfareValidationSupport
         }
         #expect(actual == expected)
     }
+
+    @Test func floatEmbeddingPreservesValuesBeyondFloat16Range() throws {
+        let context = try MetalContext()
+        let kernel = try BF16GEMV(context: context)
+        let vocab = 3
+        let hidden = 67
+        var table = [UInt16](repeating: Quantization.bf16Bits(0),
+                             count: vocab * hidden)
+        for index in 0..<hidden {
+            let value = index.isMultiple(of: 2)
+                ? Float(100_000 + index * 256)
+                : Float(-100_000 - index * 256)
+            table[hidden + index] = Quantization.bf16Bits(value)
+        }
+        let tableBuffer = try #require(context.device.makeBuffer(
+            bytes: table,
+            length: table.count * MemoryLayout<UInt16>.stride,
+            options: .storageModeShared))
+        let prefix: [Float] = [42, -42]
+        let output = try #require(context.device.makeBuffer(
+            bytes: prefix + [Float](repeating: 0, count: hidden),
+            length: (prefix.count + hidden) * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        kernel.encodeFloatEmbedding(
+            commandBuffer: commandBuffer,
+            table: Self.view(tableBuffer, elements: table.count,
+                             rows: vocab, columns: hidden),
+            token: 1,
+            output: output,
+            outputOffset: prefix.count * MemoryLayout<Float>.stride,
+            hiddenSize: hidden)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try checkCommandBufferError(commandBuffer.error)
+
+        let pointer = output.contents().assumingMemoryBound(to: Float.self)
+        #expect(pointer[0] == 42)
+        #expect(pointer[1] == -42)
+        let actual = (0..<hidden).map { pointer[prefix.count + $0] }
+        let expected = table[hidden..<(2 * hidden)].map {
+            Quantization.bf16ToFloat($0)
+        }
+        #expect(actual == expected)
+        #expect(actual.allSatisfy { abs($0) > Float(Float16.greatestFiniteMagnitude) })
+    }
 }

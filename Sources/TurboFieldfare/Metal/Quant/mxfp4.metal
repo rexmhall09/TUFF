@@ -129,3 +129,13 @@ kernel void bf16_embedding_lookup_half(
     if (gid >= hidden_size) return;
     output[gid] = half(table[token * hidden_size + gid]);
 }
+
+kernel void bf16_embedding_lookup_float(
+    device const bfloat* table [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& token [[buffer(2)]],
+    constant uint& hidden_size [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]) {
+    if (gid >= hidden_size) return;
+    output[gid] = float(table[token * hidden_size + gid]);
+}

@@ -61,6 +61,55 @@ import TurboFieldfareValidationSupport
         try Self.runAndCompareBF16W(d: 2816, seed: 0xD4)
     }
 
+    @Test func rmsNorm_floatResidual_handlesValuesBeyondFloat16Range() throws {
+        let d = 2880
+        let prefix = [Float](repeating: 17, count: 3)
+        let input = (0..<d).map { index in
+            let magnitude = Float(80_000 + (index % 31) * 512)
+            return index.isMultiple(of: 2) ? magnitude : -magnitude
+        }
+        let weightBits = (0..<d).map { index in
+            Quantization.bf16Bits(0.75 + Float(index % 11) / 16)
+        }
+        let weights = weightBits.map(Quantization.bf16ToFloat)
+        let context = try MetalContext()
+        let kernel = try RMSNorm(context: context)
+        let inputBuffer = try #require(context.device.makeBuffer(
+            bytes: prefix + input,
+            length: (prefix.count + input.count) * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
+        let weightBuffer = try #require(context.device.makeBuffer(
+            bytes: weightBits,
+            length: weightBits.count * MemoryLayout<UInt16>.stride,
+            options: .storageModeShared))
+        let output = try #require(Fp16Buffer.make(
+            context.device,
+            halves: [Float16(9), Float16(-9)]
+                + [Float16](repeating: 0, count: d)))
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        kernel.encodeFloatBF16W(
+            commandBuffer: commandBuffer,
+            x: inputBuffer,
+            xOffset: prefix.count * MemoryLayout<Float>.stride,
+            weight: weightBuffer,
+            out: output,
+            outOffset: 2 * MemoryLayout<Float16>.stride,
+            d: UInt32(d),
+            eps: Self.eps)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try checkCommandBufferError(commandBuffer.error)
+
+        let values = Fp16Buffer.read(output, count: d + 2)
+        #expect(Array(values.prefix(2)) == [9, -9])
+        let actual = Array(values.dropFirst(2))
+        let reference = RmsNormRef.apply(
+            x: input, weight: weights, eps: Self.eps)
+        #expect(actual.allSatisfy { $0.isFinite })
+        #expect(RelError.compute(actual: actual, reference: reference)
+                < Tolerance.fp16Reduction)
+    }
+
     // MARK: - No-scale variant
     //
     // v_norm and the MoE router's internal norm omit the learnable weight:

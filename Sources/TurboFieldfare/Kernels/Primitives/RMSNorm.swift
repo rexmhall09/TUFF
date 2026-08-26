@@ -22,6 +22,7 @@ final class RMSNorm {
     private let psoBF16PerHead512: MTLComputePipelineState
     private let psoNoScalePerHead256: MTLComputePipelineState
     private let psoNoScalePerHead512: MTLComputePipelineState
+    private let psoFloatBF16: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
@@ -46,6 +47,7 @@ final class RMSNorm {
         self.psoNoScalePerHead512 = try Self.specializedPipeline(context,
                                                                  "rmsnorm_no_scale_perhead",
                                                                  d: 512)
+        self.psoFloatBF16 = try context.pipeline("rmsnorm_float_bf16w_half")
     }
 
     /// Encode the BF16-weight variant (Gemma 4 norms).
@@ -57,6 +59,23 @@ final class RMSNorm {
                             eps: Float) {
         encodeWeighted(commandBuffer: commandBuffer,
                        pso: d == 2816 ? psoBF16D2816 : psoBF16,
+                       x: x, xOffset: xOffset,
+                       weight: weight, weightOffset: weightOffset,
+                       out: out, outOffset: outOffset,
+                       d: d, eps: eps)
+    }
+
+    /// Normalize an FP32 residual row with BF16 weights into FP16 projection
+    /// input. GPT-OSS uses this to preserve 120B residual range without
+    /// changing its FP16 attention, expert, or KV kernels.
+    func encodeFloatBF16W(commandBuffer: MTLCommandBuffer,
+                          x: MTLBuffer, xOffset: Int = 0,
+                          weight: MTLBuffer, weightOffset: Int = 0,
+                          out: MTLBuffer, outOffset: Int = 0,
+                          d: UInt32,
+                          eps: Float) {
+        encodeWeighted(commandBuffer: commandBuffer,
+                       pso: psoFloatBF16,
                        x: x, xOffset: xOffset,
                        weight: weight, weightOffset: weightOffset,
                        out: out, outOffset: outOffset,

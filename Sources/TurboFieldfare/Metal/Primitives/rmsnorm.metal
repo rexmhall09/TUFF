@@ -63,6 +63,39 @@ static inline float rms_block_inv(
     return partial[0];
 }
 
+static inline float rms_block_inv_float(
+    device const float* x,
+    uint  D,
+    float eps,
+    uint  lid,
+    uint  lsize,
+    uint  simd_lane_id,
+    uint  simd_group_id,
+    uint  simdgroups,
+    threadgroup float* partial
+) {
+    float acc = 0.0f;
+    for (uint i = lid; i < D; i += lsize) {
+        const float v = x[i];
+        acc = fma(v, v, acc);
+    }
+    acc = simd_sum(acc);
+    if (simd_lane_id == 0) {
+        partial[simd_group_id] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group_id == 0) {
+        float v = (simd_lane_id < simdgroups) ? partial[simd_lane_id] : 0.0f;
+        v = simd_sum(v);
+        if (simd_lane_id == 0) {
+            partial[0] = rsqrt(v / float(D) + eps);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return partial[0];
+}
+
 // Gemma 4 RMS norms ship as BF16 weight vectors (all 30 layers' input /
 // post-attn / pre-FFN / post-FFN norms, plus q/k_norm). Math is identical to
 // the no-scale form below, with a learned weight applied after normalization.
@@ -89,6 +122,31 @@ void rmsnorm_bf16w(
         float xv = float(x[i]);
         float wv = float(weight[i]);
         out[i] = half(xv * inv * wv);
+    }
+}
+
+// GPT-OSS keeps its residual stream in FP32 so the deeper 120B checkpoint
+// cannot overflow FP16 between pre-norm blocks. The normalized projection
+// input remains FP16, so attention and expert kernels are unchanged.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void rmsnorm_float_bf16w_half(
+    device const float*  x          [[buffer(0)]],
+    device const bfloat* weight     [[buffer(1)]],
+    device       half*   out        [[buffer(2)]],
+    constant     uint&   D          [[buffer(3)]],
+    constant     float&  eps        [[buffer(4)]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial[kRmsMaxSimdGroups];
+    const float inv = rms_block_inv_float(x, D, eps, lid, lsize,
+                                          simd_lane_id, simd_group_id,
+                                          simdgroups, partial);
+    for (uint i = lid; i < D; i += lsize) {
+        out[i] = half(x[i] * inv * float(weight[i]));
     }
 }
 

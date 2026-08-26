@@ -8,6 +8,7 @@ final class Elementwise {
     private let sigmoidGateMulPSO: MTLComputePipelineState
     private let sigmoidScalarMulPSO: MTLComputePipelineState
     private let residualAddPSO: MTLComputePipelineState
+    private let floatResidualAddPSO: MTLComputePipelineState
     private let splitQGatePSO: MTLComputePipelineState
     private let geluMulPSO: MTLComputePipelineState
     private let residualAddScalePSO: MTLComputePipelineState
@@ -16,6 +17,7 @@ final class Elementwise {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
         self.sigmoidScalarMulPSO = try context.pipeline("sigmoid_scalar_mul_fp16")
         self.residualAddPSO = try context.pipeline("residual_add_fp16")
+        self.floatResidualAddPSO = try context.pipeline("residual_add_float_fp16")
         self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
         self.geluMulPSO = try context.pipeline("gelu_mul_fp16")
         self.residualAddScalePSO = try context.pipeline("residual_add_scale_fp16")
@@ -87,6 +89,21 @@ final class Elementwise {
         var elementCount = UInt32(count)
         encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
         dispatch(encoder, pipeline: residualAddPSO, threads: count)
+        encoder.endEncoding()
+    }
+
+    /// FP32 residual += FP16 delta.
+    func encodeFloatResidualAdd(commandBuffer: MTLCommandBuffer,
+                                hidden: MTLBuffer, hiddenOffset: Int = 0,
+                                delta: MTLBuffer, deltaOffset: Int = 0,
+                                count: Int) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(floatResidualAddPSO)
+        encoder.setBuffer(hidden, offset: hiddenOffset, index: 0)
+        encoder.setBuffer(delta, offset: deltaOffset, index: 1)
+        var elementCount = UInt32(count)
+        encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
+        dispatch(encoder, pipeline: floatResidualAddPSO, threads: count)
         encoder.endEncoding()
     }
 

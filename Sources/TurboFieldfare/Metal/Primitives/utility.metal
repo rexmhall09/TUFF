@@ -90,3 +90,15 @@ void residual_add_fp16(
     if (tid >= count) return;
     hidden[tid] = half(float(hidden[tid]) + float(delta[tid]));
 }
+
+// FP32 GPT-OSS residual plus an FP16 projection/expert delta.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void residual_add_float_fp16(
+    device float*      hidden [[buffer(0)]],
+    device const half* delta  [[buffer(1)]],
+    constant uint&     count  [[buffer(2)]],
+    uint               tid    [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    hidden[tid] += float(delta[tid]);
+}
