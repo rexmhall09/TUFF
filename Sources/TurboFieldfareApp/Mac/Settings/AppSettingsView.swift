@@ -1,10 +1,12 @@
 import TurboFieldfare
 import TurboFieldfareAppCore
+import TurboFieldfareAppUpdater
 import TurboFieldfareMacPresentation
 import SwiftUI
 
 struct AppSettingsView: View {
     @Bindable var model: AppModel
+    let updateController: AppUpdateController
     @State private var section: SettingsSection = .general
     @State private var profileModelID = ""
 
@@ -66,6 +68,37 @@ struct AppSettingsView: View {
                     + "saved memory profile is safe for this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            Section("Updates") {
+                if updateController.isAvailable {
+                    Toggle(
+                        "Check for updates automatically",
+                        isOn: automaticUpdateChecksBinding)
+                    Toggle(
+                        "Download and install updates automatically",
+                        isOn: automaticUpdateDownloadsBinding)
+                        .disabled(!updateController.automaticallyChecksForUpdates
+                            || !updateController.allowsAutomaticUpdates)
+                    Button("Check for Updates Now") {
+                        updateController.checkForUpdates()
+                    }
+                    .disabled(!updateController.canCheckForUpdates)
+                    Text("Updates come from TUFF's GitHub Releases feed. Each "
+                        + "download must pass Sparkle's embedded EdDSA signature "
+                        + "check before it can be installed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label(
+                        updateController.unavailableReason
+                            ?? "Updates are unavailable in this build.",
+                        systemImage: "exclamationmark.shield")
+                        .foregroundStyle(.secondary)
+                    Text("Clone builds stay usable, but only packaged builds with "
+                        + "TUFF's update-signing public key can install releases.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -264,6 +297,22 @@ struct AppSettingsView: View {
         Binding {
             profileModelID.isEmpty ? model.selectedModelID : profileModelID
         } set: { profileModelID = $0 }
+    }
+
+    private var automaticUpdateChecksBinding: Binding<Bool> {
+        Binding {
+            updateController.automaticallyChecksForUpdates
+        } set: { enabled in
+            updateController.setAutomaticallyChecksForUpdates(enabled)
+        }
+    }
+
+    private var automaticUpdateDownloadsBinding: Binding<Bool> {
+        Binding {
+            updateController.automaticallyDownloadsUpdates
+        } set: { enabled in
+            updateController.setAutomaticallyDownloadsUpdates(enabled)
+        }
     }
 
     private func profileBinding<Value>(

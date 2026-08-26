@@ -1,6 +1,7 @@
 import AppKit
 import TurboFieldfareAppCore
 import TurboFieldfareAppServer
+import TurboFieldfareAppUpdater
 import TurboFieldfareMacPresentation
 import SwiftUI
 
@@ -34,6 +35,7 @@ struct TurboFieldfareMacApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: ForegroundAppDelegate
     @State private var model: AppModel
     @State private var serverController: AppServerController
+    @State private var updateController: AppUpdateController
     private let inferenceBroker: SharedInferenceBroker
 
     init() {
@@ -47,15 +49,20 @@ struct TurboFieldfareMacApp: App {
             settingsPersistenceEnabled: true)
         let serverController = AppServerController(
             broker: inferenceBroker, store: model.serverStore)
+        let updateController = AppUpdateController()
         self.inferenceBroker = inferenceBroker
         _model = State(initialValue: model)
         _serverController = State(initialValue: serverController)
+        _updateController = State(initialValue: updateController)
         MainActor.assumeIsolated { ForegroundAppDelegate.model = model }
     }
 
     var body: some Scene {
         Window("TUFF", id: "main") {
-            RootView(model: model, serverController: serverController)
+            RootView(
+                model: model,
+                serverController: serverController,
+                updateController: updateController)
                 .frame(
                     minWidth: AppWindowLayout.minimumWidth,
                     minHeight: AppWindowLayout.minimumHeight)
@@ -94,6 +101,12 @@ struct TurboFieldfareMacApp: App {
                             infoDictionary: Bundle.main.infoDictionary,
                             icon: MacAppIcon.load()))
                 }
+            }
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    updateController.checkForUpdates()
+                }
+                .disabled(!updateController.canCheckForUpdates)
             }
             CommandMenu("Generation") {
                 Button("New Conversation") { model.clearOutput() }

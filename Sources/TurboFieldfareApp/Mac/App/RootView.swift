@@ -1,12 +1,14 @@
 import AppKit
 import TurboFieldfareAppCore
 import TurboFieldfareAppServer
+import TurboFieldfareAppUpdater
 import TurboFieldfareMacPresentation
 import SwiftUI
 
 struct RootView: View {
     let model: AppModel
     let serverController: AppServerController
+    let updateController: AppUpdateController
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var destination: AppDestination? = .chat
     @State private var renameTarget: AppConversationRecord?
@@ -219,7 +221,8 @@ struct RootView: View {
             ServerWorkspaceView(
                 model: model, controller: serverController)
         case .settings:
-            SettingsWorkspaceView(model: model)
+            SettingsWorkspaceView(
+                model: model, updateController: updateController)
         }
     }
 }
@@ -617,6 +620,7 @@ private struct ServerMetric: View {
 
 private struct SettingsWorkspaceView: View {
     let model: AppModel
+    let updateController: AppUpdateController
 
     var body: some View {
         VStack(spacing: 0) {
@@ -626,7 +630,8 @@ private struct SettingsWorkspaceView: View {
                 .padding(.horizontal, 28)
                 .padding(.top, 24)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            AppSettingsView(model: model)
+            AppSettingsView(
+                model: model, updateController: updateController)
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }
