@@ -11,6 +11,17 @@ import TurboFieldfareRepackCore
 /// concern from downloading — picking a model decides what loads, and must not
 /// start or stop any transfer.
 @Suite struct ModelCatalogTests {
+    @Test func catalogExposesStableAPIIDsAndPromptDialects() {
+        for descriptor in AppModelInstallDescriptor.catalog {
+            #expect(!descriptor.apiModelID.isEmpty)
+            switch descriptor.family {
+            case .gemma4: #expect(descriptor.chatDialect == .gemma)
+            case .qwen36: #expect(descriptor.chatDialect == .chatml)
+            case .gptOss: #expect(descriptor.chatDialect == .harmony)
+            }
+        }
+    }
+
 
     private func temporaryInstallPath(_ tag: String) -> URL {
         FileManager.default.temporaryDirectory

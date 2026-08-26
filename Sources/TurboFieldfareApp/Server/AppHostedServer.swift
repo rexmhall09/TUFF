@@ -39,6 +39,7 @@ public struct AppHostedServerConfiguration: Sendable, Equatable {
 public actor AppHostedServer {
     private let broker: SharedInferenceBroker
     private var server: TurboFieldfareHTTPServer?
+    private var pendingServer: TurboFieldfareHTTPServer?
     public private(set) var boundPort: Int?
     public private(set) var modelID: String?
 
@@ -49,8 +50,14 @@ public actor AppHostedServer {
     public var isRunning: Bool { server != nil }
 
     @discardableResult
-    public func start(_ configuration: AppHostedServerConfiguration) async throws -> Int {
-        guard server == nil else { throw AppHostedServerError.alreadyRunning }
+    public func start(
+        _ configuration: AppHostedServerConfiguration,
+        onActivity: @escaping @Sendable (ServerCoordinatorActivity) -> Void = { _ in },
+        onError: @escaping @Sendable (String) -> Void = { _ in }
+    ) async throws -> Int {
+        guard server == nil, pendingServer == nil else {
+            throw AppHostedServerError.alreadyRunning
+        }
         let backend = AppServerInferenceBackend(
             broker: broker,
             runtime: configuration.runtime)
@@ -59,28 +66,38 @@ public actor AppHostedServer {
             queueLimit: configuration.queueLimit,
             backend: backend,
             chatDialect: configuration.chatDialect,
-            visionCapability: configuration.visionCapability)
+            visionCapability: configuration.visionCapability,
+            onRequestActivity: onActivity,
+            onRequestError: onError)
+        pendingServer = candidate
         do {
             let channel = try await candidate.start(port: configuration.port)
+            guard pendingServer === candidate else {
+                try await candidate.shutdown()
+                throw CancellationError()
+            }
             guard let port = channel.localAddress?.port else {
                 try await candidate.shutdown()
                 throw AppHostedServerError.missingBoundPort
             }
+            pendingServer = nil
             server = candidate
             boundPort = port
             modelID = configuration.modelID
             return port
         } catch {
+            if pendingServer === candidate { pendingServer = nil }
             try? await candidate.shutdown()
             throw error
         }
     }
 
     public func stop() async throws {
-        guard let server else { return }
+        let server = server ?? pendingServer
         self.server = nil
+        pendingServer = nil
         boundPort = nil
         modelID = nil
-        try await server.shutdown()
+        try await server?.shutdown()
     }
 }

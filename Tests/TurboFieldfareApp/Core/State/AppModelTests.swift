@@ -4,6 +4,22 @@ import Testing
 
 @Suite struct AppModelTests {
     @MainActor
+    @Test func runningServerPinsTheSelectedModel() throws {
+        let model = AppModel()
+        let originalID = model.selectedModelID
+        let other = try #require(model.installs.first { $0.id != originalID })
+        let record = AppConversationRecord(
+            title: "Other model",
+            modelID: other.descriptor.settingsProfileKey)
+
+        model.serverStore.status = .running
+        #expect(!model.canSelectModel(other))
+        model.selectModel(other)
+        model.selectConversation(record)
+        #expect(model.selectedModelID == originalID)
+    }
+
+    @MainActor
     @Test func defaultsUseSampledRequest() throws {
         let model = AppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path

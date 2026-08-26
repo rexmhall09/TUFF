@@ -1,5 +1,6 @@
 import AppKit
 import TurboFieldfareAppCore
+import TurboFieldfareAppServer
 import TurboFieldfareMacPresentation
 import SwiftUI
 
@@ -32,6 +33,7 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
 struct TurboFieldfareMacApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: ForegroundAppDelegate
     @State private var model: AppModel
+    @State private var serverController: AppServerController
     private let inferenceBroker: SharedInferenceBroker
 
     init() {
@@ -43,14 +45,17 @@ struct TurboFieldfareMacApp: App {
             conversationStore: .persistentDefault(),
             visionRuntimeSupported: AppModel.currentDeviceSupportsVisionRuntime,
             settingsPersistenceEnabled: true)
+        let serverController = AppServerController(
+            broker: inferenceBroker, store: model.serverStore)
         self.inferenceBroker = inferenceBroker
         _model = State(initialValue: model)
+        _serverController = State(initialValue: serverController)
         MainActor.assumeIsolated { ForegroundAppDelegate.model = model }
     }
 
     var body: some Scene {
         Window("TUFF", id: "main") {
-            RootView(model: model)
+            RootView(model: model, serverController: serverController)
                 .frame(
                     minWidth: AppWindowLayout.minimumWidth,
                     minHeight: AppWindowLayout.minimumHeight)

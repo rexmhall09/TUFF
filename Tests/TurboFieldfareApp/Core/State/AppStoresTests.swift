@@ -43,4 +43,16 @@ import Testing
         #expect(second.promptText.isEmpty)
         #expect(AppServerStore().status == .stopped)
     }
+
+    @MainActor
+    @Test func serverStoreBoundsRecentErrorsNewestFirst() {
+        let store = AppServerStore()
+        for index in 0...AppServerStore.maximumRecentErrors {
+            store.recordError("error \(index)")
+        }
+
+        #expect(store.recentErrors.count == AppServerStore.maximumRecentErrors)
+        #expect(store.recentErrors.first == "error \(AppServerStore.maximumRecentErrors)")
+        #expect(store.recentErrors.last == "error 1")
+    }
 }

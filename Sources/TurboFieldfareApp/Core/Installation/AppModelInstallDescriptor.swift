@@ -172,10 +172,22 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         catalogID?.rawValue ?? id
     }
 
+    public var apiModelID: String {
+        catalogDescriptor?.apiModelID ?? settingsProfileKey
+    }
+
     /// The model family this descriptor installs.
     public var family: ModelFamily {
         catalogDescriptor.flatMap { ModelFamily(rawValue: $0.family.rawValue) }
             ?? (self == .qwen36 ? .qwen36 : .gemma4)
+    }
+
+    public var chatDialect: ChatDialect {
+        switch family {
+        case .gemma4: .gemma
+        case .qwen36: .chatml
+        case .gptOss: .harmony
+        }
     }
 
     /// Whether this exact checkpoint has a qualified image companion. Custom

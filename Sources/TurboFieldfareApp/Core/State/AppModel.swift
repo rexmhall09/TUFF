@@ -430,6 +430,7 @@ public final class AppModel {
 
     public func canSelectModel(_ coordinator: ModelInstallCoordinator) -> Bool {
         guard !isRunning, !loadState.isLoading,
+              !serverStore.isBusy,
               coordinator.id != selectedModelID,
               hardwareEligibility(for: coordinator).isCompatible else { return false }
         // A transfer keeps writing beside its original text model. Wait for it
@@ -465,6 +466,10 @@ public final class AppModel {
     /// owns the history and prompt dialect being restored.
     public func selectConversation(_ record: AppConversationRecord) {
         guard !isRunning, !loadState.isLoading else { return }
+        if serverStore.isBusy,
+           record.modelID != selectedDescriptor.settingsProfileKey {
+            return
+        }
         releaseTranscriptImages()
         clearImages()
         conversationStore.selectConversation(id: record.id)
@@ -522,7 +527,8 @@ public final class AppModel {
     public var canLoadModel: Bool {
         isModelInstalled && selectedModelHardwareEligibility.isCompatible
             && selectedContextHardwareEligibility.isCompatible
-            && !isRunning && !isVisionCompanionOperationInProgress
+            && !isRunning && !serverStore.isBusy
+            && !isVisionCompanionOperationInProgress
             && (loadState == .notLoaded || loadState.isFailed)
     }
 
@@ -534,12 +540,14 @@ public final class AppModel {
     public var canReloadModel: Bool {
         isModelInstalled && selectedModelHardwareEligibility.isCompatible
             && selectedContextHardwareEligibility.isCompatible
-            && !isRunning && !isVisionCompanionOperationInProgress
+            && !isRunning && !serverStore.isBusy
+            && !isVisionCompanionOperationInProgress
             && loadState.isReady && hasStaleLoadedRuntime
     }
 
     public var canUnloadModel: Bool {
-        isModelInstalled && !isRunning && !isVisionCompanionOperationInProgress
+        isModelInstalled && !isRunning && !serverStore.isBusy
+            && !isVisionCompanionOperationInProgress
             && loadState.isReady
     }
 

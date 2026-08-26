@@ -22,6 +22,7 @@ public actor TurboFieldfareHTTPServer {
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let visionCapability: String
+    private let onRequestError: @Sendable (String) -> Void
     private let attachmentRoot: URL
     private let idleTimeout: TimeAmount
     private let childChannels = ChildChannelRegistry()
@@ -34,6 +35,9 @@ public actor TurboFieldfareHTTPServer {
                 chatDialect: ChatDialect = .gemma,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 visionCapability: String = "missing",
+                onRequestActivity: @escaping @Sendable
+                    (ServerCoordinatorActivity) -> Void = { _ in },
+                onRequestError: @escaping @Sendable (String) -> Void = { _ in },
                 attachmentRoot: URL = ServerAttachmentDirectory.root,
                 idleTimeout: TimeAmount = TurboFieldfareHTTPServer.idleTimeout,
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
@@ -41,9 +45,11 @@ public actor TurboFieldfareHTTPServer {
         self.modelID = modelID
         self.chatDialect = chatDialect
         self.backend = backend
-        self.coordinator = ServerCoordinator(queueLimit: queueLimit)
+        self.coordinator = ServerCoordinator(
+            queueLimit: queueLimit, onActivity: onRequestActivity)
         self.heartbeatInterval = heartbeatInterval
         self.visionCapability = visionCapability
+        self.onRequestError = onRequestError
         self.attachmentRoot = attachmentRoot
         self.idleTimeout = idleTimeout
         ServerAttachmentDirectory.sweepAbandoned(in: attachmentRoot)
@@ -57,6 +63,7 @@ public actor TurboFieldfareHTTPServer {
         let heartbeatInterval = self.heartbeatInterval
         let childChannels = self.childChannels
         let visionCapability = self.visionCapability
+        let onRequestError = self.onRequestError
         let attachmentRoot = self.attachmentRoot
         let idleTimeout = self.idleTimeout
         let bootstrap = ServerBootstrap(group: group)
@@ -78,6 +85,7 @@ public actor TurboFieldfareHTTPServer {
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
                         visionCapability: visionCapability,
+                        onRequestError: onRequestError,
                         attachmentRoot: attachmentRoot,
                         childChannels: childChannels))
                 }
@@ -150,6 +158,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let heartbeatInterval: TimeAmount
     private let childChannels: ChildChannelRegistry
     private let visionCapability: String
+    private let onRequestError: @Sendable (String) -> Void
     private let attachmentRoot: URL
     private var bodyParser: StreamingChatRequestBody?
     private var bodyError: (any Error)?
@@ -170,6 +179,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
          visionCapability: String,
+         onRequestError: @escaping @Sendable (String) -> Void,
          attachmentRoot: URL,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
@@ -178,6 +188,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
         self.visionCapability = visionCapability
+        self.onRequestError = onRequestError
         self.attachmentRoot = attachmentRoot
         self.childChannels = childChannels
     }
@@ -629,6 +640,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             ServerLog.cancelled(id: id, phase: phase,
                                 duration: started.duration(to: .now))
         } else {
+            onRequestError(String(describing: error))
             ServerLog.failed(id: id, phase: phase, status: status.code, error: error)
         }
         if stream {

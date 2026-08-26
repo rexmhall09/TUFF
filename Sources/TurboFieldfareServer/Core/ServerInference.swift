@@ -269,6 +269,16 @@ public protocol ServerInferenceBackend: Sendable {
                   onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion
 }
 
+public struct ServerCoordinatorActivity: Equatable, Sendable {
+    public let activeRequests: Int
+    public let queuedRequests: Int
+
+    public init(activeRequests: Int, queuedRequests: Int) {
+        self.activeRequests = activeRequests
+        self.queuedRequests = queuedRequests
+    }
+}
+
 public extension ServerInferenceBackend {
     func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest {
         ServerPreparedRequest(request: request)
@@ -293,9 +303,14 @@ public actor ServerCoordinator {
     private var active = false
     private var waiters: [Waiter] = []
     private var shuttingDown = false
+    private let onActivity: @Sendable (ServerCoordinatorActivity) -> Void
 
-    public init(queueLimit: Int) {
+    public init(
+        queueLimit: Int,
+        onActivity: @escaping @Sendable (ServerCoordinatorActivity) -> Void = { _ in }
+    ) {
         self.queueLimit = queueLimit
+        self.onActivity = onActivity
     }
 
     public func run<T: Sendable>(
@@ -331,6 +346,7 @@ public actor ServerCoordinator {
         guard !shuttingDown else { throw CancellationError() }
         if !active {
             active = true
+            publishActivity()
             return
         }
         guard waiters.count < queueLimit else { throw ServerRequestError.queueFull }
@@ -339,6 +355,7 @@ public actor ServerCoordinator {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 waiters.append(Waiter(id: id, continuation: continuation))
+                publishActivity()
             }
         } onCancel: {
             Task { await self.cancelWaiter(id) }
@@ -353,6 +370,7 @@ public actor ServerCoordinator {
         guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
         let waiter = waiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
+        publishActivity()
     }
 
     private func release() {
@@ -361,6 +379,7 @@ public actor ServerCoordinator {
         } else {
             waiters.removeFirst().continuation.resume()
         }
+        publishActivity()
     }
 
     public func shutdown() {
@@ -370,10 +389,17 @@ public actor ServerCoordinator {
         for waiter in queued {
             waiter.continuation.resume(throwing: CancellationError())
         }
+        publishActivity()
     }
 
     public var queuedCount: Int { waiters.count }
     public var isActive: Bool { active }
+
+    private func publishActivity() {
+        onActivity(ServerCoordinatorActivity(
+            activeRequests: active ? 1 : 0,
+            queuedRequests: waiters.count))
+    }
 }
 
 /// How the server reads the images of a request: one plan per image, and the
