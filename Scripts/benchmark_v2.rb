@@ -10,6 +10,8 @@ require "time"
 
 ROOT = File.expand_path("..", __dir__)
 CLI = File.join(ROOT, ".build", "release", "TUFFCLI")
+require_relative "benchmark_models"
+
 PROMPTS = File.join(ROOT, "docs", "benchmark-prompts", "real-generation-v1")
 
 CASES = {
@@ -18,38 +20,7 @@ CASES = {
   "long-synthesis" => 20_260_723
 }.freeze
 
-MODELS = {
-  "gemma4-e4b" => {
-    path: "scratch/gemma4-e4b.gturbo",
-    chat: %w[--thinking off],
-    sampling: %w[--temperature 1.0 --top-k 64 --top-p 0.95],
-    runtime: %w[--expert-cache-slots 16 --prefill on --prefill-chunk-tokens auto --rdadvise off]
-  },
-  "gemma4" => {
-    path: "scratch/gemma4.gturbo",
-    chat: %w[--thinking off],
-    sampling: %w[--temperature 0.2 --top-k 64 --top-p 0.95],
-    runtime: %w[--expert-cache-slots 16 --prefill on --prefill-chunk-tokens auto --rdadvise off]
-  },
-  "qwen36" => {
-    path: "scratch/qwen36.gturbo",
-    chat: %w[--thinking off],
-    sampling: %w[--temperature 0.2 --top-k 64 --top-p 0.95],
-    runtime: %w[--expert-cache-slots 16 --prefill on --prefill-chunk-tokens auto --rdadvise off]
-  },
-  "gpt-oss-20b" => {
-    path: "scratch/gpt-oss-20b.gturbo",
-    chat: %w[--reasoning low],
-    sampling: %w[--temperature 1.0 --top-k 0 --top-p 1.0],
-    runtime: %w[--expert-cache-slots 16 --prefill on --prefill-chunk-tokens auto --rdadvise off]
-  },
-  "gpt-oss-120b" => {
-    path: "scratch/gpt-oss-120b.gturbo",
-    chat: %w[--reasoning low],
-    sampling: %w[--temperature 1.0 --top-k 0 --top-p 1.0],
-    runtime: %w[--expert-cache-slots 16 --prefill on --prefill-chunk-tokens auto --rdadvise bounded]
-  }
-}.freeze
+MODELS = BENCHMARK_MODELS
 
 FOOTER = /\[stop=(\S+) prefill=(\d+)tok\/([0-9.]+)s new=(\d+)tok decode=([0-9.]+)s tok\/s=([0-9.]+)\]/
 MAX_RSS = /\s*(\d+)\s+maximum resident set size/
