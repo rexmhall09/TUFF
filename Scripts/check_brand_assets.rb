@@ -33,6 +33,8 @@ end
 
 logo = read("Brand/TUFFLogo.svg")
 fail_check("the flat logo is missing TUFF Violet") unless logo.include?("#6F4DFF")
+fail_check("every flat logo facet must use TUFF Violet") unless
+  logo.scan(/<path\b[^>]*fill="#6F4DFF"/i).length == 3
 fail_check("the flat logo must keep a transparent canvas") if logo.match?(/<rect\b/i)
 
 manifest_path = File.join(ROOT, "Brand/TUFF.icon/icon.json")
@@ -49,7 +51,16 @@ groups.each do |group|
   asset = layers.first.fetch("image-name")
   fail_check("Icon Composer asset #{asset} is missing") unless
     File.file?(File.join(assets_directory, asset))
+  asset_source = File.binread(File.join(assets_directory, asset))
+  fail_check("Icon Composer asset #{asset} must use TUFF Violet") unless
+    asset_source.scan(/<path\b[^>]*fill="#6F4DFF"/i).length == 1
 end
+
+material_settings = groups.map do |group|
+  [group.dig("shadow", "opacity"), group.dig("translucency", "value")]
+end
+fail_check("all Icon Composer facets must use matching material settings") unless
+  material_settings.uniq.length == 1
 
 {
   "Brand/TUFFLogo.png" => true,

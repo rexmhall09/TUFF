@@ -12,11 +12,11 @@
       ],
       "shadow" : {
         "kind" : "layer-color",
-        "opacity" : 0.42
+        "opacity" : 0.40
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.18
+        "value" : 0.16
       }
     },
     {
@@ -28,11 +28,11 @@
       ],
       "shadow" : {
         "kind" : "layer-color",
-        "opacity" : 0.36
+        "opacity" : 0.40
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.14
+        "value" : 0.16
       }
     },
     {
@@ -44,11 +44,11 @@
       ],
       "shadow" : {
         "kind" : "layer-color",
-        "opacity" : 0.46
+        "opacity" : 0.40
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.24
+        "value" : 0.16
       }
     }
   ],

@@ -11,7 +11,7 @@ struct TUFFMarkView: View {
                     CGPoint(x: 0.50, y: 0.20),
                     CGPoint(x: 0.33, y: 0.50),
                 ])
-                .fill(.primary)
+                .fill(TurboFieldfareMacTheme.accentColor)
 
                 TUFFFacet(points: [
                     CGPoint(x: 0.50, y: 0.20),
@@ -25,7 +25,7 @@ struct TUFFMarkView: View {
                     CGPoint(x: 0.67, y: 0.50),
                     CGPoint(x: 0.50, y: 0.80),
                 ])
-                .fill(.primary)
+                .fill(TurboFieldfareMacTheme.accentColor)
             }
             .frame(width: size, height: size)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
