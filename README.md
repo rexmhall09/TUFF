@@ -81,7 +81,7 @@ copy of a checkpoint first.
 
 | Model | What I would use it for | Installed size | Minimum memory | Add-ons |
 | --- | --- | ---: | ---: | --- |
-| Gemma 4 E4B IT | A small and quick general model | 4.23 GB | 8 GB | None in v2 |
+| Gemma 4 E4B IT | A small and quick general model | 4.23 GB | 8 GB | None |
 | Gemma 4 26B-A4B IT | The balanced default | 14.29 GB | 8 GB | Image input |
 | Qwen3.6 35B-A3B | Coding, long context, and images | 19.55 GB | 8 GB | Image input |
 | GPT-OSS 20B | Reasoning and local tool workflows | 13.79 GB | 16 GB | None |
