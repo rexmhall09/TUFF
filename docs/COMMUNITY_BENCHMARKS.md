@@ -14,6 +14,21 @@ The frozen prompts are in
 Runs use the app sampling defaults with fixed seeds: temperature `0.2`, Top-K
 `64`, Top-P `0.95`, a 4,096-token context, and up to 1,024 generated tokens.
 
+The release matrix uses the same three prompts with model-specific chat and
+sampling defaults. `Scripts/benchmark_v2.rb` runs one discarded warmup and
+three measured fresh processes per case, keeps the complete output locally,
+and writes both JSON data and a Markdown median table. To inspect every command
+without loading a model, run:
+
+```bash
+Scripts/benchmark_v2.rb --plan
+```
+
+Use `--model <name>` to benchmark one of `gemma4-e4b`, `gemma4`, `qwen36`,
+`gpt-oss-20b`, or `gpt-oss-120b`. Benchmark results are ignored by Git so the
+generated responses and machine report can be reviewed before anything is
+shared.
+
 ## Prepare the Mac
 
 Install the model with the [README instructions](../README.md#command-line-interface),
