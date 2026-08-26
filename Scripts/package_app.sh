@@ -18,6 +18,12 @@ app="$output_directory/TUFF.app"
 archive_name="TUFF-v${version}-macos-arm64.zip"
 archive="$output_directory/$archive_name"
 checksum="$archive.sha256"
+update_feed_url="${TUFF_UPDATE_FEED_URL:-https://github.com/rexmhall09/TUFF/releases/latest/download/appcast.xml}"
+update_public_key="${TUFF_UPDATE_PUBLIC_ED_KEY:-}"
+update_public_key_file="$repository_root/Config/UpdateSigningPublicKey.txt"
+if [[ -z "$update_public_key" && -f "$update_public_key_file" ]]; then
+  IFS= read -r update_public_key < "$update_public_key_file"
+fi
 
 rm -rf "$app"
 rm -f "$archive" "$checksum"
@@ -39,20 +45,28 @@ required_bundles=(
   swift-nio_NIOPosix.bundle
   swift-transformers_Hub.bundle
 )
+required_frameworks=(Sparkle.framework)
 
-for name in "${required_binaries[@]}" "${required_bundles[@]}"; do
+for name in "${required_binaries[@]}" "${required_bundles[@]}" \
+  "${required_frameworks[@]}"; do
   if [[ ! -e "$binary_directory/$name" ]]; then
     echo "missing release product: $binary_directory/$name" >&2
     exit 1
   fi
 done
 
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" \
+  "$app/Contents/Frameworks"
 signed_binaries="$temporary_directory/signed-binaries"
 mkdir -p "$signed_binaries"
 install -m 0755 "$binary_directory/TUFF" "$signed_binaries/TUFF"
 install -m 0755 "$binary_directory/TUFFDecodeService" \
   "$signed_binaries/TUFFDecodeService"
+if ! otool -l "$signed_binaries/TUFF" \
+  | grep -Fq '@executable_path/../Frameworks'; then
+  install_name_tool -add_rpath '@executable_path/../Frameworks' \
+    "$signed_binaries/TUFF"
+fi
 codesign --force --sign - --timestamp=none "$signed_binaries/TUFF"
 codesign --force --sign - --timestamp=none "$signed_binaries/TUFFDecodeService"
 codesign --verify --strict --verbose=2 "$signed_binaries/TUFF"
@@ -66,6 +80,9 @@ install -m 0755 "$signed_binaries/TUFFDecodeService" \
 # SwiftPM's generated Bundle.module path for command-line and test builds.
 for name in "${required_bundles[@]}"; do
   ditto "$binary_directory/$name" "$app/Contents/Resources/$name"
+done
+for name in "${required_frameworks[@]}"; do
+  ditto "$binary_directory/$name" "$app/Contents/Frameworks/$name"
 done
 
 install -m 0644 LICENSE "$app/Contents/Resources/LICENSE"
@@ -111,6 +128,25 @@ plutil -insert LSApplicationCategoryType -string public.app-category.utilities \
 plutil -insert LSMinimumSystemVersion -string 15.0 "$info_plist"
 plutil -insert LSRequiresNativeExecution -bool true "$info_plist"
 plutil -insert NSHighResolutionCapable -bool true "$info_plist"
+if [[ -n "$update_public_key" ]]; then
+  if ! ruby -rbase64 -e \
+    'decoded = Base64.strict_decode64(ARGV.fetch(0)); exit(decoded.bytesize == 32 ? 0 : 1)' \
+    "$update_public_key" 2>/dev/null; then
+    echo "invalid Sparkle EdDSA public key" >&2
+    exit 1
+  fi
+  if [[ "$update_feed_url" != https://* ]]; then
+    echo "update feed must use HTTPS" >&2
+    exit 1
+  fi
+  plutil -insert SUFeedURL -string "$update_feed_url" "$info_plist"
+  plutil -insert SUPublicEDKey -string "$update_public_key" "$info_plist"
+  plutil -insert SUEnableAutomaticChecks -bool true "$info_plist"
+  plutil -insert SUAllowsAutomaticUpdates -bool true "$info_plist"
+  plutil -insert SUAutomaticallyUpdate -bool false "$info_plist"
+else
+  echo "warning: no Sparkle update public key; in-app updates are disabled" >&2
+fi
 
 plutil -lint "$info_plist"
 
@@ -124,6 +160,8 @@ fi
 # Sign after the complete bundle has been assembled so Info.plist and resources
 # are sealed as part of the app rather than leaving a standalone executable
 # signature inside an otherwise unsigned bundle.
+codesign --force --deep --sign - --timestamp=none \
+  "$app/Contents/Frameworks/Sparkle.framework"
 codesign --force --deep --sign - --timestamp=none "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 
@@ -137,6 +175,9 @@ extracted="$temporary_directory/extracted"
 mkdir -p "$extracted"
 ditto -x -k "$archive" "$extracted"
 codesign --verify --deep --strict --verbose=2 "$extracted/TUFF.app"
+test -f "$extracted/TUFF.app/Contents/Frameworks/Sparkle.framework/Sparkle"
+otool -L "$extracted/TUFF.app/Contents/MacOS/TUFF" \
+  | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle'
 
 echo "created $archive"
 echo "created $checksum"
