@@ -1,58 +1,42 @@
 {
-  "fill" : {
-    "automatic-gradient" : "extended-srgb:0.09412,0.09412,0.10588,1.00000"
+  "fill": {
+    "automatic-gradient": "extended-srgb:0.00000,0.00000,0.00000,1.00000"
   },
-  "groups" : [
+  "groups": [
     {
-      "layers" : [
+      "layers": [
         {
-          "image-name" : "01-left-facet.svg",
-          "name" : "Left Facet"
+          "image-name": "01-wing.svg",
+          "name": "Raised Wing"
         }
       ],
-      "shadow" : {
-        "kind" : "layer-color",
-        "opacity" : 0.40
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.32
       },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.16
+      "translucency": {
+        "enabled": true,
+        "value": 0.12
       }
     },
     {
-      "layers" : [
+      "layers": [
         {
-          "image-name" : "02-right-facet.svg",
-          "name" : "Right Facet"
+          "image-name": "02-body.svg",
+          "name": "Bird Body"
         }
       ],
-      "shadow" : {
-        "kind" : "layer-color",
-        "opacity" : 0.40
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.32
       },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.16
-      }
-    },
-    {
-      "layers" : [
-        {
-          "image-name" : "03-bottom-facet.svg",
-          "name" : "Bottom Facet"
-        }
-      ],
-      "shadow" : {
-        "kind" : "layer-color",
-        "opacity" : 0.40
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.16
+      "translucency": {
+        "enabled": true,
+        "value": 0.12
       }
     }
   ],
-  "supported-platforms" : {
-    "squares" : "shared"
+  "supported-platforms": {
+    "squares": "shared"
   }
 }

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
   <title id="title">TUFF</title>
-  <desc id="description">Three triangular facets form a larger downward-pointing mark.</desc>
-  <path fill="#6F4DFF" d="M168 196h344L340 496Z"/>
-  <path fill="#6F4DFF" d="M512 196h344L684 496Z"/>
-  <path fill="#6F4DFF" d="M340 496h344L512 796Z"/>
+  <desc id="description">A violet bird on a black field, built from one equilateral triangle and four quarter circles.</desc>
+  <rect width="1024" height="1024" fill="#000000"/>
+  <path fill="#A78BFA" d="M113.14 128.19 A307.05 307.05 0 0 1 420.18 435.24 L113.14 435.24 Z M683.09 281.72 L952.0 435.24 L683.09 588.76 Z"/>
+  <path fill="#6F4DFF" d="M72.0 588.76 A307.05 307.05 0 0 0 686.09 588.76 L686.09 281.72 A307.05 307.05 0 0 0 379.05 588.76 L72.0 588.76 Z"/>
 </svg>
