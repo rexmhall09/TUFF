@@ -248,7 +248,7 @@ public final class AppSettingsStore {
     public var topK = 64
     public var topPEnabled = true
     public var topP = 0.95
-    public var newlineShortcut: AppNewlineShortcut = .return
+    public var newlineShortcut: AppNewlineShortcut = .shiftReturn
     public var showPromptExamples = true
     public var sentPromptBehavior: AppSentPromptBehavior = .keep
     public var loadModelOnLaunch = false

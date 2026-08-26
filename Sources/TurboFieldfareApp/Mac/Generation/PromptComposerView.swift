@@ -49,11 +49,11 @@ struct PromptComposerView: View {
                 get: { promptFocused },
                 set: { promptFocused = $0 }),
             newlineShortcut: model.newlineShortcut,
-            canRun: model.canRun,
+            canRun: model.canSubmit,
             canAcceptImages: model.isImageInputAvailable
                 && !model.isRunning
                 && !model.isAddingImages,
-            onSubmit: model.run,
+            onSubmit: model.submit,
             onImagesDropped: { model.addImages($0) },
             onImageDataPasted: model.addImageData,
             onPromisedImagesReceived: { urls, directory in

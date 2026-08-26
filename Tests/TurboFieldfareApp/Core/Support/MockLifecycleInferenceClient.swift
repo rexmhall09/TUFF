@@ -11,6 +11,7 @@ final class MockLifecycleInferenceClient: AppModelLifecycleClient, @unchecked Se
     private var loadStartedCount = 0
     private var loadStateHandlers: [@Sendable (AppModelLoadState) -> Void] = []
     private var nextLoadFailure: AppInferenceError?
+    private var generationRequests: [AppGenerationRequest] = []
     private(set) var ensureLoadedCalls: [(URL, Int, AppRuntimeOptions, Bool)] = []
 
     func ensureLoaded(modelDirectory: URL,
@@ -47,7 +48,10 @@ final class MockLifecycleInferenceClient: AppModelLifecycleClient, @unchecked Se
     }
 
     func generate(_ request: AppGenerationRequest) -> AsyncThrowingStream<AppInferenceEvent, Error> {
-        AsyncThrowingStream { continuation in
+        lock.lock()
+        generationRequests.append(request)
+        lock.unlock()
+        return AsyncThrowingStream<AppInferenceEvent, Error> { continuation in
             let task = Task {
                 continuation.yield(.finished(AppDiagnostics(
                     generatedTokens: 0,
@@ -105,6 +109,18 @@ final class MockLifecycleInferenceClient: AppModelLifecycleClient, @unchecked Se
         lock.lock()
         defer { lock.unlock() }
         return ensureLoadedCalls.count
+    }
+
+    func generationCallCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return generationRequests.count
+    }
+
+    func lastGenerationRequest() -> AppGenerationRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        return generationRequests.last
     }
 
     func waitForUnloadStart() async {

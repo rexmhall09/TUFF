@@ -4,18 +4,74 @@ import Testing
 
 @Suite struct AppModelLoadStateTests {
     @MainActor
-    @Test func runRequiresReadyState() {
+    @Test func runRequiresReadyStateButSubmissionCanLoadAnInstalledModel() throws {
+        let directory = try makeCompleteModelInstall("submit-eligibility")
+        defer { try? FileManager.default.removeItem(at: directory) }
         let model = AppModel()
+        model.setModelURL(directory)
         model.promptText = "go"
 
         model.loadState = .notLoaded
         #expect(!model.canRun)
+        #expect(model.canSubmit)
         model.loadState = .loading(.verifyingWeights)
         #expect(!model.canRun)
+        #expect(!model.canSubmit)
         model.loadState = .failed(.modelLoadFailed("boom"))
         #expect(!model.canRun)
+        #expect(model.canSubmit)
         model.loadState = .ready(modelDirectory: URL(fileURLWithPath: "/tmp/m.gturbo"), loadSeconds: 1.2)
         #expect(model.canRun)
+        #expect(model.canSubmit)
+    }
+
+    @MainActor
+    @Test func submitLoadsThenRunsExactlyOnce() async throws {
+        let directory = try makeCompleteModelInstall("load-then-submit")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = MockLifecycleInferenceClient()
+        client.suspendLoads = true
+        let model = AppModel(modelDirectory: directory, client: client)
+        model.promptText = "Explain local inference"
+
+        model.submit()
+        await client.waitForLoadStart()
+        #expect(model.isLoadingForSubmission)
+        #expect(!model.canSubmit)
+        #expect(client.generationCallCount() == 0)
+
+        model.submit()
+        #expect(client.ensureLoadedCallCount() == 1)
+        client.releaseLoads()
+        for _ in 0..<200 where client.generationCallCount() == 0 {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(client.generationCallCount() == 1)
+        #expect(client.lastGenerationRequest()?.prompt == "Explain local inference")
+        #expect(!model.isLoadingForSubmission)
+    }
+
+    @MainActor
+    @Test func failedLoadKeepsDraftAndNeverRunsQueuedSubmission() async throws {
+        let directory = try makeCompleteModelInstall("failed-load-submit")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = MockLifecycleInferenceClient()
+        client.suspendLoads = true
+        let model = AppModel(modelDirectory: directory, client: client)
+        model.promptText = "Keep this draft"
+
+        model.submit()
+        await client.waitForLoadStart()
+        client.failNextLoad(.modelLoadFailed("synthetic"))
+        for _ in 0..<200 where !model.loadState.isFailed {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        #expect(client.generationCallCount() == 0)
+        #expect(model.promptText == "Keep this draft")
+        #expect(!model.isLoadingForSubmission)
+        #expect(model.canSubmit)
     }
 
     @MainActor

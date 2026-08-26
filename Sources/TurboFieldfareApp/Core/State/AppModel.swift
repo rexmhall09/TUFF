@@ -16,6 +16,7 @@ public final class AppModel {
     public let serverStore = AppServerStore()
     public let inferenceStore = AppSharedInferenceStore()
     public let deviceCapabilities: TUFFDeviceCapabilities
+    private var runsAfterCurrentLoad = false
 
     public var modelPathText: String {
         get { modelLibraryStore.modelPathText }
@@ -867,6 +868,19 @@ public final class AppModel {
                 || !imageAttachments.isEmpty)
     }
 
+    /// A submission can start immediately against a ready runtime or begin the
+    /// selected model's normal load and run once that same load reaches ready.
+    public var canSubmit: Bool {
+        let hasInput = !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !imageAttachments.isEmpty
+        guard hasInput, !runsAfterCurrentLoad else { return false }
+        return canRun || canLoadModel
+    }
+
+    public var isLoadingForSubmission: Bool {
+        runsAfterCurrentLoad && loadState.isLoading
+    }
+
     public var canCancel: Bool { isRunning && !isCancellationPending }
 
     public var hasOutputTranscript: Bool {
@@ -1354,6 +1368,7 @@ public final class AppModel {
 
     public func cancelLoad() {
         guard canCancelLoad, let lifecycle = client as? AppModelLifecycleClient else { return }
+        runsAfterCurrentLoad = false
         loadState = .cancelling
         loadGeneration &+= 1
         loadTask?.cancel()
@@ -1372,6 +1387,7 @@ public final class AppModel {
 
     public func unloadModel() {
         guard canUnloadModel, let lifecycle = client as? AppModelLifecycleClient else { return }
+        runsAfterCurrentLoad = false
         loadState = .unloading
         unloadGeneration &+= 1
         let generation = unloadGeneration
@@ -2044,7 +2060,12 @@ public final class AppModel {
             _ = seconds
         case .failed(let loadError):
             pendingExplicitLoadRuntimeKey = nil
+            runsAfterCurrentLoad = false
             error = loadError
+        }
+        if case .ready = state, runsAfterCurrentLoad {
+            runsAfterCurrentLoad = false
+            run()
         }
     }
 
@@ -2197,6 +2218,16 @@ public final class AppModel {
             } catch {
                 await self.finishStreamFailure(.unknown("\(error)"))
             }
+        }
+    }
+
+    public func submit() {
+        guard canSubmit else { return }
+        if canRun {
+            run()
+        } else {
+            runsAfterCurrentLoad = true
+            loadModel()
         }
     }
 

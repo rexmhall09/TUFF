@@ -120,7 +120,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
 
     var version: Int = currentVersion
     var modelProfiles: [String: AppModelSettingsProfile]
-    var newlineShortcut: AppNewlineShortcut = .return
+    var newlineShortcut: AppNewlineShortcut = .shiftReturn
     var showPromptExamples: Bool = true
     var sentPromptBehavior: AppSentPromptBehavior = .keep
     var loadModelOnLaunch: Bool = false
@@ -204,7 +204,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topPEnabled: Bool = true,
          topP: Double = 0.95,
          prefillEnabled: Bool = true,
-         newlineShortcut: AppNewlineShortcut = .return,
+         newlineShortcut: AppNewlineShortcut = .shiftReturn,
          showPromptExamples: Bool = true,
          sentPromptBehavior: AppSentPromptBehavior = .keep,
          visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
@@ -237,7 +237,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             modelProfiles = try container.decode(
                 [String: AppModelSettingsProfile].self, forKey: .modelProfiles)
             newlineShortcut = try container.decodeIfPresent(
-                AppNewlineShortcut.self, forKey: .newlineShortcut) ?? .return
+                AppNewlineShortcut.self, forKey: .newlineShortcut) ?? .shiftReturn
             showPromptExamples = try container.decodeIfPresent(
                 Bool.self, forKey: .showPromptExamples) ?? true
             sentPromptBehavior = try container.decodeIfPresent(
@@ -261,7 +261,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             rdadvisePolicy: try stamp.decodeIfPresent(
                 AppRDAdvicePolicy.self, forKey: .rdadvisePolicy) ?? .off)]
         newlineShortcut = try stamp.decodeIfPresent(
-            AppNewlineShortcut.self, forKey: .newlineShortcut) ?? .return
+            AppNewlineShortcut.self, forKey: .newlineShortcut) ?? .shiftReturn
         showPromptExamples = try stamp.decodeIfPresent(
             Bool.self, forKey: .showPromptExamples) ?? true
         sentPromptBehavior = try stamp.decodeIfPresent(

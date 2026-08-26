@@ -56,7 +56,7 @@ import TurboFieldfare
         #expect(settings == MacAppSettings())
     }
 
-    @Test func legacySettingsDefaultToReturnWithoutLosingValues() throws {
+    @Test func legacySettingsDefaultToPlainReturnSendWithoutLosingValues() throws {
         let data = Data("""
         {
           "version": 1,
@@ -81,7 +81,7 @@ import TurboFieldfare
         #expect(!settings.topPEnabled)
         #expect(settings.topP == 0.8)
         #expect(!settings.prefillEnabled)
-        #expect(settings.newlineShortcut == .return)
+        #expect(settings.newlineShortcut == .shiftReturn)
         #expect(settings.showPromptExamples)
         #expect(settings.sentPromptBehavior == .keep)
     }

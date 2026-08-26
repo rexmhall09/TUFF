@@ -9,6 +9,8 @@ struct GenerateControl: View {
     var body: some View {
         if model.isRunning {
             runningPill
+        } else if model.isLoadingForSubmission {
+            loadingPill
         } else {
             generateButton
         }
@@ -16,9 +18,9 @@ struct GenerateControl: View {
 
     private var generateButton: some View {
         Button {
-            model.run()
+            model.submit()
         } label: {
-            Label("Generate", systemImage: "arrow.up")
+            Label(model.canRun ? "Send" : "Load & Send", systemImage: "arrow.up")
                 .font(.callout.weight(.semibold))
                 .padding(.horizontal, 24)
                 .frame(minWidth: 124, minHeight: controlHeight)
@@ -31,9 +33,33 @@ struct GenerateControl: View {
             Capsule().stroke(.white.opacity(0.16), lineWidth: 0.5)
         }
         .keyboardShortcut(.return, modifiers: .command)
-        .disabled(!model.canRun)
-        .opacity(model.canRun ? 1 : 0.62)
-        .accessibilityHint("Sends the prompt to the selected local model")
+        .disabled(!model.canSubmit)
+        .opacity(model.canSubmit ? 1 : 0.62)
+        .accessibilityHint(model.canRun
+            ? "Sends the prompt to the selected local model"
+            : "Loads the selected local model, then sends the prompt")
+    }
+
+    private var loadingPill: some View {
+        Button(action: model.cancelLoad) {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text(model.presentation.label)
+                    .font(.callout.weight(.medium))
+                Label("Cancel model load", systemImage: "xmark.circle.fill")
+                    .labelStyle(.iconOnly)
+            }
+            .padding(.horizontal, 16)
+            .frame(minWidth: 140, minHeight: controlHeight)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .background(TurboFieldfareMacTheme.accentColor, in: .capsule)
+        .disabled(!model.canCancelLoad)
+        .help("Cancel loading and keep this draft")
+        .accessibilityLabel("Cancel model load")
+        .accessibilityValue(model.presentation.label)
     }
 
     private var runningPill: some View {
