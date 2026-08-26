@@ -91,35 +91,42 @@ install -m 0644 README.md "$app/Contents/Resources/README.md"
 install -m 0644 THIRD_PARTY_NOTICES.md \
   "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
 
-iconset="$temporary_directory/TUFF.iconset"
-mkdir -p "$iconset"
-icon_source="Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png"
+# Compile the Icon Composer source the way Xcode does. actool emits the layered
+# Liquid Glass icon into Assets.car for macOS 26 and a flattened TUFF.icns
+# alongside it, which older systems fall back to through CFBundleIconFile.
+icon_build="$temporary_directory/icon"
+mkdir -p "$icon_build"
+icon_partial_plist="$temporary_directory/icon-partial.plist"
+xcrun actool \
+  --compile "$icon_build" \
+  --platform macosx \
+  --minimum-deployment-target 15.0 \
+  --app-icon TUFF \
+  --output-partial-info-plist "$icon_partial_plist" \
+  "$repository_root/Brand/TUFF.icon" >/dev/null
 
-make_icon() {
-  local pixels="$1"
-  local filename="$2"
-  sips -z "$pixels" "$pixels" "$icon_source" \
-    --out "$iconset/$filename" >/dev/null
-}
+for produced in Assets.car TUFF.icns; do
+  if [[ ! -s "$icon_build/$produced" ]]; then
+    echo "actool did not produce $produced" >&2
+    exit 1
+  fi
+  install -m 0644 "$icon_build/$produced" "$app/Contents/Resources/$produced"
+done
 
-make_icon 16 icon_16x16.png
-make_icon 32 icon_16x16@2x.png
-make_icon 32 icon_32x32.png
-make_icon 64 icon_32x32@2x.png
-make_icon 128 icon_128x128.png
-make_icon 256 icon_128x128@2x.png
-make_icon 256 icon_256x256.png
-make_icon 512 icon_256x256@2x.png
-make_icon 512 icon_512x512.png
-make_icon 1024 icon_512x512@2x.png
-iconutil -c icns "$iconset" -o "$app/Contents/Resources/TUFF.icns"
+icon_name="$(plutil -extract CFBundleIconName raw -o - "$icon_partial_plist")"
+icon_file="$(plutil -extract CFBundleIconFile raw -o - "$icon_partial_plist")"
+if [[ -z "$icon_name" || -z "$icon_file" ]]; then
+  echo "actool did not report the icon Info.plist keys" >&2
+  exit 1
+fi
 
 info_plist="$app/Contents/Info.plist"
 plutil -create xml1 "$info_plist"
 plutil -insert CFBundleDevelopmentRegion -string en "$info_plist"
 plutil -insert CFBundleDisplayName -string TUFF "$info_plist"
 plutil -insert CFBundleExecutable -string TUFF "$info_plist"
-plutil -insert CFBundleIconFile -string TUFF.icns "$info_plist"
+plutil -insert CFBundleIconFile -string "$icon_file" "$info_plist"
+plutil -insert CFBundleIconName -string "$icon_name" "$info_plist"
 plutil -insert CFBundleIdentifier -string com.rexmhall09.TUFF "$info_plist"
 plutil -insert CFBundleInfoDictionaryVersion -string 6.0 "$info_plist"
 plutil -insert CFBundleName -string TUFF "$info_plist"

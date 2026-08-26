@@ -20,7 +20,23 @@ separate pane. The wing is genuinely detached, so it keeps its own layer and its
 own edge. The beak also tucks three units under the body so no hairline shows
 along the seam.
 
-The packaged app uses `Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png` as its flattened compatibility source. Apple’s renderer exports a 16-bit PNG, while `iconutil` requires an 8-bit source for the largest iconset member. Regenerate and normalize it with:
+`Scripts/package_app.sh` compiles `TUFF.icon` the way Xcode does, with
+`actool`. That writes the layered icon into `Assets.car`, which macOS 26 uses to
+render the default, dark, clear, and tinted appearances live, and a flattened
+`TUFF.icns` beside it for older systems. The script reads both `CFBundleIconName`
+and `CFBundleIconFile` out of actool's partial plist rather than hard-coding
+them, and fails if either is missing:
+
+```bash
+xcrun actool --compile "$build" --platform macosx \
+  --minimum-deployment-target 15.0 --app-icon TUFF \
+  --output-partial-info-plist "$partial" Brand/TUFF.icon
+```
+
+`Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png` is no longer what
+the app installs as its icon. It is a flattened 1024 preview that the app shows
+inside its own interface and that the README uses. Regenerate it after changing
+the mark:
 
 ```bash
 /Applications/Xcode.app/Contents/Applications/Icon\ Composer.app/Contents/Executables/ictool \
@@ -31,3 +47,6 @@ magick /tmp/tuff-app-icon-16bit.png -depth 8 \
   PNG32:Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png
 ruby Scripts/check_brand_assets.rb
 ```
+
+To preview any single appearance, pass `--rendition` one of `Default`, `Dark`,
+`ClearLight`, `ClearDark`, `TintedLight`, or `TintedDark`.
