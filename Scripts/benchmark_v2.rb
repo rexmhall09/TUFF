@@ -74,12 +74,14 @@ def system_report
   hardware, = safe_capture(
     "system_profiler", "SPHardwareDataType", "-detailLevel", "mini"
   )
+  cli_sha256, = safe_capture("shasum", "-a", "256", CLI)
   filtered_hardware = hardware.lines.grep(
     /^\s*(Model Name|Model Identifier|Chip|Total Number of Cores|Memory):/
   ).map(&:strip)
 
   {
     "commit" => commit,
+    "cli_sha256" => cli_sha256.split.first,
     "worktree_status" => status,
     "macos" => macos,
     "swift" => swift,
@@ -148,6 +150,28 @@ def run_once(output_dir, model, case_id, label, command)
   )
 end
 
+def existing_run(output_dir, model, case_id, label, command)
+  prefix = File.join(output_dir, model, case_id, label)
+  command_path = "#{prefix}.command.txt"
+  stdout_path = "#{prefix}.stdout.txt"
+  stderr_path = "#{prefix}.stderr.txt"
+  return nil unless [command_path, stdout_path, stderr_path].all? { |path| File.file?(path) }
+  return nil unless File.read(command_path).strip == Shellwords.join(command)
+
+  measurement = parse_measurement(File.read(stderr_path))
+  return nil unless %w[endOfTurn eos].include?(measurement.fetch("stop_reason"))
+
+  puts "#{model} / #{case_id} / #{label} (resumed)"
+  measurement.merge(
+    "label" => label,
+    "command" => Shellwords.join(command),
+    "stdout_file" => File.basename(stdout_path),
+    "stderr_file" => File.basename(stderr_path)
+  )
+rescue RuntimeError
+  nil
+end
+
 def summarize(measurements)
   {
     "prompt_tokens" => measurements.first.fetch("prompt_tokens"),
@@ -199,6 +223,7 @@ options = {
   runs: 3,
   max_new: 1_024,
   plan: false,
+  resume: false,
   output: File.join(ROOT, "benchmark-results", "v2-#{Time.now.strftime("%Y%m%d-%H%M%S")}")
 }
 
@@ -212,6 +237,9 @@ OptionParser.new do |parser|
   parser.on("--max-new N", Integer, "Generated-token cap (default 1024)") { |n| options[:max_new] = n }
   parser.on("--output PATH", "Result directory") { |path| options[:output] = File.expand_path(path) }
   parser.on("--plan", "Print commands without running models") { options[:plan] = true }
+  parser.on("--resume", "Continue a matching interrupted result directory") do
+    options[:resume] = true
+  end
 end.parse!
 
 abort "--warmups must be at least 1" if options[:warmups] < 1
@@ -237,29 +265,51 @@ CASES.each_key do |case_id|
   abort "benchmark prompt is missing: #{prompt}" unless File.file?(prompt)
 end
 
-FileUtils.mkdir_p(options[:output])
-report = {
-  "protocol" => {
-    "warmups_per_case" => options[:warmups],
-    "measured_runs_per_case" => options[:runs],
-    "max_new_tokens" => options[:max_new],
-    "context_tokens" => 4_096
-  },
-  "system" => system_report,
-  "models" => {}
+protocol = {
+  "warmups_per_case" => options[:warmups],
+  "measured_runs_per_case" => options[:runs],
+  "max_new_tokens" => options[:max_new],
+  "context_tokens" => 4_096
 }
+results_path = File.join(options[:output], "results.json")
+if options[:resume]
+  abort "resume results are missing: #{results_path}" unless File.file?(results_path)
+  report = JSON.parse(File.read(results_path))
+  abort "resume protocol does not match this invocation" unless report.fetch("protocol") == protocol
+  current_system = system_report
+  abort "resume commit does not match the current checkout" unless
+    report.dig("system", "commit") == current_system.fetch("commit")
+  if report.dig("system", "cli_sha256") &&
+     report.dig("system", "cli_sha256") != current_system.fetch("cli_sha256")
+    abort "resume CLI binary does not match the original run"
+  end
+else
+  if File.directory?(options[:output]) && !Dir.empty?(options[:output])
+    abort "output directory is not empty; choose another path or pass --resume"
+  end
+  FileUtils.mkdir_p(options[:output])
+  report = {
+    "protocol" => protocol,
+    "system" => system_report,
+    "models" => {}
+  }
+end
 File.write(File.join(options[:output], "system.json"), JSON.pretty_generate(report.fetch("system")) + "\n")
 
 options[:models].each do |model|
   config = MODELS.fetch(model)
-  report["models"][model] = {}
+  report["models"][model] ||= {}
   CASES.each do |case_id, seed|
     command = command_for(model, config, case_id, seed, options[:max_new])
     options[:warmups].times do |index|
-      run_once(options[:output], model, case_id, "warmup-#{index + 1}", command)
+      label = "warmup-#{index + 1}"
+      existing_run(options[:output], model, case_id, label, command) ||
+        run_once(options[:output], model, case_id, label, command)
     end
     measured = options[:runs].times.map do |index|
-      run_once(options[:output], model, case_id, "measured-#{index + 1}", command)
+      label = "measured-#{index + 1}"
+      existing_run(options[:output], model, case_id, label, command) ||
+        run_once(options[:output], model, case_id, label, command)
     end
     report["models"][model][case_id] = {
       "measurements" => measured,

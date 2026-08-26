@@ -29,6 +29,11 @@ Use `--model <name>` to benchmark one of `gemma4-e4b`, `gemma4`, `qwen36`,
 generated responses and machine report can be reviewed before anything is
 shared.
 
+If a run is interrupted, pass the same `--output` path with `--resume`. The
+harness reuses only complete rows whose command, commit, and release CLI hash
+match. A partial row is rerun from a new process, while a checkout or binary
+change fails closed instead of mixing measurements.
+
 ## Prepare the Mac
 
 Install the model with the [README instructions](../README.md#command-line-interface),
