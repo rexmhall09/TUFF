@@ -1118,10 +1118,11 @@ public final class AppModel {
     /// which meant the same set of images was accepted over the API and refused
     /// in the app.
     public var maximumImageAttachments: Int {
+        guard selectedDescriptor.supportsImageInput else { return 0 }
         // The context a run will actually use, which is the loaded session's
         // until it is reloaded. Capping on the pending setting instead let the
         // composer accept images the request then refused.
-        max(1, VisionImageTokenBudget.capacity(
+        return max(1, VisionImageTokenBudget.capacity(
             maxContext: effectiveMaxContextTokens,
             reservedTextTokens: Self.reservedPromptTokens,
             family: selectedDescriptor.family))

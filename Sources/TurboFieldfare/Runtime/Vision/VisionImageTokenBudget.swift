@@ -21,7 +21,12 @@ public enum VisionImageTokenBudget {
     }
 
     public static func maximumTokensPerImage(family: ModelFamily) -> Int {
-        VisionConfig(family: family).maximumPooledTokens + markerTokensPerImage
+        switch family {
+        case .gemma4, .qwen36:
+            VisionConfig(family: family).maximumPooledTokens + markerTokensPerImage
+        case .gptOss:
+            0
+        }
     }
 
     public static func imageTokens(softTokenCounts: [Int]) -> Int {
@@ -60,6 +65,7 @@ public enum VisionImageTokenBudget {
         reservedTextTokens: Int,
         family: ModelFamily = .gemma4
     ) -> Int {
+        guard family != .gptOss else { return 0 }
         let available = maxContext - reservedTextTokens
         guard available > 0 else { return 0 }
         let conservative = available / maximumTokensPerImage(family: family)

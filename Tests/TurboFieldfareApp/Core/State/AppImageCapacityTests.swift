@@ -9,6 +9,23 @@ import TurboFieldfare
 /// tests are as much about the rule being shared as about the numbers.
 @Suite struct AppImageCapacityTests {
     @MainActor
+    @Test func textOnlyModelsExposeZeroImageCapacity() throws {
+        for variant in [ModelVariant.gemma4_E4B,
+                        ModelVariant.gptOss_20B,
+                        ModelVariant.gptOss_120B] {
+            let descriptor = try #require(
+                AppModelInstallDescriptor.descriptor(for: variant))
+            let model = AppModel(
+                modelDirectory: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("capacity-\(variant.rawValue).gturbo"),
+                installer: MockModelInstallerClient(descriptor: descriptor))
+
+            #expect(!model.selectedDescriptor.supportsImageInput)
+            #expect(model.maximumImageAttachments == 0)
+        }
+    }
+
+    @MainActor
     @Test(arguments: AppContextLengthOption.allCases)
     func capacityFollowsTheContext(option: AppContextLengthOption) throws {
         let directory = try makeVisionReadyModelInstall("capacity-\(option.tokens)")

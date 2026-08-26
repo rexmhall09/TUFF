@@ -64,6 +64,9 @@ public func run(args: Args,
                 flag: "--reasoning", context: modelFamily.rawValue)
         }
         let input = try parseInput(args: args)
+        try validateImageSupport(
+            hasImages: input.hasImages,
+            family: modelFamily)
         var selectedDevice: MTLDevice?
         if input.hasImages {
             guard let device = MTLCreateSystemDefaultDevice() else {
@@ -341,6 +344,17 @@ public func run(args: Args,
         return RunResult(exitCode: 130)
     } catch {
         return errored(stderr, "\(error)", 1)
+    }
+}
+
+func validateImageSupport(
+    hasImages: Bool,
+    family: ModelFamily
+) throws {
+    guard !hasImages || family != .gptOss else {
+        throw ArgsError.unsupported(
+            flag: "image input",
+            context: "GPT-OSS")
     }
 }
 

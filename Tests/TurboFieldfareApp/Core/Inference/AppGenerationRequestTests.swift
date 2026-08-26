@@ -156,6 +156,21 @@ import TurboFieldfare
         }
     }
 
+    @Test func gptOssTextSkipsVisionBudgetAndImagesFailClosed() throws {
+        try AppGenerationRequest.validateImageCapacity(
+            imageCount: 0,
+            maxContextTokens: 4_096,
+            family: .gptOss)
+
+        #expect(throws: AppInferenceError.invalidRequest(
+            "GPT-OSS does not support image input.")) {
+            try AppGenerationRequest.validateImageCapacity(
+                imageCount: 1,
+                maxContextTokens: 4_096,
+                family: .gptOss)
+        }
+    }
+
     @Test func structuredMessagesCanReplaceTheSimplePrompt() throws {
         let request = AppGenerationRequest(
             modelDirectory: existingDirectory,

@@ -107,15 +107,10 @@ public struct AppGenerationRequest: Equatable, Sendable {
             family: family,
             reasoning: reasoning,
             reasoningEffort: reasoningEffort)
-        let capacity = VisionImageTokenBudget.capacity(
-            maxContext: maxContextTokens, reservedTextTokens: 0,
+        try Self.validateImageCapacity(
+            imageCount: imageAttachments.count,
+            maxContextTokens: maxContextTokens,
             family: family)
-        guard imageAttachments.count <= capacity else {
-            throw AppInferenceError.invalidRequest(
-                "\(imageAttachments.count) images need up to "
-                    + "\(imageAttachments.count * VisionImageTokenBudget.maximumTokensPerImage(family: family)) "
-                    + "tokens, beyond the \(maxContextTokens)-token context.")
-        }
         for attachment in imageAttachments {
             guard attachment.fileURL.isFileURL,
                   attachment.encodedBytes >= 0,
@@ -189,6 +184,30 @@ public struct AppGenerationRequest: Equatable, Sendable {
         } else if reasoningEffort != nil {
             throw AppInferenceError.invalidRequest(
                 "Reasoning effort is only supported by GPT-OSS.")
+        }
+    }
+
+    static func validateImageCapacity(
+        imageCount: Int,
+        maxContextTokens: Int,
+        family: ModelFamily
+    ) throws {
+        guard imageCount > 0 else { return }
+        guard family != .gptOss else {
+            throw AppInferenceError.invalidRequest(
+                "GPT-OSS does not support image input.")
+        }
+        let maximumTokensPerImage = VisionImageTokenBudget.maximumTokensPerImage(
+            family: family)
+        let capacity = VisionImageTokenBudget.capacity(
+            maxContext: maxContextTokens,
+            reservedTextTokens: 0,
+            family: family)
+        guard imageCount <= capacity else {
+            throw AppInferenceError.invalidRequest(
+                "\(imageCount) images need up to "
+                    + "\(imageCount * maximumTokensPerImage) "
+                    + "tokens, beyond the \(maxContextTokens)-token context.")
         }
     }
 }

@@ -202,6 +202,16 @@ import TurboFieldfare
                 "the opt-in is still reachable")
     }
 
+    @Test func gptOssImageInputFailsBeforeVisionConfiguration() throws {
+        try validateImageSupport(hasImages: false, family: .gptOss)
+        #expect(throws: ArgsError.unsupported(
+            flag: "image input", context: "GPT-OSS")) {
+            try validateImageSupport(hasImages: true, family: .gptOss)
+        }
+        try validateImageSupport(hasImages: true, family: .gemma4)
+        try validateImageSupport(hasImages: true, family: .qwen36)
+    }
+
     @Test(.enabled(
         if: MTLCreateSystemDefaultDevice()?.supportsFamily(.apple8) == false,
         "requires an Apple7 or older Metal device"))
