@@ -22,7 +22,11 @@ struct RootView: View {
                     ideal: AppWindowLayout.sidebarIdealWidth,
                     max: AppWindowLayout.sidebarMaximumWidth)
         } detail: {
-            destinationView
+            AppWorkspaceView(
+                destination: navigation.destination,
+                model: model,
+                serverController: serverController,
+                updateController: updateController)
         }
         .navigationSplitViewStyle(.balanced)
         .focusedSceneValue(
@@ -246,20 +250,30 @@ struct RootView: View {
         .accessibilityHint("Opens Models")
     }
 
-    @ViewBuilder
-    private var destinationView: some View {
-        switch navigation.destination {
-        case .chat:
-            ChatWorkspaceView(model: model)
-        case .models:
-            ModelsWorkspaceView(model: model)
-        case .server:
-            ServerWorkspaceView(
-                model: model, controller: serverController)
-        case .settings:
-            SettingsWorkspaceView(
-                model: model, updateController: updateController)
+}
+
+struct AppWorkspaceView: View {
+    let destination: AppDestination
+    let model: AppModel
+    let serverController: AppServerController
+    let updateController: AppUpdateController
+
+    var body: some View {
+        Group {
+            switch destination {
+            case .chat:
+                ChatWorkspaceView(model: model)
+            case .models:
+                ModelsWorkspaceView(model: model)
+            case .server:
+                ServerWorkspaceView(
+                    model: model, controller: serverController)
+            case .settings:
+                SettingsWorkspaceView(
+                    model: model, updateController: updateController)
+            }
         }
+        .accessibilityIdentifier("workspace.\(destination.rawValue)")
     }
 }
 

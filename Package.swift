@@ -189,7 +189,14 @@ let package = Package(
         ),
         .testTarget(
             name: "TurboFieldfareMacPresentationTests",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfareMacPresentation"],
+            dependencies: [
+                "TUFFModelCatalog",
+                "TurboFieldfareAppCore",
+                "TurboFieldfareAppServer",
+                "TurboFieldfareAppUpdater",
+                "TurboFieldfareMac",
+                "TurboFieldfareMacPresentation",
+            ],
             path: "Tests/TurboFieldfareApp/MacPresentation"
         ),
         .testTarget(
