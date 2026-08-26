@@ -146,12 +146,17 @@ if [[ -n "$update_public_key" ]]; then
   plutil -insert SUPublicEDKey -string "$update_public_key" "$info_plist"
   plutil -insert SUEnableAutomaticChecks -bool true "$info_plist"
   plutil -insert SUAllowsAutomaticUpdates -bool true "$info_plist"
-  plutil -insert SUAutomaticallyUpdate -bool false "$info_plist"
+  plutil -insert SUAutomaticallyUpdate -bool true "$info_plist"
 else
   echo "warning: no Sparkle update public key; in-app updates are disabled" >&2
 fi
 
 plutil -lint "$info_plist"
+if [[ -n "$update_public_key" ]]; then
+  [[ "$(plutil -extract SUEnableAutomaticChecks raw "$info_plist")" == "true" ]]
+  [[ "$(plutil -extract SUAllowsAutomaticUpdates raw "$info_plist")" == "true" ]]
+  [[ "$(plutil -extract SUAutomaticallyUpdate raw "$info_plist")" == "true" ]]
+fi
 
 main_architectures="$(lipo -archs "$app/Contents/MacOS/TUFF")"
 service_architectures="$(lipo -archs "$app/Contents/MacOS/TUFFDecodeService")"
