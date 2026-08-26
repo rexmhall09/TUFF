@@ -35,9 +35,9 @@ struct ModelInstallView: View {
                 .font(.title.bold())
                 .accessibilityHeading(.h1)
             Text("TUFF needs one of these installed before it can generate text. "
-                 + "Each downloads independently — you can install both and switch "
-                 + "between them, and a download keeps running while you use "
-                 + "another model.")
+                 + "Each one downloads independently, so you can install as many "
+                 + "as you have room for and switch between them. A download "
+                 + "keeps running while you use another model.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

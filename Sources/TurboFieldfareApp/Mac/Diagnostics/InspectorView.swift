@@ -99,7 +99,7 @@ struct InspectorView: View {
                     .foregroundStyle(.orange)
             } else if case .unsupportedLayout = model.visionInstallationStatus {
                 Text("Image support needs a model directory named "
-                    + "“<name>.gturbo”, which is where the companion pack lives.")
+                    + "\"<name>.gturbo\", which is where the companion pack lives.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if case .failed(let message) = model.visionInstallReadiness,
