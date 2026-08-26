@@ -10,7 +10,7 @@ struct RootView: View {
     let serverController: AppServerController
     let updateController: AppUpdateController
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @State private var destination: AppDestination? = .chat
+    @State private var navigation = AppNavigationState()
     @State private var renameTarget: AppConversationRecord?
     @State private var renameText = ""
 
@@ -27,7 +27,7 @@ struct RootView: View {
         .navigationSplitViewStyle(.balanced)
         .focusedSceneValue(
             \.appNavigationAction,
-            AppNavigationAction { destination = $0 })
+            AppNavigationAction { navigation.select($0) })
         .containerBackground(for: .window) {
             LinearGradient(
                 colors: [
@@ -40,7 +40,7 @@ struct RootView: View {
                 endPoint: .bottom)
         }
         .tint(TurboFieldfareMacTheme.accentColor)
-        .animation(.smooth(duration: 0.25), value: destination)
+        .animation(.smooth(duration: 0.25), value: navigation.destination)
         .animation(.smooth(duration: 0.3), value: model.requiresModelInstallation)
         .animation(.smooth(duration: 0.25), value: model.error)
         .transaction { transaction in
@@ -60,15 +60,31 @@ struct RootView: View {
     }
 
     private var sidebar: some View {
-        List(selection: $destination) {
+        List {
             Section {
                 ForEach(AppDestination.allCases) { item in
-                    Label(item.title, systemImage: item.systemImage)
-                        .tag(Optional(item))
+                    Button {
+                        navigation.select(item)
+                    } label: {
+                        HStack(spacing: 9) {
+                            Label(item.title, systemImage: item.systemImage)
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                        .buttonStyle(.plain)
+                        .listRowBackground(destinationRowBackground(for: item))
+                        .foregroundStyle(navigation.destination == item
+                                         ? TurboFieldfareMacTheme.accentColor
+                                         : .primary)
                         .accessibilityIdentifier("navigation.\(item.rawValue)")
+                        .accessibilityValue(navigation.destination == item
+                                            ? "Selected" : "")
+                        .accessibilityAddTraits(
+                            navigation.destination == item ? .isSelected : [])
                 }
             }
-            if destination == .chat {
+            if navigation.destination == .chat {
                 Section {
                     Button {
                         model.clearOutput()
@@ -95,6 +111,12 @@ struct RootView: View {
         .safeAreaInset(edge: .top, spacing: 0) { brandHeader }
         .safeAreaInset(edge: .bottom, spacing: 0) { selectedModelFooter }
         .navigationTitle("TUFF")
+    }
+
+    private func destinationRowBackground(for item: AppDestination) -> Color {
+        navigation.destination == item
+            ? TurboFieldfareMacTheme.accentColor.opacity(0.14)
+            : .clear
     }
 
     private func conversationRow(_ conversation: AppConversationRecord) -> some View {
@@ -186,20 +208,33 @@ struct RootView: View {
     }
 
     private var selectedModelFooter: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("CURRENT MODEL")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.tertiary)
-            Text(model.selectedDescriptor.displayName)
-                .font(.caption.weight(.medium))
-                .lineLimit(2)
-            Label(model.presentation.label, systemImage: model.loadState.isReady
-                  ? "circle.fill" : "circle")
-                .font(.caption2)
-                .foregroundStyle(model.loadState.isReady
-                                 ? TurboFieldfareMacTheme.accentColor
-                                 : .secondary)
+        Button {
+            navigation.select(.models)
+        } label: {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CURRENT MODEL")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                    Text(model.selectedDescriptor.displayName)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(2)
+                    Label(model.presentation.label, systemImage: model.loadState.isReady
+                          ? "circle.fill" : "circle")
+                        .font(.caption2)
+                        .foregroundStyle(model.loadState.isReady
+                                         ? TurboFieldfareMacTheme.accentColor
+                                         : .secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(TurboFieldfareMacTheme.surfaceStyle(
@@ -208,11 +243,12 @@ struct RootView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Current model")
         .accessibilityValue("\(model.selectedDescriptor.displayName), \(model.presentation.label)")
+        .accessibilityHint("Opens Models")
     }
 
     @ViewBuilder
     private var destinationView: some View {
-        switch destination ?? .chat {
+        switch navigation.destination {
         case .chat:
             ChatWorkspaceView(model: model)
         case .models:

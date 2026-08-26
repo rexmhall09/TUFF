@@ -27,4 +27,14 @@ import Testing
         #expect(AppWindowLayout.sidebarIdealWidth
             <= AppWindowLayout.sidebarMaximumWidth)
     }
+
+    @Test func navigationStartsInChatAndSelectsEveryDestination() {
+        var navigation = AppNavigationState()
+        #expect(navigation.destination == .chat)
+
+        for destination in AppDestination.allCases {
+            navigation.select(destination)
+            #expect(navigation.destination == destination)
+        }
+    }
 }
