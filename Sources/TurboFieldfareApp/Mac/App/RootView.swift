@@ -662,7 +662,7 @@ private struct SettingsWorkspaceView: View {
         VStack(spacing: 0) {
             WorkspaceTitle(
                 title: "Settings",
-                subtitle: "Tune model, memory, and generation behavior.")
+                subtitle: "App behavior and per-model generation defaults.")
                 .padding(.horizontal, 28)
                 .padding(.top, 24)
                 .frame(maxWidth: .infinity, alignment: .leading)

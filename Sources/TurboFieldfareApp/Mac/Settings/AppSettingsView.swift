@@ -7,33 +7,25 @@ import SwiftUI
 struct AppSettingsView: View {
     @Bindable var model: AppModel
     let updateController: AppUpdateController
-    @State private var section: SettingsSection = .general
+    @State private var section: AppSettingsSection = .general
     @State private var profileModelID = ""
 
-    private enum SettingsSection: String, CaseIterable, Identifiable {
-        case general = "General"
-        case models = "Models"
-        case advanced = "Advanced"
-
-        var id: String { rawValue }
-        var symbol: String {
-            switch self {
-            case .general: "switch.2"
-            case .models: "memorychip"
-            case .advanced: "gearshape.2"
-            }
-        }
-    }
-
     var body: some View {
-        HStack(spacing: 0) {
-            List(SettingsSection.allCases, selection: $section) { item in
-                Label(item.rawValue, systemImage: item.symbol)
-                    .tag(item)
+        VStack(spacing: 0) {
+            Picker("Settings section", selection: $section) {
+                ForEach(AppSettingsSection.allCases) { item in
+                    Label(item.title, systemImage: item.systemImage)
+                        .tag(item)
+                }
             }
-            .listStyle(.sidebar)
-            .frame(minWidth: 150, idealWidth: 170, maxWidth: 190)
-            Divider()
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 460)
+            .padding(.horizontal, 28)
+            .padding(.top, 18)
+            .padding(.bottom, 8)
+            .accessibilityLabel("Settings section")
+
             Group {
                 switch section {
                 case .general: generalSettings
@@ -42,6 +34,7 @@ struct AppSettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .id(section)
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }

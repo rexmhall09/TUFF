@@ -47,7 +47,7 @@ struct OutputPaneView: View {
 
             Divider()
 
-            Button("New Conversation") { model.clearOutput() }
+            Button("New Chat") { model.clearOutput() }
                 .disabled(model.isRunning || !model.hasOutputTranscript)
         }
     }

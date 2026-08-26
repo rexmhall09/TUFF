@@ -61,11 +61,11 @@ struct PromptComposerView: View {
             },
             onPromisedImagesFailed: {
                 model.reportImageAttachmentError(
-                    "That drag did not deliver a file TurboFieldfare could read.")
+                    "That drag did not deliver a file TUFF could read.")
             },
             onUnsupportedImagePaste: {
                 model.reportImageAttachmentError(
-                    "That clipboard content is not an image TurboFieldfare can read.")
+                    "That clipboard content is not an image TUFF can read.")
             },
             onDropTargeted: { isImageDropTargeted = $0 })
             .accessibilityLabel("Prompt")
@@ -274,13 +274,13 @@ struct PromptComposerView: View {
             Button {
                 model.clearOutput()
             } label: {
-                Label("Clear output", systemImage: "trash")
+                Label("New chat", systemImage: "square.and.pencil")
                     .labelStyle(.iconOnly)
                     .frame(width: 28, height: 28)
                     .contentShape(Circle())
             }
             .buttonStyle(.borderless)
-            .help("Clear output")
+            .help("New chat")
         }
     }
 }

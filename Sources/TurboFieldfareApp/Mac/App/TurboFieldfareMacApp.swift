@@ -109,7 +109,7 @@ struct TurboFieldfareMacApp: App {
                 .disabled(!updateController.canCheckForUpdates)
             }
             CommandMenu("Generation") {
-                Button("New Conversation") { model.clearOutput() }
+                Button("New Chat") { model.clearOutput() }
                     .keyboardShortcut("n", modifiers: .command)
                     .disabled(model.isRunning || !model.hasOutputTranscript)
                 Divider()
