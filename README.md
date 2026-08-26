@@ -1,173 +1,165 @@
 <p align="center">
-  <img src="docs/assets/tuff-logo.png" alt="TUFF logo" width="220">
+  <img src="Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png" alt="TUFF app icon" width="170">
 </p>
 
 <h1 align="center">TUFF</h1>
 
 <p align="center">
-  <strong>Local language models on Apple Silicon, without treating memory as disposable.</strong><br>
-  A native Swift and Metal runtime, model library, chat app, CLI, and loopback server.
+  Run large language models locally on Apple Silicon.<br>
+  Native Swift, Metal, and an SSD-aware runtime that does not pretend memory is unlimited.
 </p>
 
 <p align="center">
-  <img alt="TUFF 2.0.0" src="https://img.shields.io/badge/TUFF-2.0.0-6F4DFF">
-  <img alt="Swift 6.2 or later" src="https://img.shields.io/badge/Swift-6.2%2B-F05138?logo=swift&logoColor=white">
-  <img alt="Metal 3.2 or later" src="https://img.shields.io/badge/Metal-3.2%2B-5E5CE6">
-  <img alt="macOS 15 or later" src="https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white">
-  <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/License-Apache%202.0-2ea44f"></a>
+  <a href="https://github.com/rexmhall09/TUFF/releases/latest"><strong>Download TUFF 2.0.0</strong></a>
+  · <a href="docs/OPENAI_SERVER.md">Server guide</a>
+  · <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-<p align="center">
-  <a href="#run-v2-locally">Run it</a> ·
-  <a href="#the-five-model-library">Models</a> ·
-  <a href="docs/OPENAI_SERVER.md">Server</a> ·
-  <a href="docs/BENCHMARKS.md">Measurements</a> ·
-  <a href="docs/SYSTEM_DESIGN.md">System design</a> ·
-  <a href="CONTRIBUTING.md">Contribute</a>
-</p>
+![TUFF chatting with Qwen3.6 on a Mac](docs/assets/tuff-v2-chat.jpg)
 
-TUFF runs five pinned instruction models through one architecture-aware runtime.
-It does not wrap MLX or llama.cpp. The inference engine, Metal kernels,
-streaming installer, application, CLI, and server are implemented in this
-repository.
+## What TUFF is
 
-Large mixture-of-experts checkpoints stay on SSD. TUFF keeps their shared
-weights and runtime state resident, fetches only the routed experts needed for
-the current work, and reuses those experts through a bounded cache. That is how
-the 61 GiB GPT-OSS 120B installation can produce coherent output on a 16 GB M2
-Mac without swapping.
+TUFF is a Mac app and inference engine for running a small set of models really
+well on Apple Silicon. It includes the chat app, model downloader, Metal
+runtime, command-line tools, and a local OpenAI-compatible server. It does not
+wrap MLX or llama.cpp.
 
-## v2 status
+The project started with one unusual idea: large mixture-of-experts models do
+not need every expert in memory at once. TUFF keeps the shared parts of a model
+resident, reads the experts it needs from SSD, and reuses them through a bounded
+cache. That is how I can run the 61 GiB GPT-OSS 120B checkpoint on my 16 GB M2
+MacBook Air without swap.
 
-The `v2` branch is a local 2.0.0 candidate. The app, all five model paths,
-hardware gating, persistent chat, app-hosted server, settings workspace, and
-signed-update client are implemented. The local release package is ad-hoc
-signed and not notarized.
+Version 2 is a much bigger project than the original app. It has five models,
+persistent chats, Markdown and native LaTeX rendering, image add-ons, per-model
+settings, a shared local server, hardware eligibility checks, and signed binary
+updates.
 
-The formal five-model benchmark campaign and GitHub release are intentionally
-not published yet. Until that final release gate is requested and completed,
-build or package v2 from this checkout.
+## Download the app
 
-## The five-model library
+TUFF requires an Apple Silicon Mac running macOS 15 or newer.
 
-Every source is pinned to an exact revision and source-index fingerprint. The
-installer writes directly into a bounded `.gturbo` directory instead of
-staging a second full checkpoint.
+1. Download `TUFF-v2.0.0-macos-arm64.zip` from the
+   [latest GitHub release](https://github.com/rexmhall09/TUFF/releases/latest).
+2. Open the ZIP and move `TUFF.app` into Applications.
+3. Open TUFF, choose Models, and download the model you want.
 
-| Model | Best fit | Installed text model | Minimum memory | Chat reasoning | Verified add-ons |
-| --- | --- | ---: | ---: | --- | --- |
-| Gemma 4 E4B IT | Small, dense, and quick to install | ~4.2 GB | 8 GB | Off / On | Text only in v2 |
-| Gemma 4 26B-A4B IT | Balanced MoE default | ~14.3 GB | 8 GB | Off / On | Image input |
-| Qwen3.6 35B-A3B | Coding, long context, and multimodal work | ~19.5 GB | 8 GB | Off / On, optional thought preservation | Image input |
-| GPT-OSS 20B | Harmony reasoning and local tool workflows | ~13.8 GB | 16 GB | Low / Medium / High | None |
-| GPT-OSS 120B | Largest local GPT-OSS checkpoint | ~65.4 GB | 16 GB | Low / Medium / High | None |
+This release is ad-hoc signed and is not notarized. On first launch, macOS may
+refuse to open it normally. Control-click TUFF, choose **Open**, then confirm
+**Open** again. You can also allow it from **System Settings > Privacy &
+Security**.
 
-Gemma 4 E4B is text-only for this release. TUFF does not show unverified
-capabilities as fake products. Gemma 4 26B and Qwen image input appear as
-separate add-ons in the Models screen and require an M2 or newer Mac.
+TUFF checks for signed updates automatically. Automatic download and
+installation are on by default and can be changed in Settings. The updater only
+accepts archives signed by TUFF's embedded EdDSA key.
 
-### Hardware eligibility
+## The app
 
-TUFF reads physical unified memory through `hw.memsize`. The shared model
-registry combines that value with the selected context, KV layout, expert-cache
-slots, and a system reserve. A model that is unsafe on the current Mac remains
-visible, but Download and Load are disabled with a concrete reason. Disk-space
-eligibility is checked separately.
+The interface has four places:
 
-The launch gates are based on real model runs, not parameter-count estimates.
-GPT-OSS 120B is enabled on 16 GB Macs after a 4K-context M2 smoke reached EOS at
-a 7,990,582,952-byte peak footprint with zero swaps. An unqualified future
-checkpoint fails closed on every memory tier until it passes a real run.
+- **Chat** keeps named conversations, restores them after a restart, and binds
+  each conversation to its model. Return sends by default. If the selected
+  model is installed but unloaded, sending a message loads it and continues
+  automatically.
+- **Models** shows all five checkpoints and their real disk and memory
+  requirements. Image support lives inside the model card as a separate,
+  optional download.
+- **Server** runs an OpenAI-compatible endpoint on `127.0.0.1`. Chat and Server
+  share one decode service, so TUFF never starts a second copy of the model.
+- **Settings** keeps simple chat behavior separate from per-model context,
+  sampling, cache, prefill, and memory controls.
 
-## The Mac app
+Assistant responses render headings, lists, links, quotes, code blocks, inline
+code, emphasis, and LaTeX math such as `$a^2 + b^2 = c^2$`. Math is typeset
+locally. Nothing is sent to a web renderer.
 
-The v2 application uses a native four-destination `NavigationSplitView`:
+## Models
 
-- **Chat** keeps persistent named conversations, durable managed attachments,
-  model binding, rename and delete actions, model-supported reasoning controls,
-  and a collapsed Thinking section. Changing the model after a conversation
-  has messages starts a new chat.
-- **Models** puts five independently installed text models on the left and
-  verified add-ons on the right. It supports download, resume, cancel, discard,
-  repair, activation, and removal flows.
-- **Server** starts the OpenAI-compatible HTTP layer inside the app. Chat and
-  API requests share the same decode service and are serialized through one
-  inference broker.
-- **Settings** separates general behavior, per-model profiles, and advanced
-  runtime controls. Context, temperature, sampling, expert cache, prefill,
-  RDADVISE, and model-specific reasoning defaults live here.
+Every model source is pinned to an exact revision and fingerprint. Downloads go
+straight into the final `.gturbo` installation, so TUFF does not stage a second
+copy of a checkpoint first.
 
-The interface uses TUFF Violet (`#6F4DFF`), a transparent vector mark, and a
-layered graphite and violet Mac icon. It supports keyboard navigation,
-VoiceOver labels, reduced transparency, light and dark appearance, and compact
-window layouts.
+| Model | What I would use it for | Installed size | Minimum memory | Add-ons |
+| --- | --- | ---: | ---: | --- |
+| Gemma 4 E4B IT | A small and quick general model | 4.23 GB | 8 GB | None in v2 |
+| Gemma 4 26B-A4B IT | The balanced default | 14.29 GB | 8 GB | Image input |
+| Qwen3.6 35B-A3B | Coding, long context, and images | 19.55 GB | 8 GB | Image input |
+| GPT-OSS 20B | Reasoning and local tool workflows | 13.79 GB | 16 GB | None |
+| GPT-OSS 120B | The largest and highest-quality option | 65.4 GB | 16 GB | None |
 
-## Run v2 locally
+Gemma and Qwen expose thinking on or off. GPT-OSS exposes low, medium, and high
+reasoning. Qwen can also preserve thinking between turns from its advanced
+profile.
 
-Requirements:
+TUFF reads physical unified memory with `hw.memsize`, then checks the selected
+model, context length, KV layout, cache slots, and a system reserve. Models that
+are not safe for a Mac stay visible but gray, with Download and Load disabled
+and an explanation. Disk space is checked separately.
 
-- Apple Silicon Mac
-- macOS 15 or newer
-- Swift 6.2 or newer
-- Metal 3.2 or newer
-- Enough free disk for the selected model and a 1 GiB installation reserve
+The memory limits above come from real model runs. They are not guesses based
+on parameter count. GPT-OSS 120B completed a coherent 4K-context run on my 16 GB
+M2 with a 7.44 GiB peak process footprint and zero swap. This proves that the
+configuration runs on that machine. It is not a claim that it will be fast for
+every workload.
 
-Build and run the clone-style app:
+See [Benchmarks](docs/BENCHMARKS.md) for the exact hardware, commands, settings,
+and measurements. The [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md)
+explains how to submit a comparable result.
+
+## Images
+
+Gemma 4 26B and Qwen3.6 use optional `.vision.gturbo` companion packs. They are
+separate because a text-only user should not have to download image weights.
+Install or remove the add-on from its model card.
+
+Image input fails closed. If the companion is missing, corrupt, built for a
+different model, or unsupported by the Mac, TUFF rejects the image. It never
+silently drops an image and answers the remaining text.
+
+## Local server
+
+The easiest way to start the server is from the Server screen in the app. The
+supported endpoints are:
+
+- `GET /health`
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+
+Chat Completions supports regular JSON, streaming SSE, model-aware reasoning,
+function-tool declarations, prompt reuse, and images when the matching add-on
+is installed. The client remains responsible for approving and executing every
+tool call.
+
+The server has no authentication or TLS. It binds only to `127.0.0.1`, and it
+should not be proxied, tunneled, or exposed to another machine. The full request
+format and client examples are in the [server guide](docs/OPENAI_SERVER.md).
+
+## Build it yourself
+
+You need macOS 15+, Swift 6.2+, Metal 3.2+, and an Apple Silicon Mac.
 
 ```bash
+git clone https://github.com/rexmhall09/TUFF.git
+cd TUFF
 swift build -c release
 .build/release/TUFF
 ```
 
-Build the complete local 2.0.0 application, embedded Sparkle framework, archive,
-and checksum:
+To build the complete app bundle, embedded updater, ZIP, and checksum:
 
 ```bash
 Scripts/package_app.sh 2.0.0
 open dist/TUFF.app
 ```
 
-The package script creates:
+The clone-style executable looks for models under `scratch/`. The packaged app
+uses Application Support. Existing compatible v1 Gemma and Qwen installations
+remain readable and are not duplicated or migrated.
 
-- `dist/TUFF.app`
-- `dist/TUFF-v2.0.0-macos-arm64.zip`
-- `dist/TUFF-v2.0.0-macos-arm64.zip.sha256`
+### Command-line interface
 
-It also verifies arm64 executables, resources, signatures, the embedded update
-framework, ZIP extraction, and the extracted app signature. The local package
-is ad-hoc signed. It is not notarized and may require Control-clicking **Open**
-or using **Open Anyway** in Privacy & Security.
-
-When run from this checkout, the app uses these model locations:
-
-| Selector | Local directory |
-| --- | --- |
-| `gemma4-e4b` | `scratch/gemma4-e4b.gturbo` |
-| `gemma4` | `scratch/gemma4.gturbo` |
-| `qwen36` | `scratch/qwen36.gturbo` |
-| `gpt-oss-20b` | `scratch/gpt-oss-20b.gturbo` |
-| `gpt-oss-120b` | `scratch/gpt-oss-120b.gturbo` |
-
-Standalone packaged builds use Application Support. Existing compatible v1
-Gemma and Qwen `.gturbo` installations remain readable and are not duplicated
-or migrated.
-
-## Signed updates
-
-Packaged v2 builds use Sparkle to check TUFF's GitHub Releases appcast. The app
-embeds an EdDSA public key and refuses an insecure feed, invalid key, unsigned
-archive, or mismatched signature. General Settings exposes automatic checks,
-optional automatic download and installation, and a manual **Check for Updates
-Now** action.
-
-Clone-style builds without an embedded signing key keep working, but their
-updater stays disabled. A packaged build only offers a new binary after a
-matching signed appcast has been published. No v2 appcast has been published
-yet.
-
-## Command-line interface
-
-Install any pinned checkpoint with its stable selector:
+The stable installer selectors are `gemma4-e4b`, `gemma4`, `qwen36`,
+`gpt-oss-20b`, and `gpt-oss-120b`:
 
 ```bash
 swift run -c release TUFFRepack \
@@ -175,190 +167,93 @@ swift run -c release TUFFRepack \
   --output scratch/gpt-oss-20b.gturbo
 ```
 
-The selectors are `gemma4-e4b`, `gemma4`, `qwen36`, `gpt-oss-20b`, and
-`gpt-oss-120b`. The aliases `e4b` and `gpt-oss` are also accepted. Interrupted
-downloads retain verified ranges and can be continued with `--resume`. Use
-`--discard-partial` to remove saved download state.
+Interrupted downloads keep their verified ranges. Continue with `--resume`, or
+remove saved download state with `--discard-partial`.
 
-Run Harmony chat with GPT-OSS:
+Run a local chat from the CLI:
 
 ```bash
 swift run -c release TUFFCLI \
   --model scratch/gpt-oss-20b.gturbo \
-  --chat-prompt "Explain why bounded expert streaming matters." \
+  --chat-prompt "Why does bounded expert streaming matter?" \
   --reasoning low \
   --max-new 256
 ```
 
-Gemma and Qwen use `--thinking on|off`. GPT-OSS uses
-`--reasoning low|medium|high`. All prompt dialects are rendered centrally, and
-structured analysis is kept out of visible assistant output.
+## How it works
 
-For multi-turn input, pass a JSON message array with `--messages-file`. Run
-`swift run -c release TUFFCLI --help` for sampling, stop, context, cache,
-prefill, RDADVISE, and image options.
+One Foundation-only registry describes each checkpoint's source, fingerprint,
+installation, hardware rules, architecture, add-ons, prompt dialect, and
+defaults. The app, installer, CLI, and server all use that registry.
 
-### Image input
+The runtime then separates the checkpoint from the architecture behavior:
 
-Gemma 4 26B and Qwen use an optional `<name>.vision.gturbo` companion beside
-the text model. The app manages these in the right Models column. The CLI can
-install one directly:
-
-```bash
-swift run -c release TUFFRepack \
-  --vision-output scratch/gemma4.vision.gturbo \
-  --text-model scratch/gemma4.gturbo
-```
-
-Then send one or more images:
-
-```bash
-swift run -c release TUFFCLI \
-  --model scratch/gemma4.gturbo \
-  --chat-prompt "What is in this image?" \
-  --image photo.jpg
-```
-
-Image input is fail-closed. If the companion is missing, corrupt, the wrong
-family, or unsupported by the current hardware, TUFF rejects the image instead
-of silently answering a text-only prompt.
-
-## Local OpenAI-compatible server
-
-The safest way to run the server is through the app's Server screen after the
-selected model is loaded. It binds only to `127.0.0.1`, shows health and queue
-state, and cannot launch a second model process.
-
-The standalone server remains available for headless use:
-
-```bash
-swift build -c release --product TUFFServer
-.build/release/TUFFServer \
-  --model scratch/gemma4.gturbo \
-  --port 8080
-```
-
-Do not run the app, CLI, standalone server, or a model-using test at the same
-time. The server has no authentication or TLS and must not be proxied, tunneled,
-or exposed beyond loopback.
-
-Supported endpoints:
-
-- `GET /health`
-- `GET /v1/models`
-- `POST /v1/chat/completions`
-
-Chat Completions supports JSON, streaming SSE, images for installed compatible
-companions, function-tool declarations, prompt-prefix reuse, and model-aware
-reasoning controls. The client remains responsible for authorizing and
-executing every tool call. See the [server guide](docs/OPENAI_SERVER.md) for
-the supported request surface and client examples.
-
-## Architecture
-
-TUFF keeps product behavior in one Foundation-only model registry shared by
-the app, installer, CLI, and server. A model descriptor owns the pinned source,
-fingerprint, install path, storage, hardware requirements, architecture,
-capabilities, add-ons, memory profile, and runtime defaults.
-
-The runtime separates checkpoint identity from architecture behavior:
-
-- dense and mixture-of-experts feed-forward profiles
-- Gemma, Qwen ChatML, and GPT-OSS Harmony prompt dialects
-- MLX affine INT4 and GPT-OSS MXFP4 weight layouts
+- dense and mixture-of-experts feed-forward paths
+- Gemma, Qwen ChatML, and GPT-OSS Harmony prompts
+- affine INT4 and GPT-OSS MXFP4 weights
 - model-specific attention, routing, RoPE, KV, and memory plans
+- bounded expert reads and bounded chunked-prefill scratch
 - FP32 GPT-OSS residuals with FP16 projection, attention, expert, and KV paths
-- bounded routed-expert reads and bounded chunked prefill scratch
 
-The `.gturbo` major version remains v1. A backward-compatible minor extension
-describes dense feed-forward and MXFP4 layouts. Older runtimes reject unfamiliar
-feature flags cleanly, while current runtimes still read existing v1 Gemma and
-Qwen installations.
+The `.gturbo` major version is still v1. A compatible minor extension describes
+dense feed-forward and MXFP4 layouts. Older runtimes reject features they do not
+understand instead of misreading the model.
 
-[System design](docs/SYSTEM_DESIGN.md) covers file layout, memory ownership,
-Metal kernels, prefill, expert streaming, prompt reuse, image companions, and
-correctness invariants. The [experiment record](docs/experiments/EXPERIMENT_INVENTORY.md)
-keeps the measured optimization history.
+Read [System design](docs/SYSTEM_DESIGN.md) for the file format, memory
+ownership, Metal kernels, prefill, expert streaming, prompt reuse, and image
+companions. The [experiment inventory](docs/experiments/EXPERIMENT_INVENTORY.md)
+keeps the optimization record, including the things that did not work.
 
-## Qualification and measurements
+## Tests
 
-No model is enabled solely because its architecture compiles. Each family has
-CPU-reference kernel tests, toy forward and prefill tests, repack validation,
-tokenizer and template goldens, reference comparisons, and a coherent live
-output check.
-
-Current evidence includes:
-
-| Model | Host evidence | Recorded peak footprint |
-| --- | --- | ---: |
-| Gemma 4 E4B | 16 GB M2, 8K qualification | 1.71 GiB |
-| Gemma 4 26B-A4B | 8 GB M2 production runs | ~2.0 GiB |
-| Qwen3.6 35B-A3B | 24 GB M5 production runs | ~1.45 GiB |
-| GPT-OSS 20B | 16 GB M2, 4K CLI and server qualification | 5.11 GiB |
-| GPT-OSS 120B | 16 GB M2, 4K coherent EOS smoke, zero swaps | 7.44 GiB |
-
-These are hardware qualifications and previously recorded measurements, not a
-completed v2 five-model benchmark matrix. The final fixed-prompt, three-process
-median campaign is still deferred. Read [Benchmarks](docs/BENCHMARKS.md) for
-exact commands, settings, output conditions, and protocol limitations. Use the
-[community protocol](docs/COMMUNITY_BENCHMARKS.md) for comparable submissions.
-
-## Develop and test
-
-Run package tests only through the canonical serial runner:
+Run the serial package suite with:
 
 ```bash
 Scripts/test.sh
 ```
 
-Run the rest of the local release gate:
+Before a real model run, make sure there is enough disk space, memory pressure
+is acceptable, the model installation is complete, and no other TUFF app, CLI,
+server, decode service, test, or MLX process is using a model. Run one model
+process at a time.
 
-```bash
-swift build -c release
-ruby Scripts/check_markdown_links.rb
-ruby Scripts/check_brand_assets.rb
-ruby Scripts/check_app_version.rb
-```
+The test strategy includes CPU references for Metal kernels, toy-model forward
+and prefill checks, format and repack verification, tokenizer and template
+goldens, installer failure paths, persistent-chat tests, server contention,
+update configuration, deterministic workspace renders, and real checkpoint
+smokes. A green model-free suite does not prove that a checkpoint works.
 
-Real-model work requires macOS 15+, Swift 6.2+, enough free disk, acceptable
-`memory_pressure -Q`, a complete verified model, and no competing model process.
-Run only one app, CLI, server, or model-using test at a time. Never download a
-second full checkpoint or duplicate an installed `.gturbo` model just to test.
+## Contributing
 
-Contributions of every kind are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for code, design, docs, model, test, benchmark, and AI-assisted contribution
-guidelines.
+I want all kinds of contributions that make TUFF better. Code, design, model
+support, bug reports, accessibility, docs, tests, benchmark results, and small
+quality-of-life fixes are all useful. You do not need to be a Swift or Metal
+expert.
 
-## How I build TUFF
+AI-assisted contributions are 100% welcome. Name the tool or model when you
+know it, explain what it helped with, and review and test the result yourself.
+You are still responsible for the code you submit.
 
-I use AI models heavily while developing TUFF. They help me explore designs,
-write and revise code, build tests, review changes, and edit documentation. The
-direction, tradeoffs, acceptance decisions, and responsibility for the project
-are still mine. AI assistance is part of the process, not a substitute for
-authorship or review.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for the technical guardrails, test
+commands, model qualification requirements, and what to include in a pull
+request.
 
-AI-written code does not get a separate standard. It must be understood,
-reviewed, tested, and attributed like any other contribution.
+## AI and authorship
 
-## License and model terms
+I use several AI models heavily while building TUFF. They help me research,
+write code, make tests, review changes, and edit documentation. I choose the
+direction, make the tradeoffs, review the work, and take responsibility for the
+project. AI assistance is part of how I build it. It does not make the project
+less mine.
 
-TUFF source and documentation are licensed under the
-[Apache License 2.0](LICENSE). Model weights are not included. The installer
-downloads them from pinned source repositories, and those weights remain under
-their original terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+## License and credit
 
-TUFF is an independent project and is not affiliated with, sponsored by, or
-endorsed by Google, Alibaba, or OpenAI.
-
-## Origin and credit
+TUFF source and documentation use the [Apache License 2.0](LICENSE). Model
+weights are not included and keep their original terms. Third-party package and
+font details are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 TUFF began as a fork of
 [drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare) by Andrey
-Mikhaylov. His project established the original Swift and Metal Gemma runtime,
-bounded expert streaming, installer, and much of the foundation TUFF still
-builds on.
-
-TUFF is now evolving as its own project with a shared five-model platform,
-dense and MXFP4 runtimes, multiple prompt dialects, persistent chat, model and
-add-on management, an app-hosted server, and signed updates. The internal
-`TurboFieldfare*` module names remain for source continuity and proper history.
+Mikhaylov. That project established the original Gemma runtime, bounded expert
+streaming, and much of the foundation I still build on. TUFF is now evolving as
+its own project, but I want the origin and credit to stay clear.
