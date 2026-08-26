@@ -5,7 +5,7 @@ TUFF repository source is licensed under the
 and documentation. It does not relicense model weights or third-party
 packages.
 
-This file records the dependency review performed on 2026-07-15. It is an
+This file records the dependency review updated on 2026-08-26. It is an
 attribution aid, not legal advice. Anyone distributing a compiled product must
 also preserve the license and NOTICE material required by the exact dependency
 versions included in that product.
@@ -33,6 +33,8 @@ The following table covers the complete graph reported by
 | Package | Version | License in locked checkout |
 | --- | --- | --- |
 | [swift-transformers](https://github.com/huggingface/swift-transformers) | 1.3.3 | Apache-2.0 |
+| [SwiftMath](https://github.com/mgriebling/SwiftMath) | 1.7.3 | MIT; bundled math fonts retain their GUST and SIL Open Font licenses |
+| [Sparkle](https://github.com/sparkle-project/Sparkle) | 2.9.2 | BSD-3-Clause |
 | [swift-jinja](https://github.com/huggingface/swift-jinja) | 2.3.6 | Apache-2.0 |
 | [swift-huggingface](https://github.com/huggingface/swift-huggingface) | 0.9.0 | Apache-2.0 |
 | [EventSource](https://github.com/mattt/EventSource) | 1.4.1 | MIT |

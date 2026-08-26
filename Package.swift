@@ -19,6 +19,7 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.101.3"),
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.2"),
+        .package(url: "https://github.com/mgriebling/SwiftMath.git", exact: "1.7.3"),
     ],
     targets: [
         .target(
@@ -72,7 +73,10 @@ let package = Package(
         ),
         .target(
             name: "TurboFieldfareMacPresentation",
-            dependencies: ["TurboFieldfareAppCore"],
+            dependencies: [
+                "TurboFieldfareAppCore",
+                .product(name: "SwiftMath", package: "SwiftMath"),
+            ],
             path: "Sources/TurboFieldfareApp/MacPresentation"
         ),
         .target(

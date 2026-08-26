@@ -1,5 +1,10 @@
 import AppKit
 import Foundation
+import SwiftMath
+
+public extension NSAttributedString.Key {
+    static let tuffLaTeXSource = NSAttributedString.Key("TUFFLaTeXSource")
+}
 
 @MainActor
 public struct ResponseMarkdownRenderer {
@@ -46,10 +51,11 @@ public struct ResponseMarkdownRenderer {
             of: #"(?m)^([ \t]*\*\*[^*\n]+\*\*[ \t]*)\n(?=\S)"#,
             with: "$1\n\n",
             options: .regularExpression)
+        let extraction = LaTeXMathExtractor.extract(from: presentationSource)
 
         do {
             let parsed = try AttributedString(
-                markdown: presentationSource,
+                markdown: extraction.markdownSource,
                 options: .init(
                     interpretedSyntax: .full,
                     failurePolicy: .returnPartiallyParsedIfPossible))
@@ -86,7 +92,11 @@ public struct ResponseMarkdownRenderer {
             }
 
             guard output.length > 0 else { return fallback(source) }
-            return Result(attributedString: output, usedFallback: false)
+            let usedMathFallback = replaceLaTeX(
+                extraction.formulas, in: output)
+            return Result(
+                attributedString: output,
+                usedFallback: usedMathFallback)
         } catch {
             return fallback(source)
         }
@@ -305,6 +315,84 @@ public struct ResponseMarkdownRenderer {
             break
         }
         return style
+    }
+
+    /// Replaces parser-safe marker words after Markdown has been styled. This
+    /// keeps Markdown syntax out of equations and equations out of code spans,
+    /// while still producing one native attributed transcript.
+    private func replaceLaTeX(
+        _ formulas: [LaTeXFormula],
+        in output: NSMutableAttributedString
+    ) -> Bool {
+        var usedFallback = false
+        for formula in formulas.reversed() {
+            let range = (output.string as NSString).range(of: formula.token)
+            guard range.location != NSNotFound else {
+                usedFallback = true
+                continue
+            }
+            let inherited = output.attributes(
+                at: range.location, effectiveRange: nil)
+            guard let rendered = renderLaTeX(formula, inherited: inherited) else {
+                output.replaceCharacters(
+                    in: range,
+                    with: NSAttributedString(
+                        string: formula.source,
+                        attributes: inherited))
+                usedFallback = true
+                continue
+            }
+            output.replaceCharacters(in: range, with: rendered)
+        }
+        return usedFallback
+    }
+
+    private func renderLaTeX(
+        _ formula: LaTeXFormula,
+        inherited: [NSAttributedString.Key: Any]
+    ) -> NSAttributedString? {
+        let supportedBody = formula.body
+            .replacingOccurrences(of: #"\lVert"#, with: #"\Vert"#)
+            .replacingOccurrences(of: #"\rVert"#, with: #"\Vert"#)
+        var math = MathImage(
+            latex: supportedBody,
+            fontSize: formula.isDisplay ? 17 : NSFont.systemFontSize,
+            textColor: NSColor.labelColor,
+            labelMode: formula.isDisplay ? .display : .text,
+            textAlignment: .left)
+        let (error, image, layout) = math.asImage()
+        guard error == nil, let image, let layout,
+              image.size.width > 0, image.size.height > 0 else { return nil }
+
+        image.accessibilityDescription = "Math formula: \(formula.body)"
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = NSRect(
+            x: 0,
+            y: -layout.descent,
+            width: image.size.width,
+            height: image.size.height)
+        let rendered = NSMutableAttributedString(attachment: attachment)
+        rendered.addAttributes(
+            inherited,
+            range: NSRange(location: 0, length: rendered.length))
+        rendered.addAttribute(
+            .tuffLaTeXSource,
+            value: formula.source,
+            range: NSRange(location: 0, length: rendered.length))
+        if formula.isDisplay {
+            let style = (inherited[.paragraphStyle] as? NSParagraphStyle)?
+                .mutableCopy() as? NSMutableParagraphStyle
+                ?? NSMutableParagraphStyle()
+            style.alignment = .center
+            style.paragraphSpacingBefore = max(style.paragraphSpacingBefore, 6)
+            style.paragraphSpacing = max(style.paragraphSpacing, 8)
+            rendered.addAttribute(
+                .paragraphStyle,
+                value: style,
+                range: NSRange(location: 0, length: rendered.length))
+        }
+        return rendered
     }
 
     private func fallback(_ source: String) -> Result {

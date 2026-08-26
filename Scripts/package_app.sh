@@ -44,6 +44,7 @@ required_bundles=(
   swift-crypto_Crypto.bundle
   swift-nio_NIOPosix.bundle
   swift-transformers_Hub.bundle
+  SwiftMath_SwiftMath.bundle
 )
 required_frameworks=(Sparkle.framework)
 
@@ -87,6 +88,8 @@ done
 
 install -m 0644 LICENSE "$app/Contents/Resources/LICENSE"
 install -m 0644 README.md "$app/Contents/Resources/README.md"
+install -m 0644 THIRD_PARTY_NOTICES.md \
+  "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
 
 iconset="$temporary_directory/TUFF.iconset"
 mkdir -p "$iconset"

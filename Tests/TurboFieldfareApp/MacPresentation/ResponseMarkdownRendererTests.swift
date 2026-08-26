@@ -83,13 +83,65 @@ import Testing
         }
     }
 
-    @Test func latexRemainsReadableText() {
-        let source = "Cosine is $\\frac{u \\cdot v}{||u|| ||v||}$."
+    @Test func latexRendersAsNativeMathAlongsideMarkdown() throws {
+        let source = "Cosine is **$\\frac{u \\cdot v}{\\lVert u\\rVert \\lVert v\\rVert}$**."
         let result = ResponseMarkdownRenderer().render(source)
 
         #expect(!result.usedFallback)
-        #expect(result.attributedString.string.contains("\\frac"))
-        #expect(result.attributedString.string.contains("\\cdot"))
+        let attachmentRange = (result.attributedString.string as NSString)
+            .range(of: "\u{fffc}")
+        try #require(attachmentRange.location != NSNotFound)
+        let attachment = try #require(result.attributedString.attribute(
+            .attachment,
+            at: attachmentRange.location,
+            effectiveRange: nil) as? NSTextAttachment)
+        #expect(attachment.image?.size.width ?? 0 > 0)
+        #expect(attachment.image?.size.height ?? 0 > 0)
+        #expect(attachment.image?.accessibilityDescription?.contains("\\frac") == true)
+        #expect(result.attributedString.attribute(
+            .tuffLaTeXSource,
+            at: attachmentRange.location,
+            effectiveRange: nil) as? String == "$\\frac{u \\cdot v}{\\lVert u\\rVert \\lVert v\\rVert}$")
+    }
+
+    @Test func supportsDisplayAndBracketedLaTeXDelimiters() {
+        let source = """
+        Inline \\(x^2 + y^2 = z^2\\).
+
+        $$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$$
+
+        \\[\\int_0^1 x^2 \\, dx = \\frac{1}{3}\\]
+        """
+        let result = ResponseMarkdownRenderer().render(source)
+        let attachments = result.attributedString.string.filter { $0 == "\u{fffc}" }
+
+        #expect(!result.usedFallback)
+        #expect(attachments.count == 3)
+    }
+
+    @Test func codeAndEscapedCurrencyNeverBecomeMath() {
+        let source = """
+        `let price = "$5"`
+
+        ```text
+        $x^2$
+        ```
+
+        A ticket costs \\$20.
+        """
+        let result = ResponseMarkdownRenderer().render(source)
+
+        #expect(!result.attributedString.string.contains("\u{fffc}"))
+        #expect(result.attributedString.string.contains("$x^2$"))
+        #expect(result.attributedString.string.contains("$20"))
+    }
+
+    @Test func malformedLaTeXFallsBackToItsExactSource() {
+        let source = "Before $\\frac{1}{2$ after"
+        let result = ResponseMarkdownRenderer().render(source)
+
+        #expect(result.usedFallback)
+        #expect(result.attributedString.string == source)
     }
 
     @Test func boldOnlyModelHeadingStaysOnItsOwnLine() {
