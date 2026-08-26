@@ -36,6 +36,8 @@ struct ModelCatalogRow: View {
     var showsAddOns: Bool
 
     @State private var showingDiscardConfirmation = false
+    @State private var showingVisionDiscardConfirmation = false
+    @State private var showingVisionRemoveConfirmation = false
 
     private var isSelected: Bool { install.id == model.selectedModelID }
 
@@ -54,8 +56,7 @@ struct ModelCatalogRow: View {
             }
             message
             actions
-            if showsAddOns && install.isInstalled
-                && install.descriptor.supportsImageInput {
+            if showsAddOns && install.descriptor.supportsImageInput {
                 visionSupport
             }
         }
@@ -81,6 +82,30 @@ struct ModelCatalogRow: View {
         } message: {
             Text("Downloaded ranges for this model will be removed. "
                  + "Other models and any installed model are untouched.")
+        }
+        .confirmationDialog(
+            "Discard the saved \(visionDisplayName) download?",
+            isPresented: $showingVisionDiscardConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Discard Download", role: .destructive) {
+                model.discardVisionPackDownload(for: install)
+            }
+            Button("Keep Download", role: .cancel) {}
+        } message: {
+            Text("Downloaded add-on ranges will be removed. The text model is untouched.")
+        }
+        .confirmationDialog(
+            "Remove \(visionDisplayName)?",
+            isPresented: $showingVisionRemoveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove Image Support", role: .destructive) {
+                model.removeVisionPack(for: install)
+            }
+            Button("Keep Image Support", role: .cancel) {}
+        } message: {
+            Text("Text generation will keep working. Restoring image input requires downloading this add-on again.")
         }
         .saturation(hardwareEligibility.isCompatible ? 1 : 0)
     }
@@ -109,6 +134,11 @@ struct ModelCatalogRow: View {
             Spacer(minLength: 8)
             statusBadge
         }
+    }
+
+    private var visionDisplayName: String {
+        guard install.descriptor.supportsImageInput else { return "image support" }
+        return visionDescriptor.displayName
     }
 
     @ViewBuilder
@@ -279,15 +309,28 @@ struct ModelCatalogRow: View {
                     .font(.caption2)
                     .foregroundStyle(visionStatusColor)
             }
+            Text("Adds local image understanding without reinstalling or changing the text model.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if model.isVisionInstallTarget(install),
                let fraction = model.visionInstallProgressFraction {
                 ProgressView(value: fraction)
                     .accessibilityLabel("\(visionDescriptor.displayName) download")
                     .accessibilityValue(Text(MetricFormat.percent(fraction * 100)))
+                HStack {
+                    Text(MetricFormat.percent(fraction * 100))
+                    Spacer()
+                    if let eta = model.visionInstallETAText { Text(eta) }
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 8) {
+            visionMessage
+
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 visionAction
                 Spacer(minLength: 8)
                 if !visionIsInstalled && !visionIsPrepared {
@@ -302,15 +345,19 @@ struct ModelCatalogRow: View {
 
     @ViewBuilder
     private var visionAction: some View {
-        if visionIsInstalled {
-            Label("Image support installed", systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-        } else if model.isVisionInstallTarget(install), model.isInstallingVisionPack {
+        if model.isVisionInstallTarget(install), model.isInstallingVisionPack {
             Button("Cancel \(visionDescriptor.displayName)") {
                 model.cancelVisionInstall()
             }
             .disabled(!model.canCancelVisionInstall)
+        } else if visionIsInstalled {
+            Label("Image support installed", systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+            Button("Remove", role: .destructive) {
+                showingVisionRemoveConfirmation = true
+            }
+            .disabled(!model.canRemoveVisionPack(for: install))
         } else if visionIsPrepared {
             if isSelected {
                 if model.loadState.isReady {
@@ -332,12 +379,42 @@ struct ModelCatalogRow: View {
                 .disabled(!model.canSelectModel(install))
             }
         } else {
+            if model.hasPartialVisionPackDownload(for: install) {
+                Button("Discard", role: .destructive) {
+                    showingVisionDiscardConfirmation = true
+                }
+                .disabled(!model.canDiscardVisionPackDownload(for: install))
+            }
             Button(model.visionDownloadButtonLabel(for: install)) {
                 model.installVisionPack(for: install)
             }
             .buttonStyle(.bordered)
             .disabled(!model.canInstallVisionPack(for: install))
             .help("Optional download for this model only. The text model stays installed.")
+        }
+    }
+
+    @ViewBuilder
+    private var visionMessage: some View {
+        if !install.isInstalled {
+            Label("Install the text model first", systemImage: "arrow.down.circle")
+                .foregroundStyle(.secondary)
+        } else if !model.isVisionRuntimeSupported {
+            Label("Image input requires an M2 or newer Mac", systemImage: "memorychip")
+                .foregroundStyle(.orange)
+        } else if model.isVisionInstallTarget(install),
+                  case .failed(let text) = model.visionInstallState {
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+        } else if model.isVisionInstallTarget(install),
+                  case .recoverable(let text) = model.visionInstallState {
+            Label(text, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+        } else if let requirement = model.visionInstallRequirement(for: install),
+                  !requirement.canInstall, !visionIsInstalled {
+            Label("Free \(MetricFormat.storage(requirement.shortfallBytes)) more storage.",
+                  systemImage: "internaldrive")
+                .foregroundStyle(.orange)
         }
     }
 
