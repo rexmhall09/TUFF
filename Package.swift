@@ -18,6 +18,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-nio.git", exact: "2.101.3"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.2"),
     ],
     targets: [
         .target(
@@ -104,6 +105,13 @@ let package = Package(
             ],
             path: "Sources/TurboFieldfareApp/Server"
         ),
+        .target(
+            name: "TurboFieldfareAppUpdater",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            path: "Sources/TurboFieldfareApp/Updater"
+        ),
         .executableTarget(
             name: "TurboFieldfareServer",
             dependencies: ["TurboFieldfareServerCore"],
@@ -114,6 +122,7 @@ let package = Package(
             dependencies: [
                 "TurboFieldfareAppCore",
                 "TurboFieldfareAppServer",
+                "TurboFieldfareAppUpdater",
                 "TurboFieldfareMacPresentation",
             ],
             path: "Sources/TurboFieldfareApp/Mac",
@@ -200,6 +209,11 @@ let package = Package(
                 "TurboFieldfareServerCore",
             ],
             path: "Tests/TurboFieldfareAppServer"
+        ),
+        .testTarget(
+            name: "TurboFieldfareAppUpdaterTests",
+            dependencies: ["TurboFieldfareAppUpdater"],
+            path: "Tests/TurboFieldfareAppUpdater"
         ),
     ]
 )
