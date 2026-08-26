@@ -122,11 +122,28 @@ Exact commands:
   --prefill-chunk-tokens auto --rdadvise off
 ```
 
-GPT-OSS 120B was not downloaded or run on this host. Its 96 GB catalog gate is
-provisional, and TUFF must not claim that checkpoint as live-verified until a
-qualifying Apple Silicon Mac completes the same install, smoke, and memory
-checks. The model-free suite covers its pinned architecture and streamed
-installer but does not substitute for that run.
+GPT-OSS 120B completed a local qualification smoke on 2026-08-26 on the same
+M2 MacBook Air with 16 GB of memory, macOS 26.5.2, and Swift 6.3.1. Its bounded
+installer produced a verified 61 GiB `.gturbo` directory from revision
+`b5c939de8f754692c1647ca79fbf85e8c1e70f8a`. The measured runtime was commit
+`c2748ce`. A 4,096-token-context run with Low reasoning and 16 expert-cache
+slots returned the requested final answer `Paris` and stopped at EOS. Peak
+footprint was 7,990,582,952 bytes with zero swaps. This was a qualification
+smoke, not a benchmark run; no three-run v2 benchmark result is claimed. The
+catalog therefore enables 120B on 16 GB Macs and records the measured footprint
+as its default-context safety baseline.
+
+Exact qualification command:
+
+```bash
+/usr/bin/time -l .build/release/TUFFCLI \
+  --model scratch/gpt-oss-120b.gturbo \
+  --chat-prompt 'Reply with the single word Paris. Do not explain.' \
+  --max-new 64 --max-context 4096 --reasoning low \
+  --temperature 0 --top-k 0 --top-p 1 \
+  --expert-cache-slots 16 --prefill on \
+  --prefill-chunk-tokens auto --rdadvise bounded
+```
 
 ## M2 measured decode
 

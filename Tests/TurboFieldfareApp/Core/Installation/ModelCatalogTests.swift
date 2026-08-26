@@ -107,7 +107,7 @@ import TurboFieldfareRepackCore
             directoryURL: temporaryInstallPath("incompatible-120b"),
             client: gptInstaller)
         let device = TUFFDeviceCapabilities(
-            unifiedMemoryBytes: 16 * TUFFModelCatalog.oneGiB,
+            unifiedMemoryBytes: 8 * TUFFModelCatalog.oneGiB,
             macOSMajorVersion: 26,
             appleSiliconGeneration: 2)
         let model = AppModel(
@@ -120,7 +120,7 @@ import TurboFieldfareRepackCore
         let eligibility = model.hardwareEligibility(for: gptCoordinator)
         #expect(!eligibility.isCompatible)
         #expect(eligibility.explanation
-            == "Requires 96 GB unified memory; this Mac has 16 GB.")
+            == "Requires 16 GB unified memory; this Mac has 8 GB.")
         #expect(!model.canInstallModel(gptCoordinator))
         #expect(!model.canSelectModel(gptCoordinator))
 
@@ -128,6 +128,30 @@ import TurboFieldfareRepackCore
         model.selectModel(gptCoordinator)
         #expect(!gptCoordinator.isInstalling)
         #expect(model.selectedDescriptor == .default)
+    }
+
+    @MainActor
+    @Test func qualified120BIsAvailableOnSixteenGB() {
+        let gpt120 = AppModelInstallDescriptor.descriptor(
+            for: ModelVariant.gptOss_120B)!
+        let coordinator = ModelInstallCoordinator(
+            descriptor: gpt120,
+            directoryURL: temporaryInstallPath("qualified-120b"),
+            client: MockModelInstallerClient(descriptor: gpt120))
+        let device = TUFFDeviceCapabilities(
+            unifiedMemoryBytes: 16 * TUFFModelCatalog.oneGiB,
+            macOSMajorVersion: 26,
+            appleSiliconGeneration: 2)
+        let model = AppModel(
+            modelDirectory: temporaryInstallPath("selected-gemma"),
+            client: MockLifecycleInferenceClient(),
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [coordinator],
+            deviceCapabilities: device)
+
+        #expect(model.hardwareEligibility(for: coordinator).isCompatible)
+        #expect(model.canInstallModel(coordinator))
+        #expect(model.canSelectModel(coordinator))
     }
 
     @MainActor

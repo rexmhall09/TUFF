@@ -31,14 +31,45 @@ import Testing
         #expect(model.memory.qualifiedDefaultWorkingSetBytes == 5_487_695_296)
     }
 
-    @Test func unqualifiedGPTOSS120BStaysDisabledOnThisHost() {
+    @Test func qualifiedGPTOSS120BUsesMeasuredSixteenGBGate() {
         let model = TUFFModelCatalog.gptOss_120B
-        #expect(!model.compatibility(with: device(memoryGiB: 16)).isCompatible)
-        #expect(!model.compatibility(with: device(memoryGiB: 64)).isCompatible)
-        #expect(model.compatibility(with: device(memoryGiB: 96)).isCompatible)
+        #expect(model.qualification == .qualified)
+        #expect(!model.compatibility(with: device(memoryGiB: 8)).isCompatible)
+        #expect(model.compatibility(with: device(memoryGiB: 16)).isCompatible)
         #expect(model.compatibility(
-            with: device(memoryGiB: 96), contextTokens: 4_096).isCompatible)
+            with: device(memoryGiB: 16), contextTokens: 4_096).isCompatible)
+        #expect(model.memory.qualifiedDefaultWorkingSetBytes == 7_990_582_952)
         #expect(model.source.approximateDownloadBytes >= 65_248_815_744)
+    }
+
+    @Test func unqualifiedCheckpointFailsClosedAtEveryMemoryTier() {
+        let base = TUFFModelCatalog.gptOss_120B
+        let model = TUFFModelDescriptor(
+            id: base.id,
+            selector: base.selector,
+            aliases: base.aliases,
+            apiModelID: base.apiModelID,
+            displayName: base.displayName,
+            shortName: base.shortName,
+            summary: base.summary,
+            family: base.family,
+            architecture: base.architecture,
+            installDirectoryName: base.installDirectoryName,
+            source: base.source,
+            hardware: base.hardware,
+            memory: base.memory,
+            qualification: .requiresRealModelValidation,
+            runtimeDefaults: base.runtimeDefaults,
+            capabilities: base.capabilities,
+            reasoningControl: base.reasoningControl,
+            addons: base.addons)
+
+        for memoryGiB: UInt64 in [16, 64, 192] {
+            let compatibility = model.compatibility(
+                with: device(memoryGiB: memoryGiB))
+            #expect(!compatibility.isCompatible)
+            #expect(compatibility.issues.contains(.requiresRealModelValidation))
+        }
     }
 
     @Test func insufficientMemoryAndPlatformReturnConcreteIssues() {

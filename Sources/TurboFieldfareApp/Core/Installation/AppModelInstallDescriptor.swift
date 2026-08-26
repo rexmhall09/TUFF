@@ -10,6 +10,7 @@ public enum AppReasoningControl: Equatable, Sendable {
 }
 
 public enum AppModelHardwareIssue: Equatable, Sendable {
+    case requiresRealModelValidation
     case insufficientUnifiedMemory(requiredBytes: UInt64, actualBytes: UInt64)
     case unsupportedMacOS(requiredMajorVersion: Int, actualMajorVersion: Int)
     case unsupportedAppleSilicon(requiredGeneration: Int, actualGeneration: Int)
@@ -35,6 +36,8 @@ public struct AppModelHardwareEligibility: Equatable, Sendable {
     public var explanation: String? {
         guard let issue = issues.first else { return nil }
         switch issue {
+        case .requiresRealModelValidation:
+            return "Needs a real validation run on qualifying Apple Silicon before download."
         case .insufficientUnifiedMemory(let required, let actual):
             return "Requires \(Self.memoryLabel(required)) unified memory; "
                 + "this Mac has \(Self.memoryLabel(actual))."
@@ -216,6 +219,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         let compatibility = catalogDescriptor.compatibility(with: device)
         let issues = compatibility.issues.compactMap { issue -> AppModelHardwareIssue? in
             switch issue {
+            case .requiresRealModelValidation:
+                return .requiresRealModelValidation
             case .insufficientUnifiedMemory(let required, let actual):
                 return .insufficientUnifiedMemory(
                     requiredBytes: required, actualBytes: actual)

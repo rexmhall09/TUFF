@@ -88,6 +88,11 @@ public enum TUFFReasoningControl: String, Codable, Sendable {
     case graded
 }
 
+public enum TUFFModelQualification: String, Codable, Sendable {
+    case qualified
+    case requiresRealModelValidation
+}
+
 public enum TUFFModelCapability: String, Codable, Sendable {
     case textGeneration
     case imageInput
@@ -259,6 +264,7 @@ public struct TUFFDeviceCapabilities: Codable, Equatable, Sendable {
 }
 
 public enum TUFFCompatibilityIssue: Codable, Equatable, Sendable {
+    case requiresRealModelValidation
     case insufficientUnifiedMemory(requiredBytes: UInt64, actualBytes: UInt64)
     case unsupportedMacOS(requiredMajorVersion: Int, actualMajorVersion: Int)
     case unsupportedAppleSilicon(requiredGeneration: Int, actualGeneration: Int)
@@ -329,6 +335,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
     public let source: TUFFModelSource
     public let hardware: TUFFModelHardwareRequirements
     public let memory: TUFFModelMemoryProfile
+    public let qualification: TUFFModelQualification
     public let runtimeDefaults: TUFFModelRuntimeDefaults
     public let capabilities: Set<TUFFModelCapability>
     public let reasoningControl: TUFFReasoningControl?
@@ -347,6 +354,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
                 source: TUFFModelSource,
                 hardware: TUFFModelHardwareRequirements,
                 memory: TUFFModelMemoryProfile,
+                qualification: TUFFModelQualification = .qualified,
                 runtimeDefaults: TUFFModelRuntimeDefaults = TUFFModelRuntimeDefaults(),
                 capabilities: Set<TUFFModelCapability>,
                 reasoningControl: TUFFReasoningControl?,
@@ -364,6 +372,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         self.source = source
         self.hardware = hardware
         self.memory = memory
+        self.qualification = qualification
         self.runtimeDefaults = runtimeDefaults
         self.capabilities = capabilities
         self.reasoningControl = reasoningControl
@@ -376,6 +385,9 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         expertCacheSlots: Int? = nil
     ) -> TUFFModelCompatibility {
         var issues: [TUFFCompatibilityIssue] = []
+        if qualification == .requiresRealModelValidation {
+            issues.append(.requiresRealModelValidation)
+        }
         if device.unifiedMemoryBytes < hardware.minimumUnifiedMemoryBytes {
             issues.append(.insufficientUnifiedMemory(
                 requiredBytes: hardware.minimumUnifiedMemoryBytes,
@@ -604,9 +616,9 @@ public enum TUFFModelCatalog {
         capabilities: [.textGeneration, .reasoning],
         reasoningControl: .graded)
 
-    /// The pinned 120B checkpoint is installable with the same bounded-memory
-    /// path as 20B. Its 96 GB gate is deliberately conservative until a real
-    /// run on qualifying Apple Silicon records a safe measured working set.
+    /// Official Harmony checkpoint, qualified at 4K context on a 16 GB M2.
+    /// Streamed experts keep the full 61 GiB installation out of the working
+    /// set while an FP32 residual stream prevents late-layer overflow.
     public static let gptOss_120B = TUFFModelDescriptor(
         id: .gptOss_120B,
         selector: "gpt-oss-120b",
@@ -619,9 +631,9 @@ public enum TUFFModelCatalog {
         installDirectoryName: "gpt-oss-120b.gturbo",
         source: gptOss120BSource,
         hardware: TUFFModelHardwareRequirements(
-            minimumUnifiedMemoryBytes: 96 * oneGiB),
+            minimumUnifiedMemoryBytes: 16 * oneGiB),
         memory: TUFFModelMemoryProfile(
-            qualifiedDefaultWorkingSetBytes: 72 * oneGiB,
+            qualifiedDefaultWorkingSetBytes: 7_990_582_952,
             defaultContextTokens: 4_096,
             defaultExpertCacheSlots: 4,
             expertCacheBytesPerSlot: 13_238_272,

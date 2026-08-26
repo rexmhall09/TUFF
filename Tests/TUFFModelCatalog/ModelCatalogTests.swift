@@ -61,8 +61,10 @@ import Testing
         #expect(gemma.capabilities.contains(.imageInput))
         #expect(qwen.capabilities.contains(.reasoning))
         #expect(gptOss.reasoningControl == .graded)
+        #expect(gptOss.qualification == .qualified)
         #expect(gptOss.addons.isEmpty)
         #expect(gptOss120B.reasoningControl == .graded)
+        #expect(gptOss120B.qualification == .qualified)
         #expect(gptOss120B.addons.isEmpty)
     }
 }
