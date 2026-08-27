@@ -64,17 +64,50 @@ struct OutputPaneView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Completed exchanges are their own views, each owning its copy control and
+    /// its collapsed reasoning. Only the exchange still being generated goes
+    /// through the incremental text view, so streaming keeps its fast path.
     private var transcript: some View {
-        VStack(spacing: 0) {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 22) {
+                    ForEach(transcriptHistory) { turn in
+                        TranscriptMessageView(
+                            turn: turn,
+                            attachments: model.conversationStore.attachments(for: turn.id),
+                            renderer: transcriptRenderer)
+                        Divider().opacity(0.35)
+                    }
+                    if isShowingLiveTurn {
+                        liveTurn
+                            .id(Self.liveTurnID)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .onChange(of: model.runIdentity) { _, _ in
+                withAnimation(.smooth(duration: 0.2)) {
+                    proxy.scrollTo(Self.liveTurnID, anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    private static let liveTurnID = "tuff.transcript.live"
+
+    private var liveTurn: some View {
+        VStack(alignment: .leading, spacing: 10) {
             if !transcriptThinking.isEmpty {
-                thinkingDisclosure
-                    .padding(.horizontal, 24)
-                    .padding(.top, 14)
+                ThinkingDisclosure(
+                    text: transcriptThinking,
+                    isRunning: model.isRunning && transcriptOutput.isEmpty,
+                    isExpanded: $thinkingExpanded,
+                    reduceTransparency: reduceTransparency)
             }
             IncrementalTranscriptView(
-                history: transcriptHistory.map {
-                    TranscriptTurn(prompt: $0.prompt, response: $0.response)
-                },
+                history: [],
                 prompt: transcriptPrompt,
                 images: transcriptImages,
                 output: transcriptOutput,
@@ -84,45 +117,21 @@ struct OutputPaneView: View {
                 showsPrefillPlaceholder: model.isRunning
                     && model.outputResponsePlainText.isEmpty,
                 runIdentity: model.runIdentity)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topTrailing) {
-                if !model.isRunning && !transcriptOutput.isEmpty {
-                    copyResponseButton
-                        .padding(8)
-                }
+            .frame(minHeight: 120, maxHeight: .infinity)
+            if !model.isRunning && !transcriptOutput.isEmpty {
+                copyResponseButton
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 20)
         }
     }
 
-    private var thinkingDisclosure: some View {
-        DisclosureGroup(isExpanded: $thinkingExpanded) {
-            ScrollView {
-                Text(transcriptThinking)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 8)
-            }
-            .frame(maxHeight: 180)
-        } label: {
-            Label(model.isRunning && transcriptOutput.isEmpty
-                  ? "Thinking…" : "Thinking",
-                  systemImage: "brain")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.secondary)
-        }
-        .padding(12)
-        .background(
-            TurboFieldfareMacTheme.surfaceStyle(
-                reduceTransparency: reduceTransparency,
-                material: .thin),
-            in: RoundedRectangle(cornerRadius: 12))
-        .accessibilityLabel("Model thinking")
-        .accessibilityHint("Shows or hides the model's reasoning text")
+    /// The exchange in flight, or the most recent one before it is folded into
+    /// the stored history.
+    private var isShowingLiveTurn: Bool {
+        !transcriptPrompt.isEmpty || !transcriptOutput.isEmpty
     }
+
+    private var transcriptRenderer: ResponseMarkdownRenderer { Self.sharedRenderer }
+    private static let sharedRenderer = ResponseMarkdownRenderer()
 
     private var transcriptHistory: [AppChatTurn] {
         guard let current = transcriptCurrentTurn else { return model.conversation }
