@@ -242,11 +242,10 @@ request.
 
 ## AI and authorship
 
-I use several AI models heavily while building TUFF. They help me research,
-write code, make tests, review changes, and edit documentation. I choose the
-direction, make the tradeoffs, review the work, and take responsibility for the
+I use several AI models while building TUFF. They help me research,
+write code, make tests, review changes, and edit documentation. I review the work, and take responsibility for the
 project. AI assistance is part of how I build it. It does not make the project
-less mine.
+less mine. Any other contributors are welcome to use AI, as long as they review code.
 
 ## License and credit
 
