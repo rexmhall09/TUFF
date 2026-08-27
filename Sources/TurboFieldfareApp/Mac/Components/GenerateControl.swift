@@ -20,7 +20,9 @@ struct GenerateControl: View {
         Button {
             model.submit()
         } label: {
-            Label(model.canRun ? "Send" : "Load & Send", systemImage: "arrow.up")
+            // Always "Send". An unloaded model is loaded first, but that is the
+            // app's business, not a different button.
+            Label("Send", systemImage: "arrow.up")
                 .font(.callout.weight(.semibold))
                 .padding(.horizontal, 24)
                 .frame(minWidth: 124, minHeight: controlHeight)

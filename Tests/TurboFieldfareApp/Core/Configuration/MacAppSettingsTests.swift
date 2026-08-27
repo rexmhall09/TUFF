@@ -82,8 +82,10 @@ import TurboFieldfare
         #expect(settings.topP == 0.8)
         #expect(!settings.prefillEnabled)
         #expect(settings.newlineShortcut == .shiftReturn)
-        #expect(settings.showPromptExamples)
-        #expect(settings.sentPromptBehavior == .keep)
+        // A settings file predating these keys picks up the current defaults:
+        // examples hidden, and the prompt cleared once it has been sent.
+        #expect(!settings.showPromptExamples)
+        #expect(settings.sentPromptBehavior == .clear)
     }
 
     @Test func legacySettingsMigrateIntoTheActiveModelProfile() throws {

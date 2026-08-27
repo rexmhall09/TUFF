@@ -121,8 +121,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var version: Int = currentVersion
     var modelProfiles: [String: AppModelSettingsProfile]
     var newlineShortcut: AppNewlineShortcut = .shiftReturn
-    var showPromptExamples: Bool = true
-    var sentPromptBehavior: AppSentPromptBehavior = .keep
+    var showPromptExamples: Bool = false
+    var sentPromptBehavior: AppSentPromptBehavior = .clear
     var loadModelOnLaunch: Bool = false
 
     // Source compatibility for the v1 app and focused tests. These map only to
@@ -205,8 +205,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topP: Double = 0.95,
          prefillEnabled: Bool = true,
          newlineShortcut: AppNewlineShortcut = .shiftReturn,
-         showPromptExamples: Bool = true,
-         sentPromptBehavior: AppSentPromptBehavior = .keep,
+         showPromptExamples: Bool = false,
+         sentPromptBehavior: AppSentPromptBehavior = .clear,
          visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
          rdadvisePolicy: AppRDAdvicePolicy = .off,
          loadModelOnLaunch: Bool = false,
@@ -239,9 +239,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             newlineShortcut = try container.decodeIfPresent(
                 AppNewlineShortcut.self, forKey: .newlineShortcut) ?? .shiftReturn
             showPromptExamples = try container.decodeIfPresent(
-                Bool.self, forKey: .showPromptExamples) ?? true
+                Bool.self, forKey: .showPromptExamples) ?? false
             sentPromptBehavior = try container.decodeIfPresent(
-                AppSentPromptBehavior.self, forKey: .sentPromptBehavior) ?? .keep
+                AppSentPromptBehavior.self, forKey: .sentPromptBehavior) ?? .clear
             loadModelOnLaunch = try container.decodeIfPresent(
                 Bool.self, forKey: .loadModelOnLaunch) ?? false
             return
@@ -263,9 +263,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         newlineShortcut = try stamp.decodeIfPresent(
             AppNewlineShortcut.self, forKey: .newlineShortcut) ?? .shiftReturn
         showPromptExamples = try stamp.decodeIfPresent(
-            Bool.self, forKey: .showPromptExamples) ?? true
+            Bool.self, forKey: .showPromptExamples) ?? false
         sentPromptBehavior = try stamp.decodeIfPresent(
-            AppSentPromptBehavior.self, forKey: .sentPromptBehavior) ?? .keep
+            AppSentPromptBehavior.self, forKey: .sentPromptBehavior) ?? .clear
         loadModelOnLaunch = try stamp.decodeIfPresent(
             Bool.self, forKey: .loadModelOnLaunch) ?? false
     }
