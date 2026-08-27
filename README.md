@@ -250,7 +250,7 @@ swift build -c release
 To build the complete app bundle, embedded updater, ZIP, and checksum:
 
 ```bash
-Scripts/package_app.sh 2.1.0
+Scripts/package_app.sh 2.2.0
 open dist/TUFF.app
 ```
 
