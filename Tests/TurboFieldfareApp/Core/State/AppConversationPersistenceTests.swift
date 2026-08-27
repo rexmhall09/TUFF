@@ -109,7 +109,7 @@ import Testing
     }
 
     @MainActor
-    @Test func changingModelAfterMessagesStartsFreshChat() {
+    @Test func changingModelKeepsTheChatAndRebindsIt() {
         let store = AppConversationStore()
         store.recordCompletedTurn(
             AppChatTurn(prompt: "hello", response: "hi"),
@@ -130,17 +130,58 @@ import Testing
 
         model.selectModel(qwen)
 
+        // The chat carries over rather than being replaced: same conversation,
+        // same history, now bound to the model that will answer the next turn.
         #expect(model.selectedModelID == qwen.id)
-        #expect(model.conversation.isEmpty)
-        #expect(store.conversations.count == 2)
+        #expect(model.conversation.count == 1)
+        #expect(store.conversations.count == 1)
         #expect(store.selectedConversation?.modelID
             == AppModelInstallDescriptor.qwen36.settingsProfileKey)
+    }
 
-        let qwenChat = store.selectedConversation!
-        model.deleteConversation(qwenChat)
+    @MainActor
+    @Test func switchingToATextOnlyModelWithImagesInHistoryIsRefused() throws {
+        let (root, repository) = makeRepository()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = root.appendingPathComponent("photo.png")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("png".utf8).write(to: image)
+
+        let store = AppConversationStore(repository: repository)
+        store.recordCompletedTurn(
+            AppChatTurn(prompt: "what is this", response: "a photo"),
+            attachments: [
+                AppImageAttachment(
+                    fileURL: image,
+                    displayName: "photo.png",
+                    encodedBytes: 3,
+                    sha256: String(repeating: "0", count: 64)),
+            ],
+            modelID: AppModelInstallDescriptor.default.settingsProfileKey)
+        #expect(store.selectedConversation?.turns.first?.attachments.isEmpty == false)
+
+        let textOnlyInstaller = MockModelInstallerClient(descriptor: .gemma4E4B)
+        let textOnly = ModelInstallCoordinator(
+            descriptor: .gemma4E4B,
+            directoryURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("e4b-switch-\(UUID().uuidString).gturbo"),
+            client: textOnlyInstaller)
+        let model = AppModel(
+            modelDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("gemma-switch-\(UUID().uuidString).gturbo"),
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [textOnly],
+            conversationStore: store)
+
+        let before = model.selectedModelID
+        model.selectModel(textOnly)
+
+        // Carrying images into a model that cannot read them would mean
+        // answering as though they had never been sent, so this is refused.
+        #expect(model.selectedModelID == before)
+        #expect(model.error != nil)
         #expect(store.selectedConversation?.modelID
             == AppModelInstallDescriptor.default.settingsProfileKey)
-        #expect(model.selectedModelID == AppModelInstallDescriptor.default.id)
     }
 
     @Test func attachmentPathsCannotEscapeManagedStorage() {

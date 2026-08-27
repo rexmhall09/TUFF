@@ -233,7 +233,9 @@ import Testing
         model.run()
 
         #expect(model.outputPromptText == "original prompt")
-        #expect(model.promptText == "original prompt")
+        // The composer clears once a prompt is sent, while the transcript keeps
+        // its own snapshot of what was submitted.
+        #expect(model.promptText.isEmpty)
         #expect(model.hasOutputTranscript)
         #expect(model.outputResponsePlainText.isEmpty)
         #expect(model.outputConversationPlainText == "You:\noriginal prompt")
