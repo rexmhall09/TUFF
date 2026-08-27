@@ -23,12 +23,22 @@ if [[ ! -f "$archive_directory/$archive" ]]; then
   exit 1
 fi
 
+# Generate from a directory holding only this version's archive. The generator
+# writes one entry per archive it finds and gives every one of them the same
+# download prefix, so a stale archive left in dist/ would be published with a
+# URL under this release that does not exist.
+staging="$(mktemp -d "${TMPDIR:-/tmp}/tuff-appcast.XXXXXX")"
+trap 'rm -rf "$staging"' EXIT
+cp "$archive_directory/$archive" "$staging/$archive"
+
 "$generator" \
   --account TUFF \
   --download-url-prefix \
     "https://github.com/rexmhall09/TUFF/releases/download/v${version}/" \
   --link "https://github.com/rexmhall09/TUFF" \
   --embed-release-notes \
-  "$archive_directory"
+  "$staging"
+
+cp "$staging/appcast.xml" "$archive_directory/appcast.xml"
 
 echo "created $archive_directory/appcast.xml"
