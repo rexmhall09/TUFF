@@ -50,10 +50,23 @@ TUFF is aimed at the case where the model does not fit at all.
 | | TUFF | LM Studio | Ollama | Colibri | turbo-fieldfare |
 | --- | :-: | :-: | :-: | :-: | :-: |
 | Runs models bigger than your memory | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Built specifically for Apple Silicon | ✅ | ◐ | ◐ | ❌ | ✅ |
+| Open source | ✅ | ◐ | ✅ | ✅ | ✅ |
 | Desktop app rather than a CLI | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Local OpenAI-compatible server | ✅ | ✅ | ✅ | ❌ | ✅ |
+| Image input | ✅ | ✅ | ✅ | ❌ | ◐ |
+| Signed automatic updates | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Good on models that already fit in RAM | ◐ | ✅ | ✅ | ❌ | ◐ |
+| Large model library | ◐ | ✅ | ✅ | ❌ | ❌ |
 | Windows and Linux | ❌ | ✅ | ✅ | ✅ | ❌ |
-| Large model library | ❌ | ✅ | ✅ | ❌ | ❌ |
-| Built for models that already fit in RAM | ❌ | ✅ | ✅ | ❌ | ❌ |
+
+✅ yes · ◐ partly · ❌ no
+
+TUFF ships five models rather than a library, but each one is pinned to a
+revision, checksum-verified on install, and qualified on real hardware before it
+appears. LM Studio and Ollama reach Apple Silicon through MLX and Metal backends;
+TUFF and turbo-fieldfare are written for it and run nowhere else. LM Studio's
+desktop app is proprietary, while its CLI and SDKs are MIT.
 
 TUFF is a fork of [drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare),
 which established the expert-streaming runtime for one Gemma checkpoint. v2 turned
@@ -61,7 +74,8 @@ that into a five-model platform with a rebuilt app, a second quantization format
 a dense architecture path, and a shared local server.
 
 Pick something else if you want a large model library, Windows or Linux, or the
-fastest possible decode for a model that already fits in your memory.
+fastest possible decode for a model that already fits in your memory. TUFF is
+for the case where the model does not fit at all, on a Mac, in an app.
 
 ## Download the app
 
