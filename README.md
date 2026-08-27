@@ -148,13 +148,15 @@ swift build -c release
 To build the complete app bundle, embedded updater, ZIP, and checksum:
 
 ```bash
-Scripts/package_app.sh 2.0.0
+Scripts/package_app.sh 2.0.1
 open dist/TUFF.app
 ```
 
 The clone-style executable looks for models under `scratch/`. The packaged app
-uses Application Support. Existing compatible v1 Gemma and Qwen installations
-remain readable and are not duplicated or migrated.
+keeps everything it owns in one place, `~/Library/Application Support/TUFF`,
+with models in `Models/` and saved chats in `Chats/`. Models left in the older
+`TurboFieldfare` directory by an earlier version are moved across on first
+launch. Existing compatible v1 Gemma and Qwen installations remain readable.
 
 ### Command-line interface
 
