@@ -40,7 +40,8 @@ enum AppModelLocation {
                 .standardizedFileURL
         }
         return applicationSupportURL
-            .appendingPathComponent("TurboFieldfare", isDirectory: true)
+            .appendingPathComponent(AppSupportMigration.currentDirectoryName, isDirectory: true)
+            .appendingPathComponent(AppSupportMigration.modelsDirectoryName, isDirectory: true)
             .appendingPathComponent(installDirectoryName, isDirectory: true)
             .standardizedFileURL
     }

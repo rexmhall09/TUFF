@@ -39,6 +39,10 @@ struct TurboFieldfareMacApp: App {
     private let inferenceBroker: SharedInferenceBroker
 
     init() {
+        // Move any models still under the old Application Support directory
+        // before anything resolves a model path or opens a pack.
+        AppSupportMigration.migrateModels(
+            applicationSupport: AppSupportMigration.applicationSupportURL())
         let inferenceBroker = SharedInferenceBroker(
             client: DecodeServiceInferenceClient())
         let model = AppModel(

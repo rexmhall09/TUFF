@@ -42,6 +42,6 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: { _ in false })
-        #expect(result.path == "/support/TurboFieldfare/gemma4.gturbo")
+        #expect(result.path == "/support/TUFF/Models/gemma4.gturbo")
     }
 }
