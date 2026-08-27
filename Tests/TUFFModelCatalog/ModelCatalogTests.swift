@@ -30,8 +30,12 @@ import Testing
     }
 
     @Test func imageAddonsRemainSeparateAndM2Gated() {
-        #expect(TUFFModelCatalog.gemma4_E4B.addons.isEmpty)
-        for model in [TUFFModelCatalog.gemma4_26B_A4B,
+        // GPT-OSS ships no image add-on; the three Gemma and Qwen checkpoints
+        // each carry a vision tower packaged separately.
+        #expect(TUFFModelCatalog.gptOss_20B.addons.isEmpty)
+        #expect(TUFFModelCatalog.gptOss_120B.addons.isEmpty)
+        for model in [TUFFModelCatalog.gemma4_E4B,
+                      TUFFModelCatalog.gemma4_26B_A4B,
                       TUFFModelCatalog.qwen36_35B_A3B] {
             let addon = model.addons[0]
             #expect(addon.kind == .imageInput)

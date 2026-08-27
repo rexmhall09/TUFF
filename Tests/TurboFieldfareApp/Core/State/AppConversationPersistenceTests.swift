@@ -160,11 +160,14 @@ import Testing
             modelID: AppModelInstallDescriptor.default.settingsProfileKey)
         #expect(store.selectedConversation?.turns.first?.attachments.isEmpty == false)
 
-        let textOnlyInstaller = MockModelInstallerClient(descriptor: .gemma4E4B)
+        // GPT-OSS has no vision tower, so it is the genuine text-only case.
+        let textOnlyDescriptor = try #require(
+            AppModelInstallDescriptor.descriptor(for: .gptOss_20B))
+        let textOnlyInstaller = MockModelInstallerClient(descriptor: textOnlyDescriptor)
         let textOnly = ModelInstallCoordinator(
-            descriptor: .gemma4E4B,
+            descriptor: textOnlyDescriptor,
             directoryURL: FileManager.default.temporaryDirectory
-                .appendingPathComponent("e4b-switch-\(UUID().uuidString).gturbo"),
+                .appendingPathComponent("gptoss-switch-\(UUID().uuidString).gturbo"),
             client: textOnlyInstaller)
         let model = AppModel(
             modelDirectory: FileManager.default.temporaryDirectory

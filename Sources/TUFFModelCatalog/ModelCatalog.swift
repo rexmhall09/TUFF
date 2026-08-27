@@ -507,8 +507,23 @@ public enum TUFFModelCatalog {
             temperature: 1.0,
             topK: 64,
             topP: 0.95),
-        capabilities: [.textGeneration, .reasoning],
-        reasoningControl: .toggle)
+        capabilities: [.textGeneration, .imageInput, .reasoning],
+        reasoningControl: .toggle,
+        addons: [TUFFModelAddonDescriptor(
+            id: "gemma4-e4b-image-input",
+            displayName: "Gemma 4 E4B Image Support",
+            kind: .imageInput,
+            source: TUFFModelSource(
+                repoID: gemmaE4BSource.repoID,
+                revision: gemmaE4BSource.revision,
+                sourceIndexSHA256: gemmaE4BSource.sourceIndexSHA256,
+                manifestModelID: gemmaE4BSource.manifestModelID,
+                approximateDownloadBytes: 1_503_238_553,
+                installedBytes: 1_144_374_564,
+                reserveBytes: oneGiB),
+            hardware: TUFFModelHardwareRequirements(
+                minimumUnifiedMemoryBytes: eightGiB,
+                minimumAppleSiliconGeneration: 2))])
 
     public static let gemma4_26B_A4B = TUFFModelDescriptor(
         id: .gemma4_26B_A4B,

@@ -76,7 +76,7 @@ import TurboFieldfareRepackCore
             "gpt-oss-20b.gturbo",
             "gpt-oss-120b.gturbo",
         ])
-        #expect(AppModelInstallDescriptor.gemma4E4B.supportsImageInput == false)
+        #expect(AppModelInstallDescriptor.gemma4E4B.supportsImageInput)
         #expect(MacModelSettings.defaults(
             for: AppModelInstallDescriptor.gemma4E4B.settingsProfileKey).isValid())
         #expect(AppModelInstallDescriptor.default.supportsImageInput)

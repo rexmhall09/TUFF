@@ -10,8 +10,9 @@ import TurboFieldfare
 @Suite struct AppImageCapacityTests {
     @MainActor
     @Test func textOnlyModelsExposeZeroImageCapacity() throws {
-        for variant in [ModelVariant.gemma4_E4B,
-                        ModelVariant.gptOss_20B,
+        // GPT-OSS has no vision tower at all. Gemma 4 E4B does, and now ships
+        // an image add-on, so it is no longer part of this set.
+        for variant in [ModelVariant.gptOss_20B,
                         ModelVariant.gptOss_120B] {
             let descriptor = try #require(
                 AppModelInstallDescriptor.descriptor(for: variant))
