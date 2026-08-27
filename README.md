@@ -48,13 +48,12 @@ comfortably in memory will be faster in a runner built around that assumption.
 TUFF is aimed at the case where the model does not fit at all.
 
 | | TUFF | LM Studio | Ollama | Colibri | turbo-fieldfare |
-| --- | --- | --- | --- | --- | --- |
-| How big models fit | Streams MoE experts from SSD | Loads the model into memory | Loads the model into memory | Streams most of the model from disk | Streams MoE experts from SSD |
-| Ceiling on a 16 GB Mac | GPT-OSS 120B, a 61 GiB checkpoint | Whatever fits in memory | Whatever fits in memory | Very large models, at 0.05 to 1 tok/s | Gemma 4 26B-A4B |
-| Engine | Swift and Metal, written here | llama.cpp and MLX | llama.cpp | Pure C | Swift and Metal |
-| Interface | Native Mac app, CLI, local server | Native app and server | CLI and server | CLI | Native Mac app |
-| Platforms | macOS on Apple Silicon | macOS, Windows, Linux | macOS, Windows, Linux | macOS, Windows, Linux | macOS on Apple Silicon |
-| Model choice | Five, each pinned and qualified | Very large library | Very large library | Focused on very large checkpoints | One family |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| Runs models bigger than your memory | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Desktop app rather than a CLI | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Windows and Linux | ❌ | ✅ | ✅ | ✅ | ❌ |
+| Large model library | ❌ | ✅ | ✅ | ❌ | ❌ |
+| Built for models that already fit in RAM | ❌ | ✅ | ✅ | ❌ | ❌ |
 
 TUFF is a fork of [drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare),
 which established the expert-streaming runtime for one Gemma checkpoint. v2 turned
