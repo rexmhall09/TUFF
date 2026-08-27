@@ -11,6 +11,7 @@ struct PromptComposerView: View {
     @FocusState private var promptFocused: Bool
     @State private var showingPromptTips = false
     @State private var showingImagePicker = false
+    @State private var showingDocumentPicker = false
     @State private var isImageDropTargeted = false
 
     var body: some View {
@@ -30,6 +31,13 @@ struct PromptComposerView: View {
             case .success(let urls): model.addImages(urls)
             case .failure(let error): model.reportImageAttachmentError(error)
             }
+        }
+        .fileImporter(
+            isPresented: $showingDocumentPicker,
+            allowedContentTypes: [.plainText, .pdf, .commaSeparatedText, .json, .yaml],
+            allowsMultipleSelection: true
+        ) { result in
+            if case .success(let urls) = result { model.attachDocuments(urls) }
         }
         .padding(14)
         .background {
@@ -116,6 +124,16 @@ struct PromptComposerView: View {
                         && model.isModelInstalled && model.isVisionRuntimeSupported {
                 imageSupportAction
             }
+            Button {
+                showingDocumentPicker = true
+            } label: {
+                Label("Attach a document", systemImage: "doc.badge.plus")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.isRunning)
+            .help("Attach a text, Markdown, CSV, JSON, or PDF file")
             promptTips
             Spacer()
             clearAction

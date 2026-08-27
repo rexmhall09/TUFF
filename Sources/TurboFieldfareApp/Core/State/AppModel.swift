@@ -473,6 +473,38 @@ public final class AppModel {
         applySelectedModelDirectory(coordinator.directoryURL)
     }
 
+    /// Attach documents by putting their text straight into the prompt.
+    ///
+    /// A document is not a model capability: every model reads text. The
+    /// extracted text is appended with its file name so the answer can refer to
+    /// it, and the estimated size is reported so a file too large for the
+    /// context window is visible before it is sent rather than after. Nothing is
+    /// truncated here; a prompt that does not fit is refused by the context
+    /// check at submission.
+    public func attachDocuments(_ urls: [URL]) {
+        var blocks: [String] = []
+        var attachedTokens = 0
+        for url in urls {
+            do {
+                let document = try DocumentTextExtractor.extract(from: url)
+                blocks.append(DocumentTextExtractor.promptBlock(for: document))
+                attachedTokens += document.estimatedTokens
+            } catch {
+                self.error = .invalidRequest("\(error)")
+                return
+            }
+        }
+        guard !blocks.isEmpty else { return }
+        let joined = blocks.joined(separator: "\n\n")
+        promptText = promptText.isEmpty ? joined : promptText + "\n\n" + joined
+        documentAttachmentNotice =
+            "Added roughly \(attachedTokens) tokens of document text. "
+            + "The context limit for this model is \(maxContextTokens)."
+    }
+
+    /// Set after a document is attached, so the size is visible before sending.
+    public var documentAttachmentNotice: String?
+
     /// Whether the selected chat holds any image attachment, in a completed
     /// turn or in the draft being composed.
     var conversationHasAttachments: Bool {
