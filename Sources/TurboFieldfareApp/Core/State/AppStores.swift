@@ -74,6 +74,20 @@ public final class AppConversationStore {
         persistArchive()
     }
 
+    /// Point the selected conversation at another model, keeping its history.
+    /// Switching models mid-chat re-renders that history through the new
+    /// model's prompt format on the next turn, so the chat continues rather
+    /// than starting over.
+    public func rebindConversation(to modelID: String) {
+        guard let selectedConversationID,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
+        else { return }
+        conversations[index].modelID = modelID
+        conversations[index].updatedAt = Date()
+        moveConversationToFront(at: index)
+        persistArchive()
+    }
+
     public func bindEmptyConversation(to modelID: String) {
         guard let selectedConversationID,
               let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),

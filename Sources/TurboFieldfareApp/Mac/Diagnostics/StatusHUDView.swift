@@ -25,6 +25,7 @@ struct StatusHUDView: View {
                     HUDMetricView(value: memoryText, label: "memory", animated: !model.isRunning)
                         .help(memoryHelp)
                     InfoPopoverButton(subject: "Memory", text: memoryHelp, arrowEdge: .bottom)
+                    ejectButton
                 }
             }
         }
@@ -39,6 +40,24 @@ struct StatusHUDView: View {
                 }
         }
         .gesture(WindowDragGesture())
+    }
+
+    /// Unloading is what actually returns the model's memory, so the control
+    /// sits with the memory readout rather than in a menu.
+    @ViewBuilder
+    private var ejectButton: some View {
+        if model.canUnloadModel {
+            Button(action: model.unloadModel) {
+                Image(systemName: "eject.fill")
+                    .imageScale(.small)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Unload this model and free its memory")
+            .accessibilityLabel("Unload model")
+        }
     }
 
     private var rateText: String {

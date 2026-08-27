@@ -449,17 +449,36 @@ public final class AppModel {
     /// left alone — only the loaded runtime and the active directory change.
     public func selectModel(_ coordinator: ModelInstallCoordinator) {
         guard canSelectModel(coordinator) else { return }
+        // An existing chat carries on through the new model. History is stored
+        // as turns and re-rendered in the destination's prompt format on the
+        // next submission, so nothing has to be replayed in the old dialect.
+        //
+        // Images are the exception. A transcript holding attachments cannot
+        // move to a model without image input: answering as though the images
+        // were never sent is exactly the failure the image path is built to
+        // avoid, so the switch is refused instead.
+        if conversationHasAttachments,
+           !coordinator.descriptor.supportsImageInput {
+            error = .invalidRequest(
+                "\(coordinator.descriptor.shortName) cannot read images. "
+                + "Start a new chat to use it, or pick a model with image input.")
+            return
+        }
         // Capture edits to the current model before `selectedModelID` changes
         // which profile key persistence resolves.
         persistSettings()
         selectedModelID = coordinator.id
-        if hasOutputTranscript {
-            beginNewConversation(modelID: coordinator.descriptor.settingsProfileKey)
-        } else {
-            conversationStore.bindEmptyConversation(
-                to: coordinator.descriptor.settingsProfileKey)
-        }
+        conversationStore.rebindConversation(
+            to: coordinator.descriptor.settingsProfileKey)
         applySelectedModelDirectory(coordinator.directoryURL)
+    }
+
+    /// Whether the selected chat holds any image attachment, in a completed
+    /// turn or in the draft being composed.
+    var conversationHasAttachments: Bool {
+        if !imageAttachments.isEmpty { return true }
+        guard let record = conversationStore.selectedConversation else { return false }
+        return record.turns.contains { !$0.attachments.isEmpty }
     }
 
     /// Restore a named chat and the model it was created with. This is the one
