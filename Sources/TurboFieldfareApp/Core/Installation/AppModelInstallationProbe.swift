@@ -37,9 +37,14 @@ public enum AppModelInstallationProbe {
             guard manifest.sourceSnapshotHash == expectedSource else {
                 return .partial("installed checkpoint does not match \(expected.displayName)")
             }
-            let layout = directory.appendingPathComponent("packed_experts/layout.json")
-            guard FileManager.default.fileExists(atPath: layout.path) else {
-                return .partial("packed_experts/layout.json is missing")
+            // Only a mixture-of-experts install carries a packed-expert
+            // directory. The dense format forbids one, so requiring it here
+            // failed every completed Gemma 4 E4B download.
+            if manifest.expertsPerLayer > 0 {
+                let layout = directory.appendingPathComponent("packed_experts/layout.json")
+                guard FileManager.default.fileExists(atPath: layout.path) else {
+                    return .partial("packed_experts/layout.json is missing")
+                }
             }
             let receipt = try VerifiedInstallReceiptReader.load(directoryURL: directory)
             let manifestHash = try Sha256Verifier.hashFile(at: manifestURL, chunkBytes: 65_536)

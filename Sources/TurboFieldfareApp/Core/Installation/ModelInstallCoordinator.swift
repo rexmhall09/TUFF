@@ -224,6 +224,12 @@ public final class ModelInstallCoordinator: Identifiable {
 
     private func refreshReadiness() {
         guard !isInstalled else { return }
+        // Measuring the requirement takes the install lock. While this model is
+        // downloading, its own installer already holds that lock, so probing
+        // would report the download as a conflict with itself. The requirement
+        // cannot change mid-run anyway, so keep what was measured before it
+        // started.
+        guard !isInstalling else { return }
         readiness = .checking
         do {
             let measured = try client.checkInstallRequirement(
@@ -241,6 +247,15 @@ public final class ModelInstallCoordinator: Identifiable {
             readiness = requirement.canInstall
                 ? .ready(requirement)
                 : .insufficientSpace(requirement)
+        } catch let error as RepackError {
+            // A lock held by another install is a transient condition, not a
+            // property of this model. Reporting it as a readiness failure put a
+            // red error under a healthy progress bar.
+            if case .installBusy = error {
+                readiness = .checking
+            } else {
+                readiness = .failed("\(error)")
+            }
         } catch {
             readiness = .failed("\(error)")
         }
