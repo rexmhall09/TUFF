@@ -334,7 +334,6 @@ private struct ChatWorkspaceView: View {
 
     private var conversationChrome: some View {
         VStack(spacing: 10) {
-            ChatControlsView(model: model)
             ErrorBanner(model: model)
             if model.promptText.isEmpty && model.showPromptExamples && !model.isRunning {
                 PromptExamplesView { preset in model.promptText = preset.prompt }

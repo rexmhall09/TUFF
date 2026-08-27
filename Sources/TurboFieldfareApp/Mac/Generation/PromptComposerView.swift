@@ -96,6 +96,9 @@ struct PromptComposerView: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
+            // Model and reasoning belong with the prompt they apply to, rather
+            // than in a separate strip above the composer.
+            ChatControlsView(model: model)
             if model.isImageInputAvailable {
                 Button {
                     showingImagePicker = true

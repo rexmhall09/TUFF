@@ -20,10 +20,11 @@ struct AppSettingsView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(maxWidth: 460)
+            .controlSize(.large)
+            .frame(maxWidth: 520)
             .padding(.horizontal, 28)
-            .padding(.top, 18)
-            .padding(.bottom, 8)
+            .padding(.top, 20)
+            .padding(.bottom, 10)
             .accessibilityLabel("Settings section")
 
             Group {
@@ -34,6 +35,9 @@ struct AppSettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Settings controls read as full-size rows rather than the compact
+            // system default, so a pop-up here is a comfortable target.
+            .controlSize(.large)
             .id(section)
         }
         .background(Color(nsColor: .windowBackgroundColor))
