@@ -14,6 +14,8 @@ final class MockModelInstallerClient: AppModelInstallerClient, Sendable {
         var cancelCalled = false
         var cancellationAcknowledgementPending = false
         var discardCalled = false
+        var blockedEntries: [String] = []
+        var clearBlockedCallCount = 0
     }
     private final class TaskState: Sendable {
         let value = Mutex(State())
@@ -26,6 +28,10 @@ final class MockModelInstallerClient: AppModelInstallerClient, Sendable {
         taskState.value.withLock { $0.cancellationAcknowledgementPending }
     }
     var discardCalled: Bool { taskState.value.withLock { $0.discardCalled } }
+    var clearBlockedCallCount: Int { taskState.value.withLock { $0.clearBlockedCallCount } }
+    func setBlockedEntries(_ entries: [String]) {
+        taskState.value.withLock { $0.blockedEntries = entries }
+    }
 
     init(events: [AppModelInstallEvent] = [],
          failure: Error? = nil,
@@ -109,6 +115,17 @@ final class MockModelInstallerClient: AppModelInstallerClient, Sendable {
 
     func discardPartialInstall(outputDirectory: URL) async throws {
         taskState.value.withLock { $0.discardCalled = true }
+    }
+
+    func blockedInstallEntries(outputDirectory: URL) -> [String] {
+        taskState.value.withLock { $0.blockedEntries }
+    }
+
+    func clearBlockedInstallPath(outputDirectory: URL) async throws {
+        taskState.value.withLock {
+            $0.blockedEntries = []
+            $0.clearBlockedCallCount += 1
+        }
     }
 }
 

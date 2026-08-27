@@ -132,6 +132,21 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
         task?.cancel()
     }
 
+    public func blockedInstallEntries(outputDirectory: URL) -> [String] {
+        guard let paths = try? RemoteInstallPaths(
+            outputDirectory: outputDirectory.standardizedFileURL.path),
+              let blocked = try? paths.blockingEntries() else { return [] }
+        return blocked.map(\.path)
+    }
+
+    public func clearBlockedInstallPath(outputDirectory: URL) async throws {
+        let directory = outputDirectory.standardizedFileURL.path
+        try await Task.detached(priority: .utility) {
+            let paths = try RemoteInstallPaths(outputDirectory: directory)
+            try paths.removeBlockingEntries()
+        }.value
+    }
+
     public func discardPartialInstall(outputDirectory: URL) async throws {
         let directory = outputDirectory.standardizedFileURL
         try await Task.detached(priority: .utility) { [runDiscard] in

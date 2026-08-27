@@ -52,6 +52,46 @@ public struct RemoteInstallPaths: Sendable, Equatable {
                 detail: "unexpected \(kind) entry")
         }
     }
+
+    /// One install path occupied by something the installer will not write over.
+    public struct BlockingEntry: Equatable, Sendable {
+        public let path: String
+        public let kind: Posix.EntryKind
+
+        public init(path: String, kind: Posix.EntryKind) {
+            self.path = path
+            self.kind = kind
+        }
+    }
+
+    private var requirements: [(path: String, kinds: Set<Posix.EntryKind>)] {
+        [(finalDirectory, [.absent, .directory]),
+         (partialDirectory, [.absent, .directory]),
+         (checkpointFile, [.absent, .regular]),
+         (lockFile, [.absent, .regular])]
+    }
+
+    /// The entries that make `validateEntryTypes` throw. A symlink left where a
+    /// model directory belongs is the common case: the installer refuses to
+    /// follow it, and nothing in the normal download flow can clear it.
+    public func blockingEntries() throws -> [BlockingEntry] {
+        try requirements.compactMap { requirement in
+            let kind = try Posix.entryKind(requirement.path)
+            guard !requirement.kinds.contains(kind) else { return nil }
+            return BlockingEntry(path: requirement.path, kind: kind)
+        }
+    }
+
+    /// Remove exactly those entries. Removing a symlink unlinks the link and
+    /// never touches whatever it pointed at.
+    @discardableResult
+    public func removeBlockingEntries() throws -> [BlockingEntry] {
+        let blocked = try blockingEntries()
+        for entry in blocked {
+            try Posix.removeEntry(entry.path)
+        }
+        return blocked
+    }
 }
 
 public final class InstallLock: @unchecked Sendable {

@@ -178,6 +178,21 @@ public enum Posix {
         }
     }
 
+    /// Remove one entry without following it. `unlink` is used for anything that
+    /// is not a directory, so a symlink is removed and its target is left alone.
+    public static func removeEntry(_ path: String) throws {
+        switch try entryKind(path) {
+        case .absent:
+            return
+        case .directory:
+            try FileManager.default.removeItem(atPath: path)
+        default:
+            if unlink(path) != 0, errno != ENOENT {
+                throw RepackError.fileOpenFailed(path: path, errno: errno)
+            }
+        }
+    }
+
     public static func atomicWrite(_ data: Data,
                                    to path: String,
                                    durableIn directory: String,

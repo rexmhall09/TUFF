@@ -111,6 +111,19 @@ public final class ModelInstallCoordinator: Identifiable {
 
     public var canDiscard: Bool { hasPartialDownload && !isInstalling }
 
+    /// Entries occupying the destination that the installer will not write over,
+    /// such as a symlink standing where the model directory belongs. While these
+    /// exist every download attempt fails the same way, so the UI offers to clear
+    /// them instead of leaving the model stuck.
+    public var blockedInstallEntries: [String] {
+        guard !isInstalled else { return [] }
+        return client.blockedInstallEntries(outputDirectory: directoryURL)
+    }
+
+    public var isInstallPathBlocked: Bool { !blockedInstallEntries.isEmpty }
+
+    public var canClearInstallPath: Bool { isInstallPathBlocked && !isInstalling }
+
     // MARK: - Commands
 
     /// Point this model at a different directory, abandoning any install in
@@ -156,6 +169,28 @@ public final class ModelInstallCoordinator: Identifiable {
         guard canCancel else { return }
         state = .cancelling
         client.cancel()
+    }
+
+    /// Remove the blocking entries and re-probe, so the next Download starts from
+    /// a clean destination. Removing a symlink never touches its target.
+    public func clearBlockedInstallPath() {
+        guard canClearInstallPath else { return }
+        cancelInFlight()
+        generation &+= 1
+        let generation = self.generation
+        let outputDirectory = directoryURL
+        state = .discarding
+        task = Task { [weak self, client] in
+            do {
+                try await client.clearBlockedInstallPath(outputDirectory: outputDirectory)
+                guard let self, generation == self.generation else { return }
+                self.task = nil
+                self.state = .idle
+                self.refresh()
+            } catch {
+                self?.finishFailure(error, generation: generation)
+            }
+        }
     }
 
     public func discard() {

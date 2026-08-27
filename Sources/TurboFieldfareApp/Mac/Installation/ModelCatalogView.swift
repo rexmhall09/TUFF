@@ -244,8 +244,23 @@ struct ModelCatalogRow: View {
         }
     }
 
+    private var blockedPathHelp: String {
+        let entries = install.blockedInstallEntries
+        let names = entries.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
+        return "Delete \(names) and download again. A symlink is unlinked; "
+            + "whatever it points at is left alone."
+    }
+
     @ViewBuilder
     private var message: some View {
+        if install.isInstallPathBlocked {
+            Label("Something is already in the way at this location. "
+                  + "Remove and Retry clears it and downloads again.",
+                  systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         switch install.state {
         case .failed(let text):
             Label(text, systemImage: "exclamationmark.triangle.fill")
@@ -279,7 +294,14 @@ struct ModelCatalogRow: View {
                     }
                     .disabled(!install.canDiscard)
                 }
-                if !install.isInstalled {
+                if install.isInstallPathBlocked {
+                    Button("Remove and Retry", role: .destructive) {
+                        install.clearBlockedInstallPath()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!install.canClearInstallPath)
+                    .help(blockedPathHelp)
+                } else if !install.isInstalled {
                     Button(install.hasPartialDownload ? "Resume" : "Download") {
                         model.installModel(install)
                     }

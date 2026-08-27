@@ -290,3 +290,49 @@ import Testing
         #expect(model.loadedRuntimeKey == nil)
     }
 }
+
+@Suite("Blocked install recovery")
+@MainActor
+struct BlockedInstallRecoveryTests {
+    @Test("a blocked destination offers recovery instead of a download")
+    func offersRecovery() async throws {
+        let client = MockModelInstallerClient()
+        let coordinator = ModelInstallCoordinator(
+            descriptor: .default,
+            directoryURL: URL(fileURLWithPath: "/tmp/support/TUFF/Models/qwen36.gturbo"),
+            client: client)
+        client.setBlockedEntries(["/tmp/support/TUFF/Models/qwen36.gturbo"])
+
+        #expect(coordinator.isInstallPathBlocked)
+        #expect(coordinator.canClearInstallPath)
+        #expect(coordinator.blockedInstallEntries.count == 1)
+    }
+
+    @Test("clearing the path unblocks the install")
+    func clearingUnblocks() async throws {
+        let client = MockModelInstallerClient()
+        let coordinator = ModelInstallCoordinator(
+            descriptor: .default,
+            directoryURL: URL(fileURLWithPath: "/tmp/support/TUFF/Models/qwen36.gturbo"),
+            client: client)
+        client.setBlockedEntries(["/tmp/support/TUFF/Models/qwen36.gturbo"])
+
+        coordinator.clearBlockedInstallPath()
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(client.clearBlockedCallCount == 1)
+        #expect(!coordinator.isInstallPathBlocked)
+        #expect(!coordinator.canClearInstallPath)
+    }
+
+    @Test("a clean destination offers no recovery button")
+    func noRecoveryWhenClean() {
+        let client = MockModelInstallerClient()
+        let coordinator = ModelInstallCoordinator(
+            descriptor: .default,
+            directoryURL: URL(fileURLWithPath: "/tmp/support/TUFF/Models/qwen36.gturbo"),
+            client: client)
+        #expect(!coordinator.isInstallPathBlocked)
+        #expect(!coordinator.canClearInstallPath)
+    }
+}
