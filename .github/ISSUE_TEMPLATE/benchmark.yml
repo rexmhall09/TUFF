@@ -6,7 +6,7 @@ labels:
 body:
   - type: markdown
     attributes:
-      value: Follow docs/COMMUNITY_BENCHMARKS.md and remove personal paths or unrelated process details.
+      value: Run Scripts/benchmark_simple.rb or Scripts/benchmark_v2.rb, and remove personal paths or unrelated process details.
   - type: input
     id: commit
     attributes:

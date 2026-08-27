@@ -121,10 +121,13 @@ what real run is still required.
 
 ## Benchmark contributions
 
-Follow [the community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md). Include
-the commit, Mac model, unified memory, macOS, Swift version, exact command,
-prompt and generated token counts, stop reason, prefill, time to first token,
-decode rate, and memory.
+Run `Scripts/benchmark_simple.rb` for the launch-lineup numbers, or
+`Scripts/benchmark_v2.rb` for the per-workload matrix, and report what the tool
+prints. Include the commit, Mac model, unified memory, macOS, Swift version,
+exact command, prompt and generated token counts, stop reason, prefill, time to
+first token, decode rate, and memory. A repeating calibration prompt is not a
+valid speed result, because repeated expert choices make decode artificially
+fast.
 
 Do not turn a smoke test, warmup, profiler run, contaminated session, or
 model-free test into a performance claim. Review every captured file before

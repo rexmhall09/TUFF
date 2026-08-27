@@ -12,17 +12,29 @@ versions included in that product.
 
 ## Model weights
 
-Model weights are not included in this repository. The installer downloads
-the pinned revision
-`0d77464eeb233a2da68ebf9d7dc4edaac7db956d` of
-[`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit)
-and repacks it locally. Its model card describes it as an Apache-2.0
-quantization of Google's Gemma 4 26B-A4B instruction checkpoint.
+Model weights are not included in this repository. The installer downloads a
+pinned revision of each checkpoint and repacks it locally. Every entry below is
+the exact revision TUFF installs; the license column records what that model
+card states, and the model card remains authoritative.
+
+| Model | Source repository | Pinned revision | License stated by the model card |
+| --- | --- | --- | --- |
+| Gemma 4 E4B IT | [`mlx-community/gemma-4-e4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-e4b-it-4bit) | `475b9088d29754a3379866cf5aeb6b41acd313c2` | Apache-2.0 quantization of Google's Gemma 4 E4B instruction checkpoint |
+| Gemma 4 26B-A4B IT | [`mlx-community/gemma-4-26b-a4b-it-4bit`](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit) | `0d77464eeb233a2da68ebf9d7dc4edaac7db956d` | Apache-2.0 quantization of Google's Gemma 4 26B-A4B instruction checkpoint |
+| Qwen3.6 35B-A3B | [`mlx-community/Qwen3.6-35B-A3B-4bit`](https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit) | `38740b847e4cb78f352aba30aa41c76e08e6eb46` | Apache-2.0 quantization of Alibaba's Qwen3.6 35B-A3B checkpoint |
+| GPT-OSS 20B | [`openai/gpt-oss-20b`](https://huggingface.co/openai/gpt-oss-20b) | `6cee5e81ee83917806bbde320786a8fb61efebee` | Apache-2.0 |
+| GPT-OSS 120B | [`openai/gpt-oss-120b`](https://huggingface.co/openai/gpt-oss-120b) | `b5c939de8f754692c1647ca79fbf85e8c1e70f8a` | Apache-2.0 |
+
 Google publishes Gemma 4 under the
-[Apache License 2.0](https://ai.google.dev/gemma/apache_2).
+[Apache License 2.0](https://ai.google.dev/gemma/apache_2). The GPT-OSS
+checkpoints are the official OpenAI releases and are installed in their native
+MXFP4 form rather than requantized.
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of TUFF releases.
+
+Optional image add-ons are companion packs built from the same Gemma 4 26B-A4B
+and Qwen3.6 revisions listed above; they carry no separate terms.
 
 ## Swift package graph
 

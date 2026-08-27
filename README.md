@@ -5,13 +5,14 @@
 <h1 align="center">TUFF</h1>
 
 <p align="center">
+  <strong>GPT-OSS 120B on a 16 GB Mac. Qwen3.6 35B-A3B down to an 8 GB Mac.</strong><br>
   Run large language models locally on Apple Silicon.<br>
   Native Swift, Metal, and an SSD-aware runtime that does not pretend memory is unlimited.
 </p>
 
 <p align="center">
-  <a href="https://github.com/rexmhall09/TUFF/releases/latest"><strong>Download TUFF 2.0.0</strong></a>
-  · <a href="docs/OPENAI_SERVER.md">Server guide</a>
+  <a href="https://github.com/rexmhall09/TUFF/releases/latest"><strong>Download TUFF</strong></a>
+  · <a href="https://rexmhall09.github.io/TUFF/">Website</a>
   · <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
@@ -35,19 +36,68 @@ persistent chats, Markdown and native LaTeX rendering, image add-ons, per-model
 settings, a shared local server, hardware eligibility checks, and signed binary
 updates.
 
+## Why TUFF
+
+Most local runners load a whole model into memory, so the largest model you can
+run is the one that fits. TUFF keeps only the shared weights resident and streams
+mixture-of-experts weights from SSD through a bounded cache, so model size is
+governed by disk rather than by RAM.
+
+That trade is not free. Streaming costs decode speed, and a model that fits
+comfortably in memory will be faster in a runner built around that assumption.
+TUFF is aimed at the case where the model does not fit at all.
+
+| | TUFF | LM Studio | Ollama | Colibri | turbo-fieldfare |
+| --- | --- | --- | --- | --- | --- |
+| How big models fit | Streams MoE experts from SSD | Loads the model into memory | Loads the model into memory | Streams most of the model from disk | Streams MoE experts from SSD |
+| Ceiling on a 16 GB Mac | GPT-OSS 120B, a 61 GiB checkpoint | Whatever fits in memory | Whatever fits in memory | Very large models, at 0.05 to 1 tok/s | Gemma 4 26B-A4B |
+| Engine | Swift and Metal, written here | llama.cpp and MLX | llama.cpp | Pure C | Swift and Metal |
+| Interface | Native Mac app, CLI, local server | Native app and server | CLI and server | CLI | Native Mac app |
+| Platforms | macOS on Apple Silicon | macOS, Windows, Linux | macOS, Windows, Linux | macOS, Windows, Linux | macOS on Apple Silicon |
+| Model choice | Five, each pinned and qualified | Very large library | Very large library | Focused on very large checkpoints | One family |
+
+TUFF is a fork of [drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare),
+which established the expert-streaming runtime for one Gemma checkpoint. v2 turned
+that into a five-model platform with a rebuilt app, a second quantization format,
+a dense architecture path, and a shared local server.
+
+Pick something else if you want a large model library, Windows or Linux, or the
+fastest possible decode for a model that already fits in your memory.
+
 ## Download the app
 
 TUFF requires an Apple Silicon Mac running macOS 15 or newer.
 
-1. Download `TUFF-v2.0.0-macos-arm64.zip` from the
+1. Download `TUFF-vX.Y.Z-macos-arm64.zip` from the
    [latest GitHub release](https://github.com/rexmhall09/TUFF/releases/latest).
 2. Open the ZIP and move `TUFF.app` into Applications.
 3. Open TUFF, choose Models, and download the model you want.
 
-This release is ad-hoc signed and is not notarized. On first launch, macOS may
-refuse to open it normally. Control-click TUFF, choose **Open**, then confirm
-**Open** again. You can also allow it from **System Settings > Privacy &
-Security**.
+### About the security warning
+
+TUFF is ad-hoc signed and is not notarized, because notarizing requires a paid
+Apple Developer account. macOS will therefore warn you that it cannot verify the
+developer, and may refuse to open the app on first launch.
+
+To open it anyway, Control-click TUFF and choose **Open**, then confirm **Open**
+again. You can also allow it from **System Settings > Privacy & Security** right
+after the first attempt.
+
+If you would rather not click through that warning, don't. Two better options:
+
+- **Read the source.** Every line of this app is in this repository, including
+  the packaging script that produces the exact release archive.
+- **Build it yourself.** A build you produce locally is signed by your own
+  machine and opens without any warning. See
+  [Build it yourself](#build-it-yourself); it is one command once you have Xcode
+  and Swift installed.
+
+You can also verify that the archive you downloaded is the one published, by
+comparing it against the `.sha256` file attached to the same release:
+
+```bash
+shasum -a 256 TUFF-vX.Y.Z-macos-arm64.zip
+```
 
 TUFF checks for signed updates automatically. Automatic download and
 installation are on by default and can be changed in Settings. The updater only
@@ -102,9 +152,47 @@ M2 with a 7.44 GiB peak process footprint and zero swap. This proves that the
 configuration runs on that machine. It is not a claim that it will be fast for
 every workload.
 
-See [Benchmarks](docs/BENCHMARKS.md) for the exact hardware, commands, settings,
-and measurements. The [community benchmark guide](docs/COMMUNITY_BENCHMARKS.md)
-explains how to submit a comparable result.
+### Benchmarks
+
+Every number below was measured on my own M2 MacBook Air (`Mac14,2`, 16 GB,
+macOS 26.5.2, Swift 6.3.1) on AC power, using a fresh release CLI process per
+run and `/usr/bin/time -l`. Prompt length, generated length, cache state, and
+hardware all move these numbers, so a range across workloads is not run-to-run
+variance.
+
+One short question, `What is the capital of France?`, one process per model.
+Decode rate excludes install, load, and prefill. Every model answered correctly:
+
+| Model | Decode | Prefill | Peak RSS |
+| --- | ---: | ---: | ---: |
+| Gemma 4 E4B IT | 17.05 tok/s | 1.02 s | 374 MiB |
+| Gemma 4 26B-A4B IT | 7.82 tok/s | 6.92 s | 1,844 MiB |
+| Qwen3.6 35B-A3B | 7.15 tok/s | 9.65 s | 1,406 MiB |
+| GPT-OSS 20B | 3.73 tok/s | 13.32 s | 1,932 MiB |
+| GPT-OSS 120B | 0.49 tok/s | 47.58 s | 1,659 MiB |
+
+Reproduce it with `Scripts/benchmark_simple.rb`. Peak RSS understates what a
+model costs, because the weights are memory-mapped and the kernel owns those
+pages; the longer-workload rows below report footprint alongside RSS for that
+reason.
+
+Longer workloads on Gemma 4 E4B, at temperature `0.2`, Top-K `64`, Top-P `0.95`,
+with a frozen prompt and seed. Both runs were coherent and stopped at end of
+turn:
+
+| Case | Context | Prompt / generated | Prefill | Decode | Peak RSS / footprint |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| short-explanation | 4,096 | 57 / 440 | 3.08 s | 9.267 tok/s | 406.2 / 872.2 MiB |
+| long-synthesis | 8,192 | 3,011 / 369 | 204.40 s | 6.820 tok/s | 582.3 / 1,748.5 MiB |
+
+GPT-OSS 120B is the headline case: a verified 61 GiB install, run at 4,096-token
+context with Low reasoning and 16 expert-cache slots, returning the requested
+answer and stopping at EOS on a 16 GB machine with no swap. That establishes the
+configuration runs on that hardware. It is not a claim that it is fast.
+
+The 8 GB figures in the model table are a memory calculation, not a measurement.
+They combine each model's measured peak footprint with TUFF's 2 GiB system
+reserve. I have not run these models on an 8 GB Mac.
 
 ## Images
 
@@ -131,8 +219,9 @@ is installed. The client remains responsible for approving and executing every
 tool call.
 
 The server has no authentication or TLS. It binds only to `127.0.0.1`, and it
-should not be proxied, tunneled, or exposed to another machine. The full request
-format and client examples are in the [server guide](docs/OPENAI_SERVER.md).
+should not be proxied, tunneled, or exposed to another machine. Point any
+OpenAI-compatible client at `http://127.0.0.1:<port>/v1` with any API key value;
+`GET /v1/models` reports the identifier to send as `model`.
 
 ## Build it yourself
 
@@ -201,10 +290,9 @@ The `.gturbo` major version is still v1. A compatible minor extension describes
 dense feed-forward and MXFP4 layouts. Older runtimes reject features they do not
 understand instead of misreading the model.
 
-Read [System design](docs/SYSTEM_DESIGN.md) for the file format, memory
-ownership, Metal kernels, prefill, expert streaming, prompt reuse, and image
-companions. The [experiment inventory](docs/experiments/EXPERIMENT_INVENTORY.md)
-keeps the optimization record, including the things that did not work.
+The file format, memory ownership, Metal kernels, prefill, expert streaming,
+prompt reuse, and image companions are documented in the source, which is the
+copy that stays current.
 
 ## Tests
 
