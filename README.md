@@ -15,7 +15,7 @@
   · <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-![TUFF chatting with Qwen3.6 on a Mac](docs/assets/tuff-v2-chat.jpg)
+![TUFF chatting with Qwen3.6 on a Mac](docs/assets/tuff-v2-chat.png)
 
 ## What TUFF is
 
