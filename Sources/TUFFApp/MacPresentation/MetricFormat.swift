@@ -53,4 +53,14 @@ public enum MetricFormat {
         storageFormatter.string(fromByteCount: Int64(clamping: bytes))
     }
 
+
+    /// Token counts as "12K" once they are large enough that the exact figure
+    /// is noise. Used by the context meter, which is an estimate anyway.
+    public static func tokens(_ count: Int) -> String {
+        if count < 1_000 { return "\(count)" }
+        let thousands = Double(count) / 1_000
+        return thousands < 10
+            ? String(format: "%.1fK", thousands)
+            : "\(Int(thousands.rounded()))K"
+    }
 }

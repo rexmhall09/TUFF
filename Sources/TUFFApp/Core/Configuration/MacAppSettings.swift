@@ -16,6 +16,13 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
     public var defaultReasoning: ChatReasoning
     public var defaultReasoningEffort: GPTOSSReasoningEffort
     public var preserveThinking: Bool
+    /// Standing instructions sent as a system message ahead of every chat with
+    /// this model. Empty means none, which is what every model shipped with
+    /// before v3: the tokenizer has always rendered a system message and
+    /// nothing in the app could put one there.
+    ///
+    /// Decoded with a default so an archive written by an older build loads.
+    public var systemPrompt: String = ""
 
     public init(contextTokens: Int = AppContextLengthOption.eightK.tokens,
                 expertCacheSlots: Int = 16,
@@ -29,7 +36,8 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
                 rdadvisePolicy: AppRDAdvicePolicy = .off,
                 defaultReasoning: ChatReasoning = .off,
                 defaultReasoningEffort: GPTOSSReasoningEffort = .medium,
-                preserveThinking: Bool = false) {
+                preserveThinking: Bool = false,
+                systemPrompt: String = "") {
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
         self.temperature = temperature
@@ -43,6 +51,7 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
         self.defaultReasoning = defaultReasoning
         self.defaultReasoningEffort = defaultReasoningEffort
         self.preserveThinking = preserveThinking
+        self.systemPrompt = systemPrompt
     }
 
     static func defaults(for profileKey: String) -> AppModelSettingsProfile {

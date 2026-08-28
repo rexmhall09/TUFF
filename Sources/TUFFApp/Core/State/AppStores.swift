@@ -129,6 +129,48 @@ public final class AppConversationStore {
         persistArchive()
     }
 
+    /// Sets this chat's own instructions. Nil restores the model's default;
+    /// an empty string is a deliberate "no instructions for this chat" and is
+    /// stored as such.
+    public func setSystemPrompt(_ prompt: String?) {
+        guard let selectedConversationID,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
+        else { return }
+        conversations[index].systemPrompt = prompt
+        conversations[index].updatedAt = Date()
+        persistArchive()
+    }
+
+    /// Drops every turn from `turnID` onward, and hands back the one that was
+    /// removed so it can be sent again.
+    ///
+    /// This is what regenerate and edit-and-resend are built on: an answer is
+    /// replaced by rewinding to the message that produced it, rather than by
+    /// mutating a turn in place.
+    @discardableResult
+    public func truncate(from turnID: UUID) -> AppPersistedChatTurn? {
+        guard let selectedConversationID,
+              let index = conversations.firstIndex(where: { $0.id == selectedConversationID }),
+              let turnIndex = conversations[index].turns.firstIndex(
+                where: { $0.id == turnID }) else { return nil }
+        let removed = conversations[index].turns[turnIndex]
+        conversations[index].turns.removeSubrange(turnIndex...)
+        conversations[index].updatedAt = Date()
+        // The attachment files stay: an image is shared by every turn that
+        // carries it forward, and this chat may still hold earlier ones. The
+        // directory goes when the chat does.
+        restoreSelectedTurns()
+        outputPromptText = ""
+        outputImageAttachments = []
+        outputDocumentAttachments = []
+        outputText = ""
+        outputThinkingText = ""
+        outputTurnIsRecorded = false
+        clearPendingTurn()
+        persistArchive()
+        return removed
+    }
+
     public func renameConversation(id: UUID, title: String) {
         let cleaned = Self.cleanedTitle(title)
         guard !cleaned.isEmpty,
@@ -404,6 +446,8 @@ public final class AppSettingsStore {
     public var showPromptExamples = true
     public var sentPromptBehavior: AppSentPromptBehavior = .keep
     public var loadModelOnLaunch = false
+    /// Standing instructions for the selected model, loaded from its profile.
+    public var systemPrompt = ""
 
     public init() {}
 }

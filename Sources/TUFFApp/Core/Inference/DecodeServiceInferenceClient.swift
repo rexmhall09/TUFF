@@ -89,6 +89,10 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     generationTranscriptMailbox.reset()
                     let command = DecodeGenerationRequest(
                         prompt: request.prompt,
+                        systemPrompt: request.systemPrompt.isEmpty
+                            ? nil : request.systemPrompt,
+                        assistantPrefix: request.assistantPrefix.isEmpty
+                            ? nil : request.assistantPrefix,
                         history: request.history.map { turn in
                             DecodeChatTurn(
                                 prompt: turn.prompt,
@@ -457,7 +461,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             visionTowerMappedBytes: event.visionTowerMappedBytes,
             runtimeOptions: options,
             prefill: prefillDiagnostics(event.prefill, options: options),
-            runner: event.runner.map(runnerDiagnostics))
+            runner: event.runner.map(runnerDiagnostics),
+            droppedTurns: event.droppedTurns ?? 0)
     }
 
     private static func prefillDiagnostics(

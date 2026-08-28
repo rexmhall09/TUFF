@@ -1044,8 +1044,15 @@ public final class AppModel {
     public var conversationTurnCount: Int { conversation.count }
 
     public var outputResponsePlainText: String {
-        generationTranscriptMailbox?.completeText ?? outputText
+        // A continued run generates only the remainder, so the part that was
+        // already written is carried here. Without it the finished turn would
+        // replace a long truncated answer with its own tail.
+        activeAssistantPrefix + (generationTranscriptMailbox?.completeText ?? outputText)
     }
+
+    /// The already-written part of the answer this run is carrying on. Empty
+    /// for every ordinary run.
+    private(set) var activeAssistantPrefix = ""
 
     public var outputConversationPlainText: String {
         let response = outputResponsePlainText
@@ -2124,7 +2131,8 @@ public final class AppModel {
             rdadvisePolicy: runtimeOptions.rdadvisePolicy,
             defaultReasoning: reasoning,
             defaultReasoningEffort: reasoningEffort,
-            preserveThinking: preserveThinking)
+            preserveThinking: preserveThinking,
+            systemPrompt: modelSystemPrompt)
     }
 
     private func applySettingsProfile(_ profile: AppModelSettingsProfile) {
@@ -2146,6 +2154,7 @@ public final class AppModel {
         reasoning = profile.defaultReasoning
         reasoningEffort = profile.defaultReasoningEffort
         preserveThinking = profile.preserveThinking
+        settingsStore.systemPrompt = profile.systemPrompt
     }
 
     private func persistSettings() {
@@ -2303,9 +2312,11 @@ public final class AppModel {
         do {
             request = try makeRequest()
         } catch let appError as AppInferenceError {
+            pendingAssistantPrefix = nil
             error = appError
             return
         } catch {
+            pendingAssistantPrefix = nil
             let appError = AppInferenceError.unknown("\(error)")
             self.error = appError
             return
@@ -2335,6 +2346,8 @@ public final class AppModel {
 
         generationTranscriptMailbox?.reset()
         runIdentity &+= 1
+        activeAssistantPrefix = request.assistantPrefix
+        pendingAssistantPrefix = nil
         conversationStore.outputTurnIsRecorded = false
         // The transcript shows what was typed, not the flattened text the
         // model reads: the attached files are drawn as files beside it.
@@ -2426,6 +2439,185 @@ public final class AppModel {
         return preamble + "\n\n" + promptText
     }
 
+    // MARK: - Rewinding a conversation
+
+    /// Whether a recorded message can be put back in the composer or sent
+    /// again. Both rewind the chat, so both need it to be idle.
+    public func canRewind(to turn: AppChatTurn) -> Bool {
+        !isRunning && !loadState.isLoading && !serverStore.isBusy
+            && conversation.contains { $0.id == turn.id }
+    }
+
+    /// Drops this message and everything after it, and puts it back in the
+    /// composer to be edited.
+    ///
+    /// Its images are re-staged from the archive rather than reused in place:
+    /// the composer owns files it may delete, and the archive's copies are
+    /// read-only and shared with any earlier turn still carrying them.
+    @discardableResult
+    public func editMessage(_ turn: AppChatTurn) -> Bool {
+        guard canRewind(to: turn) else { return false }
+        guard let removed = conversationStore.truncate(from: turn.id) else { return false }
+        releaseTranscriptImages()
+        clearImages()
+        clearDocuments()
+        promptText = removed.prompt
+        documentAttachments = removed.documents
+        let urls = turn.images
+            .map(\.fileURL)
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        if !urls.isEmpty { addImages(urls) }
+        generationTranscriptMailbox?.reset()
+        diagnostics = nil
+        error = nil
+        return true
+    }
+
+    /// Sends the same message again for a different answer.
+    ///
+    /// Staging images is asynchronous, so the run is queued behind it rather
+    /// than started against a half-attached message: `submit` refuses while
+    /// `isAddingImages`, which is exactly the case this creates.
+    public func regenerate(_ turn: AppChatTurn) {
+        guard editMessage(turn) else { return }
+        resendAfterStagingCompletes()
+    }
+
+    private func resendAfterStagingCompletes() {
+        guard isAddingImages else {
+            submit()
+            return
+        }
+        Task { @MainActor [weak self] in
+            for _ in 0..<600 {
+                guard let self else { return }
+                if !self.isAddingImages { break }
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            guard let self, !self.isAddingImages else { return }
+            self.submit()
+        }
+    }
+
+    /// Whether the last answer looks cut off and could be carried on.
+    ///
+    /// Only ever offered for the newest message: continuing an older one would
+    /// mean rewriting the middle of a conversation the model has already been
+    /// shown.
+    public var canContinueLastAnswer: Bool {
+        guard !isRunning, !loadState.isLoading, isModelAvailable,
+              !hasStaleLoadedRuntime, promptText.isEmpty,
+              imageAttachments.isEmpty, documentAttachments.isEmpty,
+              supportsAssistantContinuation,
+              let last = conversation.last,
+              !last.response.isEmpty else { return false }
+        // Images send the request down the multimodal renderer, which builds
+        // its prompt as spans rather than a string and has nowhere to put a
+        // trailing prefix. Offering Continue there would silently start over.
+        guard conversation.allSatisfy(\.images.isEmpty) else { return false }
+        return lastRunWasCutOff
+    }
+
+    /// Harmony writes its answer inside a channel the prompt has not opened at
+    /// the point generation begins, so text appended after the generation
+    /// prompt would not land in the reply. Gemma and ChatML both end their
+    /// prompt exactly where the assistant's text starts.
+    private var supportsAssistantContinuation: Bool {
+        selectedDescriptor.family != .gptOss
+    }
+
+    private var lastRunWasCutOff: Bool {
+        if error == .cancelled { return true }
+        guard let reason = diagnostics?.stopReason else { return false }
+        // Ran out of room, rather than deciding it was finished.
+        return reason == .maxTokens
+    }
+
+    /// Carries on the last answer from where it stopped.
+    ///
+    /// The partial text is handed back as the start of the reply rather than
+    /// re-asked as a new question, so the model finishes the sentence it was in
+    /// rather than starting again.
+    public func continueLastAnswer() {
+        guard canContinueLastAnswer, let last = conversation.last else { return }
+        guard editMessage(last) else { return }
+        pendingAssistantPrefix = last.response
+        resendAfterStagingCompletes()
+    }
+
+    /// Text the next run should treat as the beginning of the answer. Cleared
+    /// as soon as it is spent, so it applies to one run only.
+    private var pendingAssistantPrefix: String?
+
+    // MARK: - Standing instructions
+
+    /// The model's standing instructions, used by every chat that has not
+    /// overridden them.
+    public var modelSystemPrompt: String {
+        get { settingsStore.systemPrompt }
+        set {
+            guard settingsStore.systemPrompt != newValue else { return }
+            settingsStore.systemPrompt = newValue
+            persistSettings()
+        }
+    }
+
+    /// This chat's own instructions, or nil when it follows the model's.
+    public var conversationSystemPrompt: String? {
+        conversationStore.selectedConversation?.systemPrompt
+    }
+
+    /// What the next run will actually send. A chat override wins, including an
+    /// empty one — "this chat has no instructions" is a real choice and must not
+    /// fall back to the model's.
+    public var effectiveSystemPrompt: String? {
+        let resolved = conversationSystemPrompt ?? modelSystemPrompt
+        return resolved.isEmpty ? nil : resolved
+    }
+
+    public func setConversationSystemPrompt(_ prompt: String?) {
+        conversationStore.setSystemPrompt(prompt)
+    }
+
+    /// Turns the last run had to drop to make its prompt fit, or nil when it
+    /// dropped none.
+    ///
+    /// The renderer has always computed this; until v3 it was stored on a
+    /// struct nothing read, so a long chat quietly forgot its beginning.
+    public var lastRunDroppedTurns: Int? {
+        guard let dropped = diagnostics?.droppedTurns, dropped > 0 else { return nil }
+        return dropped
+    }
+
+    /// How full the context window would be if the draft were sent now.
+    ///
+    /// Every term is an estimate. See `AppContextUsage`: the real tokenizer
+    /// lives in the decode service, and asking it would put the figure on
+    /// screen only after the moment it was useful.
+    public var contextUsage: AppContextUsage {
+        let family = selectedDescriptor.family
+        var history = 0
+        for turn in conversation {
+            history += AppContextUsage.tokens(inText: turn.modelPrompt)
+            history += AppContextUsage.tokens(inText: turn.response)
+            history += AppContextUsage.tokens(
+                forImages: turn.images.count, family: family)
+            history += 2 * AppContextUsage.overheadTokensPerMessage
+        }
+        var draft = AppContextUsage.tokens(inText: composedPromptText)
+        draft += AppContextUsage.tokens(
+            forImages: imageAttachments.count, family: family)
+        if let systemPrompt = effectiveSystemPrompt {
+            draft += AppContextUsage.tokens(inText: systemPrompt)
+                + AppContextUsage.overheadTokensPerMessage
+        }
+        if draft > 0 { draft += AppContextUsage.overheadTokensPerMessage }
+        return AppContextUsage(
+            historyTokens: history,
+            draftTokens: draft,
+            maxTokens: effectiveMaxContextTokens)
+    }
+
     /// Completed turns as the inference client should see them: documents
     /// flattened back into the prompt, and images kept on the newest turns that
     /// still fit the image budget.
@@ -2471,6 +2663,8 @@ public final class AppModel {
             // the model's view of the message is built. Everything above this
             // line keeps them as attachments.
             prompt: composedPromptText,
+            systemPrompt: effectiveSystemPrompt ?? "",
+            assistantPrefix: pendingAssistantPrefix ?? "",
             history: requestHistory(
                 imageBudget: max(0, maximumImageAttachments - imageAttachments.count)),
             imageAttachments: imageAttachments,

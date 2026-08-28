@@ -122,7 +122,19 @@ struct OutputPaneView: View {
             images: turn.images,
             documents: turn.documents,
             modelName: model.modelShortName(forProfileKey: turn.modelID),
-            renderer: Self.sharedRenderer)
+            renderer: Self.sharedRenderer,
+            actions: actions(for: turn))
+    }
+
+    /// Rewind controls, offered only while the chat is idle enough to rewind.
+    private func actions(for turn: AppChatTurn) -> TranscriptMessageView.MessageActions? {
+        guard model.canRewind(to: turn) else { return nil }
+        let isNewest = model.conversation.last?.id == turn.id
+        return TranscriptMessageView.MessageActions(
+            edit: { model.editMessage(turn) },
+            regenerate: { model.regenerate(turn) },
+            carryOn: isNewest && model.canContinueLastAnswer
+                ? { model.continueLastAnswer() } : nil)
     }
 
     private var liveMessage: some View {

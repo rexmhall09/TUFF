@@ -100,6 +100,12 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     /// Prior turns, oldest first. Decoded as empty when absent, so an older
     /// client and a newer service still agree.
     public var history: [DecodeChatTurn]
+    /// Standing instructions rendered ahead of the conversation. Absent on a
+    /// request from a client that predates the field.
+    public var systemPrompt: String?
+    /// Text the model continues rather than a fresh reply. Absent on a request
+    /// from a client that predates the field.
+    public var assistantPrefix: String?
     public var structuredMessages: [GFTokenizer.Message]?
     public var multimodalMessages: [MultimodalMessage]?
     public var tools: [GFTokenizer.FunctionDefinition]
@@ -128,6 +134,10 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         prompt = try container.decode(String.self, forKey: .prompt)
+        systemPrompt = try container.decodeIfPresent(
+            String.self, forKey: .systemPrompt)
+        assistantPrefix = try container.decodeIfPresent(
+            String.self, forKey: .assistantPrefix)
         history = try container.decodeIfPresent(
             [DecodeChatTurn].self, forKey: .history) ?? []
         structuredMessages = try container.decodeIfPresent(
@@ -160,7 +170,9 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         generationID = try container.decode(UUID.self, forKey: .generationID)
     }
 
-    public init(prompt: String, history: [DecodeChatTurn] = [],
+    public init(prompt: String, systemPrompt: String? = nil,
+                assistantPrefix: String? = nil,
+                history: [DecodeChatTurn] = [],
                 structuredMessages: [GFTokenizer.Message]? = nil,
                 multimodalMessages: [MultimodalMessage]? = nil,
                 tools: [GFTokenizer.FunctionDefinition] = [],
@@ -177,6 +189,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 generationID: UUID = UUID()) {
         self.prompt = prompt
+        self.systemPrompt = systemPrompt
+        self.assistantPrefix = assistantPrefix
         self.history = history
         self.structuredMessages = structuredMessages
         self.multimodalMessages = multimodalMessages
@@ -295,6 +309,9 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var visionTowerMappedBytes: UInt64?
     public var prefill: DecodePrefillDiagnostics?
     public var runner: DecodeRunnerDiagnostics?
+    /// Turns the renderer dropped to make the prompt fit. Absent on events from
+    /// a service that predates the field.
+    public var droppedTurns: Int?
 
     public init(kind: DecodeServiceEventKind, generationID: UUID,
                 sequence: UInt64 = 0, textDelta: String = "",
@@ -309,7 +326,8 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 currentMemoryBytes: UInt64? = nil, peakMemoryBytes: UInt64? = nil,
                 visionTowerMappedBytes: UInt64? = nil,
                 prefill: DecodePrefillDiagnostics? = nil,
-                runner: DecodeRunnerDiagnostics? = nil) {
+                runner: DecodeRunnerDiagnostics? = nil,
+                droppedTurns: Int? = nil) {
         self.kind = kind
         self.generationID = generationID
         self.sequence = sequence
@@ -331,6 +349,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.visionTowerMappedBytes = visionTowerMappedBytes
         self.prefill = prefill
         self.runner = runner
+        self.droppedTurns = droppedTurns
     }
 }
 

@@ -56,6 +56,11 @@ public struct AppDiagnostics: Equatable, Sendable {
     public var runtimeOptions: AppRuntimeOptions
     public var prefill: PrefillExecutionDiagnostics?
     public var runner: AppRunnerDiagnostics?
+    /// Turns dropped from the start of the conversation to make the prompt fit.
+    ///
+    /// The renderer has always computed this and nothing ever read it, so a long
+    /// chat silently forgot its beginning. Carried here so the app can say so.
+    public var droppedTurns: Int = 0
 
     public var requestStartTimeToFirstTokenSeconds: Double? {
         guard let prefillSeconds, let timeToFirstTokenSeconds else { return nil }
@@ -85,7 +90,8 @@ public struct AppDiagnostics: Equatable, Sendable {
                 visionTowerMappedBytes: UInt64? = nil,
                 runtimeOptions: AppRuntimeOptions,
                 prefill: PrefillExecutionDiagnostics? = nil,
-                runner: AppRunnerDiagnostics? = nil) {
+                runner: AppRunnerDiagnostics? = nil,
+                droppedTurns: Int = 0) {
         self.generatedTokens = generatedTokens
         self.stopReason = stopReason
         self.promptTokenCount = promptTokenCount
@@ -98,6 +104,7 @@ public struct AppDiagnostics: Equatable, Sendable {
         self.runtimeOptions = runtimeOptions
         self.prefill = prefill
         self.runner = runner
+        self.droppedTurns = droppedTurns
     }
 }
 

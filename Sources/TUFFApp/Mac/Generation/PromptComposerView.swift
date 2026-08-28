@@ -37,6 +37,7 @@ struct PromptComposerView: View {
             if let notice = attachmentNotice { attachmentNoticeText(notice) }
             editor
             footer
+            if let contextNotice { contextNoticeText(contextNotice) }
         }
         .fileImporter(
             isPresented: $showingPicker,
@@ -126,6 +127,38 @@ struct PromptComposerView: View {
             PromptComposerMetrics.maximumEditorHeight)
     }
 
+    /// What the context meter has to say, and nothing when it has nothing to
+    /// say. The limit used to be invisible until it was hit: the renderer
+    /// dropped the oldest turns silently, and a file large enough to fill the
+    /// window on its own gave no warning before it was sent.
+    private var contextNotice: (text: String, isError: Bool)? {
+        let usage = model.contextUsage
+        if usage.draftAloneOverflows {
+            return ("This message alone is about \(MetricFormat.tokens(usage.draftTokens)) "
+                + "of the \(MetricFormat.tokens(usage.maxTokens)) this model is "
+                + "loaded with. Shorten it, or raise Context in Settings and "
+                + "reload.", true)
+        }
+        if usage.willDropOldestTurns {
+            return ("The context is full, so the oldest messages will be left "
+                + "out of what the model reads.", false)
+        }
+        if let dropped = model.lastRunDroppedTurns, dropped > 0 {
+            return ("The last answer left out the \(dropped) oldest "
+                + "message\(dropped == 1 ? "" : "s") to fit the context.", false)
+        }
+        return nil
+    }
+
+    private func contextNoticeText(_ notice: (text: String, isError: Bool)) -> some View {
+        Label(notice.text, systemImage: notice.isError
+              ? "exclamationmark.triangle" : "info.circle")
+            .font(.caption)
+            .foregroundStyle(notice.isError ? AnyShapeStyle(.red)
+                             : AnyShapeStyle(.secondary))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var footer: some View {
         HStack(spacing: 8) {
             attachMenu
@@ -133,6 +166,7 @@ struct PromptComposerView: View {
             // than in a separate strip above the composer.
             ChatControlsView(model: model)
             Spacer(minLength: 8)
+            contextMeter
             clearAction
             GenerateControl(model: model)
         }
@@ -189,6 +223,33 @@ struct PromptComposerView: View {
         .disabled(model.isRunning || !(canAddImages || canAddDocuments))
         .help("Attach an image or a file")
         .accessibilityLabel("Add an attachment")
+    }
+
+    /// How full the window is, shown once it is worth knowing rather than all
+    /// the time. Every figure is an estimate — the real tokenizer lives in the
+    /// decode service — so the label says so on hover rather than implying a
+    /// precision it does not have.
+    @ViewBuilder
+    private var contextMeter: some View {
+        let usage = model.contextUsage
+        if usage.isTight {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(usage.willDropOldestTurns
+                          ? AnyShapeStyle(.orange)
+                          : AnyShapeStyle(TUFFMacTheme.accentColor))
+                    .frame(width: 6, height: 6)
+                Text("\(MetricFormat.tokens(usage.estimatedTokens)) / "
+                     + MetricFormat.tokens(usage.maxTokens))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .help("About \(usage.estimatedTokens) of \(usage.maxTokens) context "
+                  + "tokens. An estimate: the exact count comes from the model's "
+                  + "own tokenizer when the message is sent.")
+            .accessibilityLabel("Context used")
+            .accessibilityValue("about \(usage.estimatedTokens) of \(usage.maxTokens) tokens")
+        }
     }
 
     private var attachButtonBackground: some View {

@@ -21,6 +21,17 @@ struct TranscriptMessageView: View {
     let renderer: ResponseMarkdownRenderer
     /// Nil for a finished message. Present while this message is the live one.
     var live: LiveResponse?
+    /// What this message can be rewound to. Absent while a run is in flight,
+    /// and on the live message, which has nothing to rewind yet.
+    var actions: MessageActions?
+
+    struct MessageActions {
+        let edit: () -> Void
+        let regenerate: () -> Void
+        /// Present only on the newest message, and only when the answer looks
+        /// cut off rather than finished.
+        let carryOn: (() -> Void)?
+    }
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var thinkingExpanded = false
@@ -41,7 +52,13 @@ struct TranscriptMessageView: View {
             if hasAssistantMessage { assistantMessage }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // The controls appear on the message under the pointer. Showing them on
+        // every message at once turned a conversation into a wall of buttons.
+        .onHover { isHovered = $0 }
+        .animation(.smooth(duration: 0.12), value: isHovered)
     }
+
+    @State private var isHovered = false
 
     private var hasUserMessage: Bool {
         !prompt.isEmpty || !images.isEmpty || !documents.isEmpty
@@ -53,7 +70,19 @@ struct TranscriptMessageView: View {
 
     private var userMessage: some View {
         VStack(alignment: .leading, spacing: 8) {
-            MessageRoleLabel(text: "You")
+            HStack(spacing: 8) {
+                MessageRoleLabel(text: "You")
+                if let actions {
+                    Button("Edit", systemImage: "pencil", action: actions.edit)
+                        .font(.caption)
+                        .labelStyle(.titleAndIcon)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("Edit this message and send it again")
+                        .opacity(isHovered ? 1 : 0)
+                }
+                Spacer(minLength: 0)
+            }
             MessageAttachmentsView(images: images, documents: documents)
             if !prompt.isEmpty {
                 // Rendered the same way an answer is: a prompt with a list, a
@@ -117,6 +146,26 @@ struct TranscriptMessageView: View {
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
             .help("Copy this answer")
+
+            if let actions {
+                Button("Regenerate", systemImage: "arrow.clockwise",
+                       action: actions.regenerate)
+                    .font(.caption)
+                    .labelStyle(.titleAndIcon)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Send this message again for a different answer")
+                    .opacity(isHovered ? 1 : 0)
+
+                if let carryOn = actions.carryOn {
+                    Button("Continue", systemImage: "text.append", action: carryOn)
+                        .font(.caption)
+                        .labelStyle(.titleAndIcon)
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(TUFFMacTheme.accentColor)
+                        .help("Carry on from where this answer stopped")
+                }
+            }
             Spacer(minLength: 0)
         }
         .task(id: copied) {

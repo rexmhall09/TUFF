@@ -49,6 +49,57 @@ struct ConversationHistoryTests {
         }
     }
 
+    /// Standing instructions lead the conversation. Every template this
+    /// renderer drives takes a system message first and only first.
+    @Test("A system prompt is rendered ahead of the conversation")
+    func rendersTheSystemPrompt() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        var command = request(prompt: "Hello.", history: [])
+        command.systemPrompt = "Answer only in French."
+
+        let rendered = try RealInferenceSession.renderConversation(
+            request: command, tokenizer: tokenizer, maxContext: 4096)
+        let text = tokenizer.decode(rendered.tokens, skipSpecialTokens: false)
+
+        let instruction = try #require(text.range(of: "Answer only in French."))
+        let prompt = try #require(text.range(of: "Hello."))
+        #expect(instruction.upperBound <= prompt.lowerBound,
+                "the instructions have to precede the conversation")
+    }
+
+    /// Continue hands the model the part of the answer it already wrote, after
+    /// the generation prompt, so decoding carries it on instead of restarting.
+    @Test("An assistant prefix is appended after the generation prompt")
+    func appendsTheAssistantPrefix() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        var command = request(prompt: "Count to five.", history: [])
+        command.assistantPrefix = "One, two, three,"
+
+        let rendered = try RealInferenceSession.renderConversation(
+            request: command, tokenizer: tokenizer, maxContext: 4096)
+        let text = tokenizer.decode(rendered.tokens, skipSpecialTokens: false)
+
+        #expect(text.hasSuffix("One, two, three,"),
+                "the partial answer must be the last thing the model sees, or it starts over instead of continuing")
+        let question = try #require(text.range(of: "Count to five."))
+        let partial = try #require(text.range(of: "One, two, three,"))
+        #expect(question.upperBound <= partial.lowerBound)
+    }
+
+    /// An ordinary run must be untouched by the feature.
+    @Test("No prefix leaves the prompt exactly as it was")
+    func anEmptyPrefixChangesNothing() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let plain = try RealInferenceSession.renderConversation(
+            request: request(prompt: "Hello.", history: []),
+            tokenizer: tokenizer, maxContext: 4096)
+        var command = request(prompt: "Hello.", history: [])
+        command.assistantPrefix = ""
+        let empty = try RealInferenceSession.renderConversation(
+            request: command, tokenizer: tokenizer, maxContext: 4096)
+        #expect(plain.tokens == empty.tokens)
+    }
+
     @Test("An empty history renders exactly the single-turn prompt")
     func emptyHistoryMatchesSingleTurn() async throws {
         let tokenizer = try await GFTokenizer.load()

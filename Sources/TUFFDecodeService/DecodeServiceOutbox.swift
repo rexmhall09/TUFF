@@ -184,7 +184,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             peakMemoryBytes: memorySampler.peakBytes,
             visionTowerMappedBytes: diagnostics?.visionTowerMappedBytes,
             prefill: diagnostics?.prefill.map(Self.prefillDiagnostics),
-            runner: diagnostics?.runner.map(Self.runnerDiagnostics))
+            runner: diagnostics?.runner.map(Self.runnerDiagnostics),
+            droppedTurns: diagnostics?.droppedTurns)
     }
 
     private static func prefillDiagnostics(_ value: PrefillExecutionDiagnostics)

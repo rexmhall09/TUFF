@@ -138,6 +138,8 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                     let options = try appRuntimeOptions(request.runtimeOptions)
                     let generation = AppGenerationRequest(
                         modelDirectory: modelDirectory, prompt: request.prompt,
+                        systemPrompt: request.systemPrompt ?? "",
+                        assistantPrefix: request.assistantPrefix ?? "",
                         history: request.history.map { turn in
                             AppChatTurn(
                                 prompt: turn.prompt,

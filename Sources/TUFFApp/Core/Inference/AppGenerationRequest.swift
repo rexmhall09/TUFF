@@ -4,6 +4,13 @@ import TUFFEngine
 public struct AppGenerationRequest: Equatable, Sendable {
     public var modelDirectory: URL
     public var prompt: String
+    /// Standing instructions rendered as a system message ahead of the whole
+    /// conversation. Empty means none.
+    public var systemPrompt: String
+    /// Text the model should treat as the beginning of its own reply, appended
+    /// after the generation prompt so decoding carries it on. Empty means a
+    /// fresh answer. Used by Continue.
+    public var assistantPrefix: String
     /// Completed turns preceding `prompt`, oldest first. Empty is the
     /// single-turn behavior this type had before.
     public var history: [AppChatTurn]
@@ -29,6 +36,8 @@ public struct AppGenerationRequest: Equatable, Sendable {
 
     public init(modelDirectory: URL,
                 prompt: String,
+                systemPrompt: String = "",
+                assistantPrefix: String = "",
                 history: [AppChatTurn] = [],
                 structuredMessages: [GFTokenizer.Message]? = nil,
                 multimodalMessages: [MultimodalMessage]? = nil,
@@ -49,6 +58,8 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 runtimeOptions: AppRuntimeOptions = AppRuntimeOptions()) {
         self.modelDirectory = modelDirectory
         self.prompt = prompt
+        self.systemPrompt = systemPrompt
+        self.assistantPrefix = assistantPrefix
         self.history = history
         self.structuredMessages = structuredMessages
         self.multimodalMessages = multimodalMessages

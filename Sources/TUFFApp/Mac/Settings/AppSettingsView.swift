@@ -121,6 +121,7 @@ struct AppSettingsView: View {
             if advanced {
                 advancedProfileSettings
             } else {
+                instructionsSettings
                 memorySettings
                 reasoningSettings
                 samplingSettings
@@ -172,6 +173,32 @@ struct AppSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
+        }
+    }
+
+    /// Standing instructions for this model. A chat can override them, so this
+    /// is the default rather than the last word.
+    private var instructionsSettings: some View {
+        Section("Instructions") {
+            TextEditor(text: profileBinding(\.systemPrompt))
+                .font(.body)
+                .frame(minHeight: 96)
+                .overlay(alignment: .topLeading) {
+                    if selectedProfile.systemPrompt.isEmpty {
+                        Text("Standing instructions sent ahead of every chat "
+                             + "with this model.")
+                            .font(.body)
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 5)
+                            .padding(.top, 8)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .accessibilityLabel("Model instructions")
+            Text("Sent as a system message before the conversation. A single "
+                 + "chat can override this from the Chat menu.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

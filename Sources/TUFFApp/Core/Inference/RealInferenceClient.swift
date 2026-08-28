@@ -383,7 +383,14 @@ actor RealInferenceSession {
             && request.preserveThinking
         func encode(_ turns: ArraySlice<AppChatTurn>) throws -> [Int32] {
             var messages: [GFTokenizer.Message] = []
-            messages.reserveCapacity(turns.count * 2 + 1)
+            messages.reserveCapacity(turns.count * 2 + 2)
+            // Standing instructions lead the conversation. Every template this
+            // renderer drives accepts a system message first and only first,
+            // which is why it goes here rather than folded into the prompt.
+            if !request.systemPrompt.isEmpty {
+                messages.append(GFTokenizer.Message(
+                    role: .system, content: request.systemPrompt))
+            }
             for turn in turns {
                 messages.append(GFTokenizer.Message(role: .user, content: turn.prompt))
                 messages.append(
@@ -400,13 +407,18 @@ actor RealInferenceSession {
                     reasoningEffort: request.reasoningEffort ?? .medium,
                     currentDate: HarmonyPromptRenderer.calendarDate())
             }
+            // The generation prompt ends exactly where the assistant's text
+            // begins, so a partial answer appended here is continued rather
+            // than restarted. Harmony is excluded upstream: it opens a channel
+            // after that point, and text placed here would not land in the
+            // reply.
+            let rendered = try tokenizer.applyChatTemplate(
+                messages,
+                modelVariant: modelVariant,
+                reasoning: request.reasoning,
+                preserveThinking: preservesChatMLThinking)
             return tokenizer.encode(
-                try tokenizer.applyChatTemplate(
-                    messages,
-                    modelVariant: modelVariant,
-                    reasoning: request.reasoning,
-                    preserveThinking: preservesChatMLThinking),
-                addBOS: false)
+                rendered + request.assistantPrefix, addBOS: false)
         }
 
         var dropped = 0
@@ -486,7 +498,12 @@ actor RealInferenceSession {
 
         func render(_ turns: ArraySlice<AppChatTurn>) throws -> MultimodalPrefillInput {
             var messages: [MultimodalMessage] = []
-            messages.reserveCapacity(turns.count * 2 + 1)
+            messages.reserveCapacity(turns.count * 2 + 2)
+            // Standing instructions lead the conversation, as in the text path.
+            if !request.systemPrompt.isEmpty {
+                messages.append(MultimodalMessage(
+                    role: .system, content: [.text(request.systemPrompt)]))
+            }
             // The renderer refuses features nothing refers to, and dropping a
             // turn to fit the context drops its images with it — so the map is
             // rebuilt for each attempt rather than handed the whole set once.
@@ -821,7 +838,8 @@ actor RealInferenceSession {
             visionTowerMappedBytes: visionRuntime.map { UInt64($0.retainedWeightBytes) },
             runtimeOptions: request.runtimeOptions,
             prefill: prefill,
-            runner: runnerDiagnostics(progress: progress, generated: generated))
+            runner: runnerDiagnostics(progress: progress, generated: generated),
+            droppedTurns: progress.conversationTrim?.droppedTurns ?? 0)
     }
 
     /// Per-token buckets as diffs of the runner's cumulative counters from the
