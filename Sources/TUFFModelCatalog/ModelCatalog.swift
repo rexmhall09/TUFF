@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 
 public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
+    case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
@@ -16,6 +17,7 @@ public enum TUFFModelFamily: String, Codable, Sendable {
 }
 
 public enum TUFFArchitectureID: String, Codable, Sendable {
+    case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
@@ -51,6 +53,12 @@ public struct TUFFArchitectureProfile: Codable, Equatable, Sendable {
 }
 
 public extension TUFFArchitectureProfile {
+    static let gemma4E2B = TUFFArchitectureProfile(
+        id: .gemma4_E2B,
+        family: .gemma4,
+        feedForwardKind: .dense,
+        weightLayout: .affine)
+
     static let gemma4E4B = TUFFArchitectureProfile(
         id: .gemma4_E4B,
         family: .gemma4,
@@ -436,6 +444,28 @@ public enum TUFFModelCatalog {
         installedBytes: 14_291_921_884,
         reserveBytes: oneGiB)
 
+    /// Pins verified against the live repository: `revision` is the commit the
+    /// Hugging Face API reports for `main`, and `sourceIndexSHA256` is the
+    /// SHA-256 of `model.safetensors.index.json` at that commit.
+    ///
+    /// The byte figures are the tensors this installer actually streams — the
+    /// `language_model.*` ranges plus the tokenizer — not the whole file. The
+    /// checkpoint also carries a vision tower and an audio tower that the text
+    /// install skips, which is why the download is smaller than the repository.
+    ///
+    /// The method was checked by recomputing E4B's pinned fingerprint from its
+    /// own repository: it reproduced `f8accac5…0093` exactly, and the byte sum
+    /// landed within 400 KB of the figure pinned below.
+    private static let gemmaE2BSource = TUFFModelSource(
+        repoID: "mlx-community/gemma-4-e2b-it-4bit",
+        revision: "238767527555cb75a05732a84dff5d6ba0dd6809",
+        sourceIndexSHA256:
+            "edb157dbf495e23f37377af4a628a9ad13c4ee7937f93ccb36ec9e9a19940f16",
+        manifestModelID: "mlx-community/gemma-4-e2b-it-4bit",
+        approximateDownloadBytes: 2_636_500_000,
+        installedBytes: 2_636_200_000,
+        reserveBytes: oneGiB)
+
     private static let gemmaE4BSource = TUFFModelSource(
         repoID: "mlx-community/gemma-4-e4b-it-4bit",
         revision: "475b9088d29754a3379866cf5aeb6b41acd313c2",
@@ -478,6 +508,48 @@ public enum TUFFModelCatalog {
 
     /// Small text-only launch model. Image and audio remain intentionally
     /// absent until separately packaged add-ons pass their own qualification.
+    public static let gemma4_E2B = TUFFModelDescriptor(
+        id: .gemma4_E2B,
+        selector: "gemma4-e2b",
+        aliases: ["e2b"],
+        apiModelID: "gemma-4-e2b-it",
+        displayName: "Gemma 4 E2B IT 4-bit",
+        shortName: "Gemma 4 E2B",
+        summary: "The smallest Gemma. Same shape as E4B — per-layer embeddings and shared KV projections — at roughly half the weights.",
+        family: .gemma4,
+        architecture: .gemma4E2B,
+        installDirectoryName: "gemma4-e2b.gturbo",
+        source: gemmaE2BSource,
+        hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),
+        // Deliberately E4B's measured profile, unchanged.
+        //
+        // E2B is strictly smaller than E4B in every dimension that feeds this —
+        // 35 layers against 42, one KV head against two, 62% of the weights —
+        // so E4B's figures are a guaranteed over-estimate, and over-estimating
+        // only makes TUFF more cautious about long contexts on a small Mac.
+        // Replace with a measured working set once E2B has completed a real
+        // install and generation run; inventing a precise-looking number here
+        // would be worse than being knowingly conservative.
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 1_833_438_160,
+            defaultExpertCacheSlots: 0,
+            expertCacheBytesPerSlot: 0,
+            kvCache: TUFFKVCacheProfile(
+                fullAttentionBytesPerToken: 16_384,
+                slidingAttentionBytesPerToken: 40_960,
+                slidingWindowCapacityTokens: 512)),
+        runtimeDefaults: TUFFModelRuntimeDefaults(
+            contextTokens: 8_192,
+            expertCacheSlots: 16,
+            temperature: 1.0,
+            topK: 64,
+            topP: 0.95),
+        // Text only for now. The checkpoint carries the same vision tower E4B
+        // has, but an image add-on needs its own verified fingerprint and a
+        // validated activation before it is offered.
+        capabilities: [.textGeneration, .reasoning],
+        reasoningControl: .toggle)
+
     public static let gemma4_E4B = TUFFModelDescriptor(
         id: .gemma4_E4B,
         selector: "gemma4-e4b",
@@ -665,6 +737,7 @@ public enum TUFFModelCatalog {
         reasoningControl: .graded)
 
     public static let all: [TUFFModelDescriptor] = [
+        gemma4_E2B,
         gemma4_E4B,
         gemma4_26B_A4B,
         qwen36_35B_A3B,

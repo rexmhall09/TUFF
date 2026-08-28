@@ -4,8 +4,10 @@ import Testing
 @Suite struct ModelCatalogTests {
     @Test func currentCatalogOrderAndSelectorsAreStable() {
         #expect(TUFFModelCatalog.all.map(\.selector) == [
-            "gemma4-e4b", "gemma4", "qwen36", "gpt-oss-20b", "gpt-oss-120b",
+            "gemma4-e2b", "gemma4-e4b", "gemma4", "qwen36",
+            "gpt-oss-20b", "gpt-oss-120b",
         ])
+        #expect(TUFFModelCatalog.model(selector: "e2b")?.id == .gemma4_E2B)
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
         #expect(TUFFModelCatalog.model(selector: "gemma4")?.id == .gemma4_26B_A4B)
         #expect(TUFFModelCatalog.model(selector: "e4b")?.id == .gemma4_E4B)

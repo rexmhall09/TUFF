@@ -12,6 +12,7 @@ public enum ModelFamily: String, Sendable, Equatable {
 }
 
 public enum ModelVariant: String, Sendable, Equatable {
+    case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
@@ -295,6 +296,50 @@ public struct ArchConfig: Sendable, Equatable {
         variant: .gemma4_E4B,
         feedForwardKind: .dense)
 
+    /// Gemma 4 E2B: the same architecture as E4B at a smaller scale — per-layer
+    /// embeddings, shared KV projections, one KV head, 35 layers.
+    ///
+    /// Every field is transcribed from the pinned checkpoint's `config.json`.
+    /// The mapping was validated by transcribing E4B's config the same way and
+    /// checking it against the `gemma4_E4B` entry below, which the runtime
+    /// already generates correct output from: every field matched, the layer
+    /// mask included.
+    public static let gemma4_E2B = ArchConfig(
+        hiddenSize: 1536,
+        intermediateSize: 6144,
+        moeIntermediateSize: 0,
+        numHeads: 8,
+        numKVHeads: 1,
+        numFullKVHeads: 1,
+        headDim: 256,
+        fullHeadDim: 512,
+        vocabSize: 262_144,
+        slidingWindow: 512,
+        finalLogitSoftcap: 30.0,
+        ropeTheta: 10_000.0,
+        fullRopeTheta: 1_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 35,
+        numExperts: 0,
+        topKExperts: 0,
+        tieWordEmbeddings: true,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.gemma4E2BLayerMask(),
+        hiddenActivation: "gelu_pytorch_tanh",
+        hiddenSizePerLayerInput: 256,
+        vocabSizePerLayerInput: 262_144,
+        numKVSharedLayers: 20,
+        variant: .gemma4_E2B,
+        feedForwardKind: .dense)
+
+    private static func gemma4E2BLayerMask() -> [UInt8] {
+        // `layer_types` in the checkpoint marks full attention every fifth
+        // layer: indices 4, 9, 14, 19, 24, 29, 34.
+        var mask = [UInt8](repeating: 0, count: 35)
+        for i in stride(from: 4, to: 35, by: 5) { mask[i] = 1 }
+        return mask
+    }
+
     private static func gemma4LayerMask() -> [UInt8] {
         var mask = [UInt8](repeating: 0, count: 30)
         for i in stride(from: 5, to: 30, by: 6) { mask[i] = 1 }
@@ -450,6 +495,7 @@ public struct ArchConfig: Sendable, Equatable {
     /// resolver. Family alone is intentionally not a registry key because
     /// multiple checkpoints can share prompt behavior without sharing shapes.
     public static let registeredArchitectures: [ModelVariant: ArchConfig] = [
+        .gemma4_E2B: .gemma4_E2B,
         .gemma4_E4B: .gemma4_E4B,
         .gemma4_26B_A4B: .gemma4_26B_A4B,
         .qwen36_35B_A3B: .qwen36_35B_A3B,

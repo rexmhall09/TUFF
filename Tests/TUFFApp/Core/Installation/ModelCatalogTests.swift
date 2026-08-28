@@ -63,6 +63,7 @@ import TUFFRepackCore
 
     @Test func appCatalogKeepsStableRegistryIdentities() {
         #expect(AppModelInstallDescriptor.catalog.map(\.settingsProfileKey) == [
+            "gemma4-e2b",
             "gemma4-e4b",
             "gemma4-26b-a4b",
             "qwen36-35b-a3b",
@@ -70,6 +71,7 @@ import TUFFRepackCore
             "gpt-oss-120b",
         ])
         #expect(AppModelInstallDescriptor.catalog.map(\.installDirectoryName) == [
+            "gemma4-e2b.gturbo",
             "gemma4-e4b.gturbo",
             "gemma4.gturbo",
             "qwen36.gturbo",
