@@ -1,0 +1,506 @@
+import Foundation
+import Testing
+@testable import TUFFAppCore
+
+@Suite struct AppModelTests {
+    @MainActor
+    @Test func runningServerPinsTheSelectedModel() throws {
+        let model = AppModel()
+        let originalID = model.selectedModelID
+        let other = try #require(model.installs.first { $0.id != originalID })
+        let record = AppConversationRecord(
+            title: "Other model",
+            modelID: other.descriptor.settingsProfileKey)
+
+        model.serverStore.status = .running
+        #expect(!model.canSelectModel(other))
+        model.selectModel(other)
+        model.selectConversation(record)
+        #expect(model.selectedModelID == originalID)
+    }
+
+    @MainActor
+    @Test func defaultsUseSampledRequest() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+
+        let request = try model.makeRequest()
+        #expect(request.temperature == 0.2)
+        #expect(request.topK == 64)
+        #expect(request.topP == 0.95)
+        #expect(request.maxNewTokens == 8_192,
+                "the reply limit follows the default context, 8K since 2026-08-17")
+        #expect(request.repetitionPenalty == 1)
+        #expect(!request.isPureGreedy)
+        #expect(request.runtimeOptions.expertCacheSlots == 16)
+        #expect(request.runtimeOptions.expertCachePolicy == .lfu)
+        #expect(request.runtimeOptions.rdadvisePolicy == .off)
+        #expect(request.runtimeOptions.prefillEnabled)
+    }
+
+    @MainActor
+    @Test func binaryThinkingControlReachesGenerationRequest() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "think"
+        model.reasoning = .on
+
+        #expect(try model.makeRequest().reasoning == .on)
+        #expect(try model.makeRequest().reasoningEffort == nil)
+    }
+
+    @MainActor
+    @Test func thinkingHistoryPreservationOnlyReachesQwenRequests() throws {
+        let qwen = AppModel(
+            modelDirectory: FileManager.default.temporaryDirectory,
+            installer: MockModelInstallerClient(descriptor: .qwen36))
+        qwen.promptText = "continue"
+        qwen.preserveThinking = true
+        #expect(try qwen.makeRequest().preserveThinking)
+
+        let gemma = AppModel()
+        gemma.modelPathText = FileManager.default.temporaryDirectory.path
+        gemma.promptText = "continue"
+        gemma.preserveThinking = true
+        #expect(try !gemma.makeRequest().preserveThinking)
+    }
+
+    @MainActor
+    @Test func thinkingEventsNeverJoinVisibleAnswer() {
+        let model = AppModel()
+        model.apply(.thinking(AppTokenEvent(
+            index: 0,
+            textDelta: "reasoning",
+            elapsedDecodeSeconds: 0.1)))
+
+        #expect(model.outputThinkingText == "reasoning")
+        #expect(model.outputText.isEmpty)
+    }
+
+    @MainActor
+    @Test func runDisabledWhenPromptEmpty() {
+        let model = AppModel()
+        model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
+        model.promptText = "   "
+        #expect(!model.canRun)
+    }
+
+    @MainActor
+    @Test func runDisabledUntilModelReady() {
+        let model = AppModel()
+        model.promptText = "go"
+        #expect(!model.canRun)
+    }
+
+    @MainActor
+    @Test func disablingTopKNeutralizesBothTruncationControls() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        model.topKEnabled = false
+        model.topPEnabled = true
+
+        let request = try model.makeRequest()
+        #expect(request.topK == nil)
+        #expect(request.topP == nil)
+    }
+
+    @MainActor
+    @Test func prefillToggleSurvivesRequestCreation() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+
+        model.runtimeOptions.prefillEnabled = false
+        #expect(try !model.makeRequest().runtimeOptions.prefillEnabled)
+
+        model.runtimeOptions.prefillEnabled = true
+        #expect(try model.makeRequest().runtimeOptions.prefillEnabled)
+    }
+
+    @MainActor
+    @Test func adaptiveRDAdvicePolicySurvivesRequestCreation() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        model.runtimeOptions.rdadvisePolicy = .adaptive
+
+        let request = try model.makeRequest()
+        #expect(request.runtimeOptions.rdadvisePolicy == .adaptive)
+    }
+
+    @MainActor
+    @Test func loadAffectingRuntimeChangeMarksReadySessionStale() {
+        let model = AppModel(client: MockLifecycleInferenceClient())
+        let directory = FileManager.default.temporaryDirectory
+        model.modelPathText = directory.path
+        model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
+
+        #expect(!model.hasStaleLoadedRuntime)
+        model.runtimeOptions.rdadvisePolicy = .bounded
+        #expect(model.hasStaleLoadedRuntime)
+    }
+
+    @MainActor
+    @Test func contextChangeMarksReadySessionStale() {
+        let model = AppModel(client: MockLifecycleInferenceClient())
+        let directory = FileManager.default.temporaryDirectory
+        model.modelPathText = directory.path
+        model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
+
+        #expect(!model.hasStaleLoadedRuntime)
+        // Away from the default, which is 8K: setting the value it already has
+        // would prove nothing.
+        model.maxContextTokens = AppContextLengthOption.sixteenK.tokens
+        #expect(model.hasStaleLoadedRuntime)
+    }
+
+    @MainActor
+    @Test func appResponseLimitUsesSelectedContext() throws {
+        let model = AppModel()
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.promptText = "go"
+        model.maxContextTokens = AppContextLengthOption.sixtyFourK.tokens
+
+        #expect(try model.makeRequest().maxNewTokens == AppContextLengthOption.sixtyFourK.tokens)
+    }
+
+    @MainActor
+    @Test func requestTimePrefillChangeDoesNotMarkReadySessionStale() {
+        let model = AppModel(client: MockLifecycleInferenceClient())
+        let directory = FileManager.default.temporaryDirectory
+        model.modelPathText = directory.path
+        model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
+
+        model.runtimeOptions.prefillEnabled = false
+
+        #expect(!model.hasStaleLoadedRuntime)
+    }
+
+    @MainActor
+    @Test func newlineShortcutDoesNotMarkReadySessionStale() {
+        let model = AppModel(client: MockLifecycleInferenceClient())
+        let directory = FileManager.default.temporaryDirectory
+        model.modelPathText = directory.path
+        model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
+
+        model.setNewlineShortcut(.shiftReturn)
+
+        #expect(model.newlineShortcut == .shiftReturn)
+        #expect(!model.hasStaleLoadedRuntime)
+    }
+
+    @MainActor
+    @Test func promptExamplesPreferenceDoesNotMarkReadySessionStale() {
+        let model = AppModel(client: MockLifecycleInferenceClient())
+        let directory = FileManager.default.temporaryDirectory
+        model.modelPathText = directory.path
+        model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
+
+        model.setShowPromptExamples(false)
+
+        #expect(!model.showPromptExamples)
+        #expect(!model.hasStaleLoadedRuntime)
+    }
+
+    @MainActor
+    @Test func mockRunUpdatesOutputAndDiagnostics() async throws {
+        let client = MockInferenceClient(response: "alpha beta", tokenDelayNanos: 1)
+        let model = AppModel(client: client)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
+        model.promptText = "go"
+        model.maxNewTokensOverride = 4
+        model.run()
+
+        for _ in 0..<200 where model.isRunning {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(!model.isRunning)
+        #expect(model.outputText.contains("alpha beta"))
+        #expect(model.diagnostics != nil)
+        #expect(model.error == nil)
+    }
+
+    @MainActor
+    @Test func runSnapshotsPromptIntoOutputTranscript() async throws {
+        let client = MockInferenceClient(response: "answer", tokenDelayNanos: 1)
+        let model = readyModel(client: client)
+        model.promptText = "original prompt"
+        model.maxNewTokensOverride = 1
+        model.run()
+
+        #expect(model.outputPromptText == "original prompt")
+        // The composer clears once a prompt is sent, while the transcript keeps
+        // its own snapshot of what was submitted.
+        #expect(model.promptText.isEmpty)
+        #expect(model.hasOutputTranscript)
+        #expect(model.outputResponsePlainText.isEmpty)
+        #expect(model.outputConversationPlainText == "You:\noriginal prompt")
+
+        model.promptText = "edited prompt"
+        await waitForIdle(model)
+
+        #expect(model.outputPromptText == "original prompt")
+        #expect(model.outputResponsePlainText == "answer")
+        #expect(model.outputConversationPlainText
+            == "You:\noriginal prompt\n\n"
+                + "\(model.selectedDescriptor.shortName):\nanswer")
+        #expect(!model.outputConversationPlainText.contains("edited prompt"))
+    }
+
+    @MainActor
+    @Test func clearAfterSendingPreservesTranscriptAndNextDraft() async throws {
+        let client = MockInferenceClient(
+            response: "answer",
+            tokenDelayNanos: 20_000_000)
+        let model = readyModel(client: client)
+        model.setSentPromptBehavior(.clear)
+        model.promptText = "original prompt"
+        model.maxNewTokensOverride = 1
+
+        model.run()
+
+        #expect(model.isRunning)
+        #expect(model.outputPromptText == "original prompt")
+        #expect(model.promptText.isEmpty)
+
+        model.promptText = "next draft"
+        await waitForIdle(model)
+
+        #expect(model.promptText == "next draft")
+        #expect(model.outputConversationPlainText.hasPrefix(
+            "You:\noriginal prompt\n\n"
+                + "\(model.selectedDescriptor.shortName):\n"))
+    }
+
+    @MainActor
+    @Test func failedValidationDoesNotClearPrompt() {
+        let model = readyModel(client: MockInferenceClient(response: "answer"))
+        model.setSentPromptBehavior(.clear)
+        model.promptText = "keep invalid prompt"
+        model.maxNewTokensOverride = 0
+
+        model.run()
+
+        #expect(!model.isRunning)
+        #expect(model.promptText == "keep invalid prompt")
+        #expect(model.outputPromptText.isEmpty)
+        #expect(model.error != nil)
+    }
+
+    @MainActor
+    @Test func staleReadySessionDisablesGenerationUntilReload() throws {
+        let client = MockLifecycleInferenceClient()
+        let directory = try makeCompleteModelInstall("stale-runtime")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = AppModel(
+            modelDirectory: directory,
+            client: client,
+            installer: MockModelInstallerClient(descriptor: .default))
+        model.promptText = "go"
+        model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
+
+        #expect(model.canRun)
+        model.runtimeOptions.rdadvisePolicy = .bounded
+        #expect(model.hasStaleLoadedRuntime)
+        #expect(!model.canRun)
+        #expect(model.canReloadModel)
+        #expect(client.ensureLoadedCallCount() == 0)
+    }
+
+    @MainActor
+    @Test func cancelAfterPartialOutputCanBeCleared() async throws {
+        let client = MockInferenceClient(response: "one two three four five", tokenDelayNanos: 20_000_000)
+        client.prefillSteps = 0
+        let model = readyModel(client: client)
+        model.promptText = "stop after token"
+        model.maxNewTokensOverride = 10
+        model.run()
+
+        for _ in 0..<200 where model.liveTokenCount == 0 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(model.liveTokenCount > 0)
+        model.cancel()
+        #expect(model.isCancellationPending)
+        await waitForIdle(model)
+
+        #expect(!model.isRunning)
+        #expect(!model.isCancellationPending)
+        #expect(model.error == .cancelled)
+        #expect(model.hasOutputTranscript)
+        #expect(!model.outputResponsePlainText.isEmpty)
+        #expect(model.outputConversationPlainText.hasPrefix(
+            "You:\nstop after token\n\n"
+                + "\(model.selectedDescriptor.shortName):\n"))
+
+        model.clearOutput()
+        #expect(!model.hasOutputTranscript)
+        #expect(model.outputPromptText.isEmpty)
+        #expect(model.outputText.isEmpty)
+        #expect(model.outputResponsePlainText.isEmpty)
+        #expect(model.outputConversationPlainText.isEmpty)
+        #expect(model.error == nil)
+    }
+
+    @MainActor
+    @Test func cancelDuringPrefillKeepsPromptSnapshotUntilClear() async throws {
+        let client = MockInferenceClient(response: "unused", tokenDelayNanos: 1_000_000)
+        client.prefillSteps = 20
+        client.holdsDuringPrefill = true
+        let model = readyModel(client: client)
+        model.promptText = "prefill prompt"
+        model.run()
+
+        for _ in 0..<200 where model.livePrefillDone == 0 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(model.outputPromptText == "prefill prompt")
+        model.cancel()
+        await waitForIdle(model)
+
+        #expect(!model.isRunning)
+        #expect(model.outputPromptText == "prefill prompt")
+        #expect(model.outputText.isEmpty)
+        #expect(model.outputResponsePlainText.isEmpty)
+        #expect(model.outputConversationPlainText == "You:\nprefill prompt")
+        #expect(model.hasOutputTranscript)
+
+        model.clearOutput()
+        #expect(!model.hasOutputTranscript)
+    }
+
+    @MainActor
+    @Test func failedEventThenThrownErrorKeepsFirstTerminalState() async throws {
+        let client = MockInferenceClient(tokenDelayNanos: 1, failureMessage: "synthetic failure")
+        let model = readyModel(client: client)
+        model.promptText = "fail"
+
+        model.run()
+        await waitForIdle(model)
+
+        #expect(model.error?.userMessage == "synthetic failure")
+        #expect(model.diagnostics?.stopReason == .failed)
+    }
+
+    @MainActor
+    @Test func changingModelPathInvalidatesLoadedStateAndDiagnostics() {
+        let model = AppModel(client: MockInferenceClient(),
+                             installer: MockModelInstallerClient())
+        let testDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("app-model-path-\(UUID().uuidString)", isDirectory: true)
+        let oldURL = testDirectory.appendingPathComponent("old.gturbo")
+        let newURL = testDirectory.appendingPathComponent("new.gturbo")
+        model.modelPathText = oldURL.path
+        model.loadState = .ready(modelDirectory: oldURL, loadSeconds: 1)
+        model.diagnostics = AppDiagnostics(
+            generatedTokens: 1,
+            stopReason: .eos,
+            timeToFirstTokenSeconds: nil,
+            decodeSeconds: 1,
+            tokensPerSecond: 1,
+            peakMemoryBytes: nil,
+            runtimeOptions: AppRuntimeOptions())
+        model.error = .unknown("old error")
+
+        model.setModelURL(newURL)
+
+        #expect(model.modelPathText == newURL.standardizedFileURL.path)
+        #expect(model.loadState == .notLoaded)
+        #expect(model.loadedRuntimeKey == nil)
+        #expect(model.diagnostics == nil)
+        #expect(model.error == nil)
+        #expect(model.presentation.label == "Model required")
+        #expect(!model.canRun)
+    }
+
+    /// A finished exchange is drawn from `conversation`. The output slot keeps
+    /// it as well — the copy commands and the diagnostics describe the last run
+    /// — so something has to say it is already history, or the transcript shows
+    /// the same question and answer twice in a row.
+    @MainActor
+    @Test func aRecordedExchangeLeavesTheLiveSlotOfTheTranscript() async {
+        let model = readyModel(client: MockInferenceClient(response: "answer"))
+        model.promptText = "question"
+
+        model.run()
+        await waitForIdle(model)
+
+        #expect(model.conversation.count == 1)
+        #expect(model.conversation[0].modelID
+            == model.selectedDescriptor.settingsProfileKey,
+                "an answer has to remember which model produced it")
+        #expect(!model.hasLiveMessage,
+                "the recorded exchange was still queued below the history")
+        #expect(model.hasOutputTranscript)
+        #expect(model.outputPromptText == "question",
+                "the last run is still what the copy commands describe")
+    }
+
+    /// Stopping the model keeps the exchange. The message was saved when it was
+    /// sent, and the answer that did arrive is what the reader has in front of
+    /// them; discarding both is what this replaced.
+    @MainActor
+    @Test func aStoppedExchangeKeepsTheMessageAndWhatWasAnswered() async {
+        let client = MockInferenceClient(
+            response: "partial answer", tokenDelayNanos: 20_000_000)
+        let model = readyModel(client: client)
+        model.promptText = "stop after token"
+        model.maxNewTokensOverride = 64
+
+        model.run()
+        for _ in 0..<200 where model.liveTokenCount == 0 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        model.cancel()
+        await waitForIdle(model)
+
+        #expect(model.conversation.count == 1,
+                "stopping the model threw the whole exchange away")
+        #expect(model.conversation[0].prompt == "stop after token")
+        #expect(!model.hasLiveMessage,
+                "the stopped exchange was drawn twice: as history and as live")
+    }
+
+    /// The chat exists from the moment Send is pressed, not from the first
+    /// finished answer, so a run stopped before any token still leaves the
+    /// question that was asked.
+    @MainActor
+    @Test func sendingAMessageSavesItBeforeAnyAnswerArrives() async {
+        let client = MockInferenceClient(
+            response: "an answer", tokenDelayNanos: 20_000_000)
+        let model = readyModel(client: client)
+        model.promptText = "remember me"
+
+        model.run()
+        defer { model.cancel() }
+
+        let record = model.conversationStore.selectedConversation
+        #expect(record?.turns.count == 1,
+                "the message was not saved until the answer finished")
+        #expect(record?.turns.first?.prompt == "remember me")
+        #expect(record?.title == "remember me",
+                "the chat is named from the message that started it")
+        await waitForIdle(model)
+    }
+
+    @MainActor
+    private func readyModel(client: MockInferenceClient) -> AppModel {
+        let model = AppModel(client: client)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
+        return model
+    }
+
+    @MainActor
+    private func waitForIdle(_ model: AppModel) async {
+        for _ in 0..<200 where model.isRunning {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+}

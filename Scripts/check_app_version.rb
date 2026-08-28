@@ -19,7 +19,7 @@ require "net/http"
 require "uri"
 
 ROOT = File.expand_path("..", __dir__)
-SOURCE = File.join(ROOT, "Sources/TurboFieldfareApp/MacPresentation/AboutPanelPresentation.swift")
+SOURCE = File.join(ROOT, "Sources/TUFFApp/MacPresentation/AboutPanelPresentation.swift")
 RELEASES_URL = "https://api.github.com/repos/rexmhall09/TUFF/releases?per_page=100"
 
 def compiled_version
@@ -97,7 +97,7 @@ if compare(compiled, floor) < 0
     app version #{compiled} is more than one release behind (latest #{latest})
 
     Update fallbackShortVersion in
-    Sources/TurboFieldfareApp/MacPresentation/AboutPanelPresentation.swift
+    Sources/TUFFApp/MacPresentation/AboutPanelPresentation.swift
     so a clone build reports the version it actually corresponds to.
   MESSAGE
 end

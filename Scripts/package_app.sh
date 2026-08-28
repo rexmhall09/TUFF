@@ -38,9 +38,9 @@ binary_directory="$(swift build -c release --show-bin-path)"
 
 required_binaries=(TUFF TUFFDecodeService)
 required_bundles=(
-  TurboFieldfare_TurboFieldfare.bundle
-  TurboFieldfare_TurboFieldfareAppCore.bundle
-  TurboFieldfare_TurboFieldfareMac.bundle
+  TUFF_TUFFEngine.bundle
+  TUFF_TUFFAppCore.bundle
+  TUFF_TUFFMac.bundle
   swift-crypto_Crypto.bundle
   swift-nio_NIOPosix.bundle
   swift-transformers_Hub.bundle

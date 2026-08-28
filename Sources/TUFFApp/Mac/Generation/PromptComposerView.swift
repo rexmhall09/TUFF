@@ -1,0 +1,748 @@
+import AppKit
+import TUFFEngine
+import TUFFAppCore
+import TUFFMacPresentation
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct PromptComposerView: View {
+    @Bindable var model: AppModel
+    @FocusState private var promptFocused: Bool
+    /// Which picker to present, and the flag that presents it.
+    ///
+    /// One importer, not two. Two `.fileImporter` modifiers on the same view
+    /// collide on macOS: only one of them is ever presented, so both the image
+    /// and the file item opened nothing at all. The kind is chosen before the
+    /// flag is set, and decides the allowed types and where the URLs go.
+    @State private var pickerKind: AttachmentPickerKind = .image
+    @State private var showingPicker = false
+    @State private var isImageDropTargeted = false
+    @State private var measuredEditorHeight: CGFloat = PromptComposerMetrics.minimumEditorHeight
+
+    enum AttachmentPickerKind {
+        case image
+        case document
+
+        var allowedContentTypes: [UTType] {
+            switch self {
+            case .image: VisionImageLimits().allowedContentTypes
+            case .document: DocumentTextExtractor.allowedContentTypes
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if hasAttachments { attachmentStrip }
+            if let notice = attachmentNotice { attachmentNoticeText(notice) }
+            editor
+            footer
+        }
+        .fileImporter(
+            isPresented: $showingPicker,
+            allowedContentTypes: pickerKind.allowedContentTypes,
+            allowsMultipleSelection: true
+        ) { result in
+            switch (pickerKind, result) {
+            case (.image, .success(let urls)): model.addImages(urls)
+            case (.document, .success(let urls)): model.attachDocuments(urls)
+            case (_, .failure(let error)): model.reportImageAttachmentError(error)
+            }
+        }
+        .padding(12)
+        .background {
+            RoundedRectangle(cornerRadius: 22)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 22)
+                        .stroke(.separator.opacity(0.5), lineWidth: 0.5)
+                }
+        }
+    }
+
+    private var hasAttachments: Bool {
+        !model.imageAttachments.isEmpty || !model.documentAttachments.isEmpty
+    }
+
+    private var editor: some View {
+        PromptTextEditor(
+            text: $model.promptText,
+            isFocused: Binding(
+                get: { promptFocused },
+                set: { promptFocused = $0 }),
+            contentHeight: $measuredEditorHeight,
+            newlineShortcut: model.newlineShortcut,
+            canRun: model.canSubmit,
+            canAcceptImages: model.isImageInputAvailable
+                && !model.isRunning
+                && !model.isAddingImages,
+            // Every model reads text, so a file needs no companion pack — only
+            // that a run is not already in flight.
+            canAcceptDocuments: !model.isRunning,
+            onSubmit: model.submit,
+            onImagesDropped: { model.addImages($0) },
+            onDocumentsDropped: { model.attachDocuments($0) },
+            onImageDataPasted: model.addImageData,
+            onPromisedImagesReceived: { urls, directory in
+                model.addImages(urls, discardingSourceDirectory: directory)
+            },
+            onPromisedImagesFailed: {
+                model.reportImageAttachmentError(
+                    "That drag did not deliver a file TUFF could read.")
+            },
+            onUnsupportedImagePaste: {
+                model.reportImageAttachmentError(
+                    "That clipboard content is not an image TUFF can read.")
+            },
+            onDropTargeted: { isImageDropTargeted = $0 })
+            .accessibilityLabel("Prompt")
+            .frame(height: editorHeight)
+            .overlay(alignment: .topLeading) {
+                if model.promptText.isEmpty {
+                    // Matches the NSTextView text origin: 5pt line fragment
+                    // padding, no vertical inset.
+                    Text("Message \(model.selectedDescriptor.shortName)")
+                        .font(PromptComposerMetrics.font)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 5)
+                        .allowsHitTesting(false)
+                }
+            }
+            .overlay {
+                if isImageDropTargeted {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(.tint, lineWidth: 2)
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(.smooth(duration: 0.12), value: editorHeight)
+    }
+
+    /// One line to start with, growing with what is typed and stopping at a
+    /// height that still leaves the conversation the larger half of the window.
+    /// A fixed box was two or three empty lines tall for every one-line question.
+    private var editorHeight: CGFloat {
+        min(max(measuredEditorHeight, PromptComposerMetrics.minimumEditorHeight),
+            PromptComposerMetrics.maximumEditorHeight)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            attachMenu
+            // Model and reasoning belong with the prompt they apply to, rather
+            // than in a separate strip above the composer.
+            ChatControlsView(model: model)
+            Spacer(minLength: 8)
+            clearAction
+            GenerateControl(model: model)
+        }
+    }
+
+    /// One control for everything that can be added to a message.
+    ///
+    /// Two icon buttons sat side by side doing the same kind of thing — and a
+    /// third appeared beside them whenever image support needed downloading, so
+    /// the row's width depended on the model. A single round + reads as "add
+    /// something", and the menu says what.
+    private var attachMenu: some View {
+        Menu {
+            Button {
+                pickerKind = .image
+                showingPicker = true
+            } label: {
+                Label("Image…", systemImage: "photo")
+            }
+            .disabled(!canAddImages)
+
+            Button {
+                pickerKind = .document
+                showingPicker = true
+            } label: {
+                Label("File…", systemImage: "doc.text")
+            }
+            .disabled(!canAddDocuments)
+
+            // Where to get image support, rather than a button offering it.
+            // The composer used to carry the whole download-activate-cancel
+            // control set, which meant an icon appearing and disappearing in
+            // the message box depending on which model was selected and how far
+            // its optional pack had got. That belongs on Models, with the model
+            // it is part of; this is the signpost.
+            if !model.isImageInputAvailable,
+               model.selectedDescriptor.supportsImageInput,
+               model.isVisionRuntimeSupported {
+                Divider()
+                Text("\(model.selectedDescriptor.shortName) reads images once "
+                    + "its image support is downloaded, in Models.")
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.body.weight(.medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
+                .background(attachButtonBackground)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(model.isRunning || !(canAddImages || canAddDocuments))
+        .help("Attach an image or a file")
+        .accessibilityLabel("Add an attachment")
+    }
+
+    private var attachButtonBackground: some View {
+        Circle()
+            .fill(Color.primary.opacity(0.06))
+            .overlay { Circle().stroke(Color.primary.opacity(0.08), lineWidth: 0.5) }
+    }
+
+    private var canAddImages: Bool {
+        model.isImageInputAvailable && !model.isRunning && !model.isAddingImages
+            && model.imageAttachments.count < model.maximumImageAttachments
+    }
+
+    private var canAddDocuments: Bool {
+        !model.isRunning
+            && model.documentAttachments.count < AppModel.maximumDocumentAttachments
+    }
+
+    /// The same tiles the transcript draws, plus a way to take them off again.
+    private var attachmentStrip: some View {
+        MessageAttachmentsView(
+            images: model.imageAttachments,
+            documents: model.documentAttachments,
+            imageTileSide: 54,
+            onRemoveImage: { model.removeImage(id: $0) },
+            onRemoveDocument: { model.removeDocument(id: $0) })
+            .padding(.bottom, 2)
+    }
+
+    /// Whatever the composer currently has to say about the attachments: a
+    /// refusal first, since it is the one the user has to act on.
+    private var attachmentNotice: (text: String, isError: Bool)? {
+        if let error = model.imageAttachmentError { return (error, true) }
+        if let notice = model.documentAttachmentNotice, hasAttachments {
+            return (notice, false)
+        }
+        return nil
+    }
+
+    private func attachmentNoticeText(_ notice: (text: String, isError: Bool)) -> some View {
+        Text(notice.text)
+            .font(.caption)
+            .foregroundStyle(notice.isError ? AnyShapeStyle(.red)
+                             : AnyShapeStyle(.secondary))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var clearAction: some View {
+        if !model.isRunning && model.hasComposedInput {
+            Button {
+                model.promptText = ""
+                model.clearImages()
+                model.clearDocuments()
+                promptFocused = true
+            } label: {
+                Label("Clear input", systemImage: "xmark.circle.fill")
+                    .labelStyle(.iconOnly)
+                    .symbolRenderingMode(.hierarchical)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.borderless)
+            .help("Clear the message and its attachments")
+        } else if !model.isRunning && model.hasOutputTranscript {
+            Button {
+                model.clearOutput()
+            } label: {
+                Label("New chat", systemImage: "square.and.pencil")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.borderless)
+            .help("New chat")
+        }
+    }
+}
+
+/// Sizing and type for the message box. Kept in one place because the
+/// placeholder overlay has to match the text view exactly, and it used to be
+/// two independent font choices that happened to agree.
+enum PromptComposerMetrics {
+    /// A point larger than the system default. At 13 the message you are
+    /// writing was set smaller than the answers around it.
+    static let pointSize: CGFloat = 14
+    static var font: Font { .system(size: pointSize) }
+    static var nsFont: NSFont { .systemFont(ofSize: pointSize) }
+    /// One line.
+    static let minimumEditorHeight: CGFloat = 21
+    /// About eight lines. Past that the box scrolls rather than eating the
+    /// conversation.
+    static let maximumEditorHeight: CGFloat = 168
+}
+
+private struct PromptTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    let isFocused: Binding<Bool>
+    /// The height the typed text needs. The view is given a clamped version of
+    /// it, so the box grows with the message and stops.
+    @Binding var contentHeight: CGFloat
+    let newlineShortcut: AppNewlineShortcut
+    let canRun: Bool
+    let canAcceptImages: Bool
+    let canAcceptDocuments: Bool
+    let onSubmit: () -> Void
+    let onImagesDropped: ([URL]) -> Void
+    let onDocumentsDropped: ([URL]) -> Void
+    let onImageDataPasted: (Data, String) -> Void
+    let onPromisedImagesReceived: ([URL], URL) -> Void
+    let onPromisedImagesFailed: () -> Void
+    let onUnsupportedImagePaste: () -> Void
+    let onDropTargeted: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let textView = AttachmentDropTextView()
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.font = PromptComposerMetrics.nsFont
+        textView.textColor = .labelColor
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 5
+        textView.textContainer?.widthTracksTextView = true
+        textView.setAccessibilityLabel("Prompt")
+        // A promise-only drag — Photos, Mail, most browsers — never reaches
+        // `draggingEntered` unless its types are registered here.
+        textView.registerForDraggedTypes(
+            textView.registeredDraggedTypes
+                + NSFilePromiseReceiver.readableDraggedTypes.map {
+                    NSPasteboard.PasteboardType(rawValue: $0)
+                })
+
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? AttachmentDropTextView else { return }
+        context.coordinator.parent = self
+        textView.onContentHeightChange = { measured in contentHeight = measured }
+        textView.canAcceptImages = canAcceptImages
+        textView.canAcceptDocuments = canAcceptDocuments
+        textView.onImagesDropped = onImagesDropped
+        textView.onDocumentsDropped = onDocumentsDropped
+        textView.onImageDataPasted = onImageDataPasted
+        textView.onPromisedImagesReceived = onPromisedImagesReceived
+        textView.onPromisedImagesFailed = onPromisedImagesFailed
+        textView.onUnsupportedImagePaste = onUnsupportedImagePaste
+        textView.onDropTargeted = onDropTargeted
+        if textView.string != text {
+            textView.string = text
+        }
+        textView.reportContentHeight()
+        if isFocused.wrappedValue,
+           textView.window?.firstResponder !== textView {
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: PromptTextEditor
+        weak var textView: NSTextView?
+
+        init(_ parent: PromptTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+            (textView as? AttachmentDropTextView)?.reportContentHeight()
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.isFocused.wrappedValue = true
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.isFocused.wrappedValue = false
+        }
+
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)) else {
+                return false
+            }
+            let event = NSApp.currentEvent
+            switch PromptSubmissionPolicy.decision(
+                newlineShortcut: parent.newlineShortcut,
+                modifiers: Self.modifiers(event?.modifierFlags ?? []),
+                canRun: parent.canRun,
+                hasMarkedText: textView.hasMarkedText(),
+                isRepeat: event?.isARepeat == true) {
+            case .submit:
+                parent.onSubmit()
+                return true
+            case .consume:
+                return true
+            case .deferToEditor:
+                return false
+            }
+        }
+
+        private static func modifiers(_ flags: NSEvent.ModifierFlags) -> EventModifiers {
+            var modifiers: EventModifiers = []
+            if flags.contains(.command) { modifiers.insert(.command) }
+            if flags.contains(.shift) { modifiers.insert(.shift) }
+            if flags.contains(.option) { modifiers.insert(.option) }
+            if flags.contains(.control) { modifiers.insert(.control) }
+            return modifiers
+        }
+    }
+}
+
+/// The prompt editor's drop and paste target.
+///
+/// It handles two kinds of attachment, not one. It used to accept images only,
+/// and refuse the drop outright whenever image input was unavailable — so
+/// dragging a PDF onto the composer did nothing at all, and on a text-only
+/// model so did dragging anything. Each dropped or pasted URL is now sorted:
+/// images the vision pack can decode go one way, files the extractor can read
+/// go the other, and the two capabilities are checked independently.
+private final class AttachmentDropTextView: NSTextView {
+    var canAcceptImages = false
+    var canAcceptDocuments = false
+    var onContentHeightChange: ((CGFloat) -> Void)?
+    private var reportedHeight: CGFloat = -1
+    private var measuredWidth: CGFloat = -1
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        guard abs(newSize.width - measuredWidth) > 0.5 else { return }
+        measuredWidth = newSize.width
+        reportContentHeight()
+    }
+
+    /// Measures the text and, when it changed, reports it. Deferred, because
+    /// this runs from `updateNSView` and from AppKit's layout, and writing
+    /// SwiftUI state directly from either is a "modifying state during view
+    /// update" violation.
+    func reportContentHeight() {
+        guard let container = textContainer, let layoutManager else { return }
+        layoutManager.ensureLayout(for: container)
+        let measured = ceil(layoutManager.usedRect(for: container).height)
+        guard measured > 0, abs(measured - reportedHeight) > 0.5 else { return }
+        reportedHeight = measured
+        let handler = onContentHeightChange
+        DispatchQueue.main.async { handler?(measured) }
+    }
+
+    var onImagesDropped: (([URL]) -> Void)?
+    var onDocumentsDropped: (([URL]) -> Void)?
+    /// Promised files arrive in a directory we made and must not keep.
+    var onPromisedImagesReceived: (([URL], URL) -> Void)?
+    var onImageDataPasted: ((Data, String) -> Void)?
+    var onUnsupportedImagePaste: (() -> Void)?
+    var onPromisedImagesFailed: (() -> Void)?
+    var onDropTargeted: ((Bool) -> Void)?
+
+    override func paste(_ sender: Any?) {
+        guard canAcceptImages || canAcceptDocuments else {
+            super.paste(sender)
+            return
+        }
+        let pasteboard = NSPasteboard.general
+        let sorted = attachments(from: pasteboard)
+        if sorted.deliver(images: onImagesDropped, documents: onDocumentsDropped,
+                          canAcceptImages: canAcceptImages,
+                          canAcceptDocuments: canAcceptDocuments) {
+            return
+        }
+        // Text on the pasteboard wins over a picture that came with it.
+        // Copying a range of cells from Numbers or Excel, or a text box from
+        // Keynote, writes TIFF alongside the RTF and plain text; so does a
+        // rich selection from many other apps. Taking the picture and
+        // returning swallowed the text the user actually selected, in a text
+        // editor, with nothing said about it. A screenshot or an image copied
+        // from an image editor carries no text, so it still attaches.
+        //
+        // Only the byte-carrying branches need this. A file paste is handled
+        // above, and Finder puts the path on the pasteboard as a string too.
+        if pasteboard.string(forType: .string)?.isEmpty == false {
+            super.paste(sender)
+            return
+        }
+        // An image copied from another app arrives as bytes with no file
+        // behind it, which used to be refused with an instruction to go and
+        // find one. Bytes can only be an image, so this branch stays gated on
+        // image support alone.
+        if canAcceptImages {
+            if let image = imageData(from: pasteboard) {
+                onImageDataPasted?(image.data, image.name)
+                return
+            }
+            if containsImage(in: pasteboard) {
+                onUnsupportedImagePaste?()
+                return
+            }
+        }
+        super.paste(sender)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard carriesAttachments(sender.draggingPasteboard) else {
+            return super.draggingEntered(sender)
+        }
+        guard acceptsDrag(sender.draggingPasteboard) else { return [] }
+        onDropTargeted?(true)
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard carriesAttachments(sender.draggingPasteboard) else {
+            return super.draggingUpdated(sender)
+        }
+        return acceptsDrag(sender.draggingPasteboard) ? .copy : []
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        onDropTargeted?(false)
+        super.draggingExited(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let sorted = attachments(from: sender.draggingPasteboard)
+        if !sorted.isEmpty {
+            onDropTargeted?(false)
+            return sorted.deliver(
+                images: onImagesDropped, documents: onDocumentsDropped,
+                canAcceptImages: canAcceptImages,
+                canAcceptDocuments: canAcceptDocuments)
+        }
+        // A promise carries no URL to sort on, so it stays the image path it
+        // was built for: Photos, Mail and browsers promise pictures.
+        let promises = filePromises(from: sender.draggingPasteboard)
+        guard !promises.isEmpty else { return super.performDragOperation(sender) }
+        onDropTargeted?(false)
+        guard canAcceptImages else { return false }
+        receive(promises)
+        return true
+    }
+
+    private func acceptsDrag(_ pasteboard: NSPasteboard) -> Bool {
+        let sorted = attachments(from: pasteboard)
+        if !sorted.images.isEmpty, canAcceptImages { return true }
+        if !sorted.documents.isEmpty, canAcceptDocuments { return true }
+        return sorted.isEmpty && canAcceptImages
+            && !filePromises(from: pasteboard).isEmpty
+    }
+
+    /// Drags from Photos, Mail and most browsers carry a promise rather than a
+    /// file: the source writes the bytes only once a destination asks for them.
+    /// Without this the drop was simply refused.
+    private func receive(_ promises: [NSFilePromiseReceiver]) {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TUFF-Promises", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: destination, withIntermediateDirectories: true)
+        } catch {
+            // Failing to make a staging directory is a disk or permission
+            // failure, not a statement about what was dropped. Reporting it as
+            // unsupported content sent someone off converting file formats
+            // because the volume was full.
+            onPromisedImagesFailed?()
+            return
+        }
+        let queue = OperationQueue()
+        // One completion arrives per promised FILE, not per receiver: a legacy
+        // promiser puts several file names on a single pasteboard item. Counting
+        // receivers finished the batch at the first file and handed the
+        // directory straight to `addImages`, whose `defer` deleted it while
+        // AppKit was still writing the rest — so a three-image drag attached one
+        // and destroyed two, with nothing reporting the loss.
+        let expected = promises.reduce(0) { $0 + max(1, $1.fileNames.count) }
+        let received = ReceivedPromises(expected: expected)
+        for promise in promises {
+            promise.receivePromisedFiles(
+                atDestination: destination,
+                options: [:],
+                operationQueue: queue
+            ) { [weak self] url, error in
+                // The staged copy is what the request uses, so the promised
+                // file is only needed until then.
+                let finished = received.record(url: error == nil ? url : nil)
+                guard let finished else { return }
+                DispatchQueue.main.async {
+                    if finished.isEmpty {
+                        // A promise that failed is not "unsupported content";
+                        // saying so sends the user looking for the wrong thing.
+                        self?.onPromisedImagesFailed?()
+                        try? FileManager.default.removeItem(at: destination)
+                    } else if let handler = self?.onPromisedImagesReceived {
+                        handler(finished, destination)
+                    } else {
+                        // The text view went away before the promises resolved,
+                        // so nothing downstream will ever own this directory:
+                        // the optional chain was a no-op and the sweep covers
+                        // only the staging root, so a closed window left the
+                        // full-size copies behind for every future launch.
+                        try? FileManager.default.removeItem(at: destination)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Only files in a format the vision pack can actually decode. Without the
+    /// conformance filter any file URL was staged: copying a document in Finder
+    /// and pressing Cmd-V attached it, replacing the editor's own paste, and the
+    /// failure surfaced only once the run reached image decoding.
+    ///
+    /// The list is the runtime's, not `public.image`: conforming to
+    /// `public.image` admits camera RAW, EXR and WebP, which are copied at full
+    /// size and decoded for a thumbnail before the run refuses them. The picker
+    /// reads the same list, and paste, drop and the drag-accept highlight all
+    /// read through here, so the four stay in agreement.
+    private func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        let objects = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [
+                .urlReadingFileURLsOnly: true,
+                .urlReadingContentsConformToTypes:
+                    Array(VisionImageLimits().allowedTypeIdentifiers),
+            ]) as? [NSURL]
+        return objects?.map { $0 as URL } ?? []
+    }
+
+    /// Every file URL on the pasteboard, unfiltered, so documents can be sorted
+    /// out of it below. `fileURLs` above filters to the vision pack's formats
+    /// and is what decides which of them is an image.
+    private func allFileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        let objects = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]) as? [NSURL]
+        return objects?.map { $0 as URL } ?? []
+    }
+
+    /// One drop or paste, split by what each file is.
+    ///
+    /// A mixed selection — a screenshot and a PDF together — is a normal thing
+    /// to drag, and taking only the first kind would silently drop the rest.
+    struct SortedAttachments {
+        var images: [URL] = []
+        var documents: [URL] = []
+
+        var isEmpty: Bool { images.isEmpty && documents.isEmpty }
+
+        /// Hands each set to its callback, and reports whether anything was
+        /// taken. False means the drop was not ours and AppKit should have it.
+        func deliver(
+            images imageHandler: (([URL]) -> Void)?,
+            documents documentHandler: (([URL]) -> Void)?,
+            canAcceptImages: Bool,
+            canAcceptDocuments: Bool
+        ) -> Bool {
+            var handled = false
+            if !images.isEmpty, canAcceptImages {
+                imageHandler?(images)
+                handled = true
+            }
+            if !documents.isEmpty, canAcceptDocuments {
+                documentHandler?(documents)
+                handled = true
+            }
+            return handled
+        }
+    }
+
+    private func attachments(from pasteboard: NSPasteboard) -> SortedAttachments {
+        let images = Set(fileURLs(from: pasteboard).map(\.standardizedFileURL))
+        var sorted = SortedAttachments()
+        for url in allFileURLs(from: pasteboard) {
+            if images.contains(url.standardizedFileURL) {
+                sorted.images.append(url)
+            } else if DocumentTextExtractor.canExtract(from: url) {
+                sorted.documents.append(url)
+            }
+        }
+        return sorted
+    }
+
+    private func filePromises(from pasteboard: NSPasteboard) -> [NSFilePromiseReceiver] {
+        pasteboard.readObjects(
+            forClasses: [NSFilePromiseReceiver.self],
+            options: nil) as? [NSFilePromiseReceiver] ?? []
+    }
+
+    private func carriesAttachments(_ pasteboard: NSPasteboard) -> Bool {
+        !attachments(from: pasteboard).isEmpty
+            || !filePromises(from: pasteboard).isEmpty
+    }
+
+    /// The first pasteboard representation the vision pack can actually decode.
+    /// PNG and JPEG come through unchanged; anything else is re-encoded as PNG
+    /// rather than handing the decoder a format it was never validated against.
+    private func imageData(from pasteboard: NSPasteboard) -> (data: Data, name: String)? {
+        if let data = pasteboard.data(forType: .png) {
+            return (data, "Pasted image.png")
+        }
+        if let data = pasteboard.data(forType: NSPasteboard.PasteboardType("public.jpeg")) {
+            return (data, "Pasted image.jpeg")
+        }
+        guard let tiff = pasteboard.data(forType: .tiff),
+              let representation = NSBitmapImageRep(data: tiff),
+              let png = representation.representation(using: .png, properties: [:])
+        else { return nil }
+        return (png, "Pasted image.png")
+    }
+
+    private func containsImage(in pasteboard: NSPasteboard) -> Bool {
+        (pasteboard.types ?? []).contains { type in
+            UTType(type.rawValue)?.conforms(to: .image) == true
+        }
+    }
+}
+
+/// Collects the results of a multi-file promise drop, which arrive one
+/// completion at a time on an arbitrary queue.
+private final class ReceivedPromises: @unchecked Sendable {
+    private let lock = NSLock()
+    private let expected: Int
+    private var urls: [URL] = []
+    private var completed = 0
+
+    init(expected: Int) {
+        self.expected = expected
+    }
+
+    /// Returns the collected URLs once every promise has reported, and nil
+    /// until then.
+    func record(url: URL?) -> [URL]? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let url { urls.append(url) }
+        completed += 1
+        return completed == expected ? urls : nil
+    }
+}

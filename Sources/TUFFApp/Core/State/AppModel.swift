@@ -1,0 +1,2603 @@
+import Foundation
+import Synchronization
+import TUFFModelCatalog
+import TUFFEngine
+import TUFFRepackCore
+import Observation
+
+@MainActor
+@Observable
+public final class AppModel {
+    public typealias RunState = AppRunState
+
+    public let conversationStore: AppConversationStore
+    public let modelLibraryStore = AppModelLibraryStore()
+    public let settingsStore = AppSettingsStore()
+    public let serverStore = AppServerStore()
+    public let inferenceStore = AppSharedInferenceStore()
+    public let deviceCapabilities: TUFFDeviceCapabilities
+    private var runsAfterCurrentLoad = false
+
+    public var modelPathText: String {
+        get { modelLibraryStore.modelPathText }
+        set { modelLibraryStore.modelPathText = newValue }
+    }
+    public var promptText: String {
+        get { conversationStore.promptText }
+        set { conversationStore.promptText = newValue }
+    }
+    public private(set) var imageAttachments: [AppImageAttachment] {
+        get { conversationStore.imageAttachments }
+        set { conversationStore.imageAttachments = newValue }
+    }
+    public private(set) var imageAttachmentError: String? {
+        get { conversationStore.imageAttachmentError }
+        set { conversationStore.imageAttachmentError = newValue }
+    }
+    /// A count, not a flag. The picker and a drop can both be staging at once,
+    /// and whichever finished first cleared a shared Bool — reopening `canRun`
+    /// while the other was still copying, so Generate ran against a partial set
+    /// and the remaining images were appended after the run had snapshotted its
+    /// own, where `removeImage` and `clearImages` are no-ops.
+    private var addingImagesCount: Int {
+        get { conversationStore.addingImagesCount }
+        set { conversationStore.addingImagesCount = newValue }
+    }
+    public var isAddingImages: Bool { addingImagesCount > 0 }
+    /// Set by the Model menu's Remove Image Support item; the window presents
+    /// the confirmation.
+    public var isConfirmingVisionPackRemoval: Bool {
+        get { modelLibraryStore.isConfirmingVisionPackRemoval }
+        set { modelLibraryStore.isConfirmingVisionPackRemoval = newValue }
+    }
+    public private(set) var outputPromptText: String {
+        get { conversationStore.outputPromptText }
+        set { conversationStore.outputPromptText = newValue }
+    }
+    public private(set) var outputImageAttachments: [AppImageAttachment] {
+        get { conversationStore.outputImageAttachments }
+        set { conversationStore.outputImageAttachments = newValue }
+    }
+    public var outputText: String {
+        get { conversationStore.outputText }
+        set { conversationStore.outputText = newValue }
+    }
+    public private(set) var outputThinkingText: String {
+        get { conversationStore.outputThinkingText }
+        set { conversationStore.outputThinkingText = newValue }
+    }
+    /// Completed exchanges, oldest first. The in-flight exchange lives in
+    /// `outputPromptText` / `outputText` and only joins this once it finishes.
+    public private(set) var conversation: [AppChatTurn] {
+        get { conversationStore.conversation }
+        set { conversationStore.conversation = newValue }
+    }
+    public var runState: RunState {
+        get { inferenceStore.runState }
+        set { inferenceStore.runState = newValue }
+    }
+    public var runtimeOptions: AppRuntimeOptions {
+        get { settingsStore.runtimeOptions }
+        set { settingsStore.runtimeOptions = newValue }
+    }
+    public var maxNewTokensOverride: Int? {
+        get { settingsStore.maxNewTokensOverride }
+        set { settingsStore.maxNewTokensOverride = newValue }
+    }
+    public var reasoning: ChatReasoning {
+        get { settingsStore.reasoning }
+        set { settingsStore.reasoning = newValue }
+    }
+    public var reasoningEffort: GPTOSSReasoningEffort {
+        get { settingsStore.reasoningEffort }
+        set { settingsStore.reasoningEffort = newValue }
+    }
+    public var preserveThinking: Bool {
+        get { settingsStore.preserveThinking }
+        set { settingsStore.preserveThinking = newValue }
+    }
+    public var maxContextTokens: Int {
+        get { settingsStore.maxContextTokens }
+        set { settingsStore.maxContextTokens = newValue }
+    }
+    public var temperature: Double {
+        get { settingsStore.temperature }
+        set { settingsStore.temperature = newValue }
+    }
+    public var topKEnabled: Bool {
+        get { settingsStore.topKEnabled }
+        set { settingsStore.topKEnabled = newValue }
+    }
+    public var topK: Int {
+        get { settingsStore.topK }
+        set { settingsStore.topK = newValue }
+    }
+    public var topPEnabled: Bool {
+        get { settingsStore.topPEnabled }
+        set { settingsStore.topPEnabled = newValue }
+    }
+    public var topP: Double {
+        get { settingsStore.topP }
+        set { settingsStore.topP = newValue }
+    }
+    public private(set) var newlineShortcut: AppNewlineShortcut {
+        get { settingsStore.newlineShortcut }
+        set { settingsStore.newlineShortcut = newValue }
+    }
+    public private(set) var showPromptExamples: Bool {
+        get { settingsStore.showPromptExamples }
+        set { settingsStore.showPromptExamples = newValue }
+    }
+    public private(set) var sentPromptBehavior: AppSentPromptBehavior {
+        get { settingsStore.sentPromptBehavior }
+        set { settingsStore.sentPromptBehavior = newValue }
+    }
+    public private(set) var loadModelOnLaunch: Bool {
+        get { settingsStore.loadModelOnLaunch }
+        set { settingsStore.loadModelOnLaunch = newValue }
+    }
+    /// Whether launching the app should load the model straight away. Off by
+    /// default, because loading takes minutes and holds gigabytes.
+    public var diagnostics: AppDiagnostics? {
+        get { inferenceStore.diagnostics }
+        set { inferenceStore.diagnostics = newValue }
+    }
+    public var error: AppInferenceError? {
+        get { inferenceStore.error }
+        set { inferenceStore.error = newValue }
+    }
+    /// One coordinator per catalog model. Each owns its own directory,
+    /// installer, and progress, so their downloads run independently of each
+    /// other and of whichever model is selected.
+    public private(set) var installs: [ModelInstallCoordinator] {
+        get { modelLibraryStore.installs }
+        set { modelLibraryStore.installs = newValue }
+    }
+    /// `AppModelInstallDescriptor.id` of the model the app is focused on: the
+    /// one it will load, and the one the single-model properties below report.
+    public private(set) var selectedModelID: String {
+        get { modelLibraryStore.selectedModelID }
+        set { modelLibraryStore.selectedModelID = newValue }
+    }
+    /// The companion download is 1.5 GB and deserves the same answer to "how
+    /// long is this going to take" as the model download. Kept separate because
+    /// both can be in flight in principle and an estimator holds per-download
+    /// rate state.
+    public private(set) var visionInstallETAPresentation: DownloadETAPresentation {
+        get { modelLibraryStore.visionInstallETAPresentation }
+        set { modelLibraryStore.visionInstallETAPresentation = newValue }
+    }
+    public private(set) var visionInstallETAText: String? {
+        get { modelLibraryStore.visionInstallETAText }
+        set { modelLibraryStore.visionInstallETAText = newValue }
+    }
+    public var visionInstallState: AppModelInstallState {
+        get { modelLibraryStore.visionInstallState }
+        set { modelLibraryStore.visionInstallState = newValue }
+    }
+    /// How far activation's hash of the companion weights has got, 0 to 1.
+    /// Activation reads about 1.5 GB, which was a bare spinner with no way to
+    /// tell a slow verify from a stuck one.
+    public private(set) var visionActivationProgress: Double? {
+        get { modelLibraryStore.visionActivationProgress }
+        set { modelLibraryStore.visionActivationProgress = newValue }
+    }
+    public private(set) var visionInstallReadiness: AppModelInstallReadiness {
+        get { modelLibraryStore.visionInstallReadiness }
+        set { modelLibraryStore.visionInstallReadiness = newValue }
+    }
+    public private(set) var visionInstallationStatus: AppVisionPackInstallationStatus {
+        get { modelLibraryStore.visionInstallationStatus }
+        set { modelLibraryStore.visionInstallationStatus = newValue }
+    }
+
+    public var loadState: AppModelLoadState {
+        get { inferenceStore.loadState }
+        set { inferenceStore.loadState = newValue }
+    }
+    public private(set) var loadedRuntimeKey: AppLoadedRuntimeKey? {
+        get { inferenceStore.loadedRuntimeKey }
+        set { inferenceStore.loadedRuntimeKey = newValue }
+    }
+    public private(set) var phase: AppGenerationPhase {
+        get { inferenceStore.phase }
+        set { inferenceStore.phase = newValue }
+    }
+    public private(set) var liveTokenCount: Int {
+        get { inferenceStore.liveTokenCount }
+        set { inferenceStore.liveTokenCount = newValue }
+    }
+    public private(set) var liveElapsedDecodeSeconds: Double {
+        get { inferenceStore.liveElapsedDecodeSeconds }
+        set { inferenceStore.liveElapsedDecodeSeconds = newValue }
+    }
+    public private(set) var livePrefillDone: Int {
+        get { inferenceStore.livePrefillDone }
+        set { inferenceStore.livePrefillDone = newValue }
+    }
+    public private(set) var livePrefillTotal: Int {
+        get { inferenceStore.livePrefillTotal }
+        set { inferenceStore.livePrefillTotal = newValue }
+    }
+    public private(set) var liveMemoryBytes: UInt64? {
+        get { inferenceStore.liveMemoryBytes }
+        set { inferenceStore.liveMemoryBytes = newValue }
+    }
+    /// Resident bytes of the inference process. The footprint above is what
+    /// the system counts against the process; this is what it actually holds,
+    /// including the mapped weights the footprint omits. A 26B model reports
+    /// about 160 MB of footprint right after loading, which is true and reads
+    /// as nonsense without this beside it.
+    public private(set) var liveResidentBytes: UInt64? {
+        get { inferenceStore.liveResidentBytes }
+        set { inferenceStore.liveResidentBytes = newValue }
+    }
+    /// Tower weights the inference process is holding mapped, reported
+    /// separately because no per-process counter attributes them.
+    public private(set) var visionTowerMappedBytes: UInt64? {
+        get { inferenceStore.visionTowerMappedBytes }
+        set { inferenceStore.visionTowerMappedBytes = newValue }
+    }
+    public private(set) var isCancellationPending: Bool {
+        get { inferenceStore.isCancellationPending }
+        set { inferenceStore.isCancellationPending = newValue }
+    }
+    /// Increments when a generation starts. The transcript watches it to put
+    /// the newest turn on screen: with several images attached, the prompt and
+    /// its thumbnails are tall enough to push the answer out of view, so
+    /// scrolling only when the reader was already at the bottom left them
+    /// looking at their own attachments while the model worked.
+    public private(set) var runIdentity: Int {
+        get { conversationStore.runIdentity }
+        set { conversationStore.runIdentity = newValue }
+    }
+
+    private let client: any AppInferenceClient
+    private let visionInstaller: any AppVisionPackInstallerClient
+    private var runTask: Task<Void, Never>?
+    private var loadTask: Task<Void, Never>?
+    private var visionInstallTask: Task<Void, Never>?
+    private var unloadTask: Task<Void, Never>?
+    private var loadGeneration: UInt64 = 0
+    /// The highest load-phase sequence already applied. Each `onState` callback
+    /// hops to the main actor in its own task, and ordering between separately
+    /// created tasks is not guaranteed, so `.ready` could be applied before the
+    /// `.loading(.preparingRunner)` that preceded it and leave the UI showing a
+    /// phase the runtime had already left.
+    private var appliedLoadSequence: UInt64 = 0
+    private var unloadGeneration: UInt64 = 0
+    private var visionInstallGeneration: UInt64 = 0
+    private var visionInstallCancellationRequested = false
+    /// The catalog model whose optional companion owns the current vision
+    /// transaction. This is deliberately separate from `selectedModelID`:
+    /// downloading Qwen image support must not silently switch away from a
+    /// loaded Gemma text session (or vice versa).
+    public private(set) var visionInstallTargetModelID: String? {
+        get { modelLibraryStore.visionInstallTargetModelID }
+        set { modelLibraryStore.visionInstallTargetModelID = newValue }
+    }
+    private var visionInstallTargetDirectory: URL?
+    private var pendingExplicitLoadRuntimeKey: AppLoadedRuntimeKey?
+    private var activeRunRuntimeKey: AppLoadedRuntimeKey?
+    private var hasHandledTerminalEvent = false
+    private let memorySampler: AppMemorySampler
+    private let settingsPersistenceEnabled: Bool
+    private let installETAClock: SuspendingClock
+    private let installETAOrigin: SuspendingClock.Instant
+    private var visionInstallETAEstimator = DownloadETAEstimator()
+    private let attachmentStore: AppImageAttachmentStore
+    public let isVisionRuntimeSupported: Bool
+
+    public static var currentDeviceSupportsVisionRuntime: Bool {
+        VisionRuntime.isSupportedOnDefaultDevice
+    }
+
+    /// `otherInstalls` replaces the coordinators the catalog would build for
+    /// the models `installer` does not cover. Callers that want the shipped
+    /// catalog leave it nil; tests pass their own so no catalog model reaches
+    /// the network or a real install directory.
+    public init(modelDirectory: URL? = nil,
+                client: any AppInferenceClient = RealInferenceClient(),
+                installer: any AppModelInstallerClient = RepackModelInstallerClient(descriptor: .default),
+                otherInstalls: [ModelInstallCoordinator]? = nil,
+                visionInstaller: any AppVisionPackInstallerClient = RepackVisionPackInstallerClient(),
+                memorySampler: AppMemorySampler = AppMemorySampler(),
+                attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
+                conversationStore: AppConversationStore = AppConversationStore(),
+                visionRuntimeSupported: Bool = true,
+                settingsPersistenceEnabled: Bool = false,
+                deviceCapabilities: TUFFDeviceCapabilities = .current()) {
+        let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
+        let installETAClock = SuspendingClock()
+        let settingsProfileKey = installer.descriptor.settingsProfileKey
+        let settings = settingsPersistenceEnabled
+            ? MacAppSettingsFileStore.loadOrCreate(
+                forModelDirectory: directory,
+                profileKey: settingsProfileKey)
+            : MacAppSettings(modelProfiles: [
+                settingsProfileKey: .defaults(for: settingsProfileKey)
+            ])
+        let modelSettings = settings.profile(for: settingsProfileKey)
+        // Initialize AppModel's stored dependencies before writing through the
+        // domain-store proxy properties below. Swift treats those computed
+        // properties as accesses to self even though each store already has a
+        // default value.
+        self.conversationStore = conversationStore
+        self.deviceCapabilities = deviceCapabilities
+        self.client = client
+        self.visionInstaller = visionInstaller
+        self.memorySampler = memorySampler
+        self.attachmentStore = attachmentStore
+        self.isVisionRuntimeSupported = visionRuntimeSupported
+        self.settingsPersistenceEnabled = settingsPersistenceEnabled
+        self.installETAClock = installETAClock
+        self.installETAOrigin = installETAClock.now
+        self.modelPathText = directory.path
+        // The app always releases the image tower after each image. Keeping it
+        // resident saves a few hundred milliseconds on a run of images and
+        // holds about 1 GB of page cache to do it — a trade worth exposing to
+        // a CLI or server operator, not to someone using the app, where it was
+        // one more setting whose effect no figure on screen could show.
+        // `keepReady` remains available through AppRuntimeOptions for those.
+        self.runtimeOptions = AppRuntimeOptions(
+            expertCacheSlots: modelSettings.expertCacheSlots,
+            prefillEnabled: modelSettings.prefillEnabled,
+            rdadvisePolicy: modelSettings.rdadvisePolicy,
+            visionResidencyPolicy: .onDemand)
+        self.maxContextTokens = modelSettings.contextTokens
+        self.temperature = modelSettings.temperature
+        self.topKEnabled = modelSettings.topKEnabled
+        self.topK = modelSettings.topK
+        self.topPEnabled = modelSettings.topPEnabled
+        self.topP = modelSettings.topP
+        self.reasoning = modelSettings.defaultReasoning
+        self.reasoningEffort = modelSettings.defaultReasoningEffort
+        self.preserveThinking = modelSettings.preserveThinking
+        self.newlineShortcut = settings.newlineShortcut
+        self.showPromptExamples = settings.showPromptExamples
+        self.sentPromptBehavior = settings.sentPromptBehavior
+        self.loadModelOnLaunch = settings.loadModelOnLaunch
+        self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
+
+        // The injected installer owns the passed-in directory and becomes the
+        // selected model; the rest of the catalog gets shipped coordinators at
+        // their own default locations. Catalog order drives the UI listing.
+        let selected = ModelInstallCoordinator(
+            descriptor: installer.descriptor,
+            directoryURL: directory,
+            client: installer)
+        self.selectedModelID = selected.id
+        if let otherInstalls {
+            self.installs = [selected] + otherInstalls.filter { $0.id != selected.id }
+        } else {
+            self.installs = AppModelInstallDescriptor.catalog.map { candidate in
+                candidate.id == selected.id ? selected : .shipped(candidate)
+            }
+            if !self.installs.contains(where: { $0.id == selected.id }) {
+                self.installs.insert(selected, at: 0)
+            }
+        }
+        for coordinator in self.installs {
+            coordinator.onInstalled = { [weak self] finished in
+                self?.modelDidInstall(finished)
+            }
+            // Concurrent downloads share one disk, so each model's free-space
+            // check has to net out what the others still owe.
+            coordinator.reservedByOtherInstalls = { [weak self, weak coordinator] in
+                guard let self, let coordinator else { return 0 }
+                let textBytes = self.installs
+                    .filter { $0 !== coordinator }
+                    .reduce(UInt64(0)) { partial, install in
+                        let addition = partial.addingReportingOverflow(
+                            install.outstandingBytes)
+                        return addition.overflow ? .max : addition.partialValue
+                    }
+                let addition = textBytes.addingReportingOverflow(
+                    self.visionInstallOutstandingBytes)
+                return addition.overflow ? .max : addition.partialValue
+            }
+        }
+        applySelectedConversationModelBinding()
+        // Staged images of runs that were killed before they could clean up;
+        // nothing else ever removes them. The v2 root is swept too, or the
+        // rename would strand every copy an older build staged.
+        AppImageAttachmentStore.sweepAbandoned()
+        AppImageAttachmentStore.sweepAbandoned(
+            in: AppImageAttachmentStore.legacyRoot)
+        refreshVisionInstallReadiness()
+    }
+
+    // MARK: - Model catalog
+
+    /// The coordinator for the selected model. Every single-model property
+    /// below reports this one.
+    public var selectedInstall: ModelInstallCoordinator {
+        installs.first { $0.id == selectedModelID } ?? installs[0]
+    }
+
+    public var selectedDescriptor: AppModelInstallDescriptor {
+        selectedInstall.descriptor
+    }
+
+    /// Models that are actually on this Mac. The chat picker offers only these:
+    /// choosing one that is not downloaded replaced the conversation view with
+    /// the installer, which is not what picking a model in a chat should do.
+    public var installedInstalls: [ModelInstallCoordinator] {
+        installs.filter { $0.isInstalled || $0.id == selectedModelID }
+    }
+
+    /// The short name of the model a saved turn was answered by. Turns written
+    /// before chats recorded it fall back to the chat's model.
+    public func modelShortName(forProfileKey key: String?) -> String {
+        guard let key else { return selectedDescriptor.shortName }
+        return installs.first {
+            $0.descriptor.settingsProfileKey == key
+        }?.descriptor.shortName ?? key
+    }
+
+    private func applySelectedConversationModelBinding() {
+        guard let modelID = conversationStore.selectedConversation?.modelID,
+              let coordinator = installs.first(where: {
+                  $0.descriptor.settingsProfileKey == modelID
+              }), coordinator.id != selectedModelID else { return }
+        selectedModelID = coordinator.id
+        applySelectedModelDirectory(coordinator.directoryURL)
+    }
+
+    /// Whether any model in the catalog is downloading right now — the
+    /// selected one or not.
+    public var isInstallingAnyModel: Bool { installs.contains { $0.isInstalling } }
+
+    public func canSelectModel(_ coordinator: ModelInstallCoordinator) -> Bool {
+        guard !isRunning, !loadState.isLoading,
+              !serverStore.isBusy,
+              coordinator.id != selectedModelID,
+              hardwareEligibility(for: coordinator).isCompatible else { return false }
+        // A transfer keeps writing beside its original text model. Wait for it
+        // to reach a saved state before changing selection; once prepared, the
+        // target model itself can be selected for activation.
+        if isVisionCompanionOperationInProgress { return false }
+        if case .readyToActivate = visionInstallState,
+           let target = visionInstallTargetModelID {
+            return coordinator.id == target
+        }
+        return true
+    }
+
+    /// Focus a different model. A download already running for either model is
+    /// left alone — only the loaded runtime and the active directory change.
+    public func selectModel(_ coordinator: ModelInstallCoordinator) {
+        guard canSelectModel(coordinator) else { return }
+        // An existing chat carries on through the new model. History is stored
+        // as turns and re-rendered in the destination's prompt format on the
+        // next submission, so nothing has to be replayed in the old dialect.
+        //
+        // Images are the exception. A transcript holding attachments cannot
+        // move to a model without image input: answering as though the images
+        // were never sent is exactly the failure the image path is built to
+        // avoid, so the switch is refused instead.
+        if conversationHasAttachments,
+           !coordinator.descriptor.supportsImageInput {
+            error = .invalidRequest(
+                "\(coordinator.descriptor.shortName) cannot read images. "
+                + "Start a new chat to use it, or pick a model with image input.")
+            return
+        }
+        // Capture edits to the current model before `selectedModelID` changes
+        // which profile key persistence resolves.
+        persistSettings()
+        selectedModelID = coordinator.id
+        conversationStore.rebindConversation(
+            to: coordinator.descriptor.settingsProfileKey)
+        applySelectedModelDirectory(coordinator.directoryURL)
+    }
+
+    /// The files attached to the message being composed.
+    public private(set) var documentAttachments: [AppDocumentAttachment] {
+        get { conversationStore.documentAttachments }
+        set { conversationStore.documentAttachments = newValue }
+    }
+
+    /// Documents that went out with the message currently being answered.
+    public private(set) var outputDocumentAttachments: [AppDocumentAttachment] {
+        get { conversationStore.outputDocumentAttachments }
+        set { conversationStore.outputDocumentAttachments = newValue }
+    }
+
+    /// At most this many files on one message. The limit is about the composer
+    /// staying readable, not about the model: the context check at submission
+    /// is what refuses text that does not fit.
+    public static let maximumDocumentAttachments = 10
+
+    /// Attach documents as attachments rather than as prompt text.
+    ///
+    /// A document is not a model capability: every model reads text, so the
+    /// extracted text still goes into the prompt at send time. What changed is
+    /// that the composer and the transcript hold the file, so a two-line
+    /// question with a PDF on it still reads as a two-line question and the
+    /// file can be taken back off.
+    public func attachDocuments(_ urls: [URL]) {
+        guard !isRunning else { return }
+        var added: [AppDocumentAttachment] = []
+        var refusedForCapacity = false
+        for url in urls {
+            guard documentAttachments.count + added.count
+                    < Self.maximumDocumentAttachments else {
+                refusedForCapacity = true
+                break
+            }
+            do {
+                let document = try DocumentTextExtractor.extract(from: url)
+                added.append(AppDocumentAttachment(
+                    displayName: document.displayName, text: document.text))
+            } catch {
+                self.error = .invalidRequest("\(error)")
+                return
+            }
+        }
+        guard !added.isEmpty || refusedForCapacity else { return }
+        documentAttachments.append(contentsOf: added)
+        updateDocumentAttachmentNotice(refusedForCapacity: refusedForCapacity)
+    }
+
+    public func removeDocument(id: UUID) {
+        guard !isRunning else { return }
+        documentAttachments.removeAll { $0.id == id }
+        updateDocumentAttachmentNotice()
+    }
+
+    /// The refusal comes first when there is one: it is the part the user has to
+    /// act on. Writing the size line over it is how the dropped files became
+    /// invisible.
+    private func updateDocumentAttachmentNotice(refusedForCapacity: Bool = false) {
+        guard !documentAttachments.isEmpty else {
+            documentAttachmentNotice = refusedForCapacity
+                ? "At most \(Self.maximumDocumentAttachments) files fit on one message."
+                : nil
+            return
+        }
+        let size = "Roughly \(documentAttachments.estimatedTokens) tokens of "
+            + "document text attached. The context limit for this model is "
+            + "\(maxContextTokens)."
+        documentAttachmentNotice = refusedForCapacity
+            ? "At most \(Self.maximumDocumentAttachments) files fit on one message; "
+                + "the rest were not attached. " + size
+            : size
+    }
+
+    public func clearDocuments() {
+        guard !isRunning else { return }
+        documentAttachments.removeAll()
+        documentAttachmentNotice = nil
+    }
+
+    /// Set after a document is attached, so the size is visible before sending.
+    public var documentAttachmentNotice: String?
+
+    /// Whether the selected chat holds any image attachment, in a completed
+    /// turn or in the draft being composed.
+    var conversationHasAttachments: Bool {
+        if !imageAttachments.isEmpty || !outputImageAttachments.isEmpty { return true }
+        if conversation.contains(where: { !$0.images.isEmpty }) { return true }
+        guard let record = conversationStore.selectedConversation else { return false }
+        return record.turns.contains { !$0.attachments.isEmpty }
+    }
+
+    /// Restore a named chat and the model it was created with. This is the one
+    /// model switch that must not create another chat: the destination already
+    /// owns the history and prompt dialect being restored.
+    /// Whether opening this chat would do anything.
+    ///
+    /// The rule used to live only inside `selectConversation`, which returned
+    /// silently when it did not hold, while the sidebar row stayed fully
+    /// enabled — so during a load, or with the server running on another model,
+    /// clicking a chat did nothing and said nothing. The view reads this, so
+    /// the row it offers is a row that works.
+    public func canSelectConversation(_ record: AppConversationRecord) -> Bool {
+        guard !isRunning, !loadState.isLoading else { return false }
+        if serverStore.isBusy,
+           record.modelID != selectedDescriptor.settingsProfileKey {
+            return false
+        }
+        return true
+    }
+
+    public func selectConversation(_ record: AppConversationRecord) {
+        guard canSelectConversation(record) else { return }
+        releaseTranscriptImages()
+        clearImages()
+        clearDocuments()
+        conversationStore.selectConversation(id: record.id)
+        if let coordinator = installs.first(where: {
+            $0.descriptor.settingsProfileKey == record.modelID
+        }), coordinator.id != selectedModelID {
+            persistSettings()
+            selectedModelID = coordinator.id
+            applySelectedModelDirectory(coordinator.directoryURL)
+        }
+        generationTranscriptMailbox?.reset()
+        diagnostics = nil
+        error = nil
+    }
+
+    public func renameConversation(_ record: AppConversationRecord, to title: String) {
+        conversationStore.renameConversation(id: record.id, title: title)
+    }
+
+    public func deleteConversation(_ record: AppConversationRecord) {
+        guard !isRunning else { return }
+        if conversationStore.selectedConversationID == record.id {
+            releaseTranscriptImages()
+            generationTranscriptMailbox?.reset()
+            diagnostics = nil
+            error = nil
+        }
+        conversationStore.deleteConversation(id: record.id)
+        applySelectedConversationModelBinding()
+    }
+
+    /// A finished install selects its model when nothing else is loaded, so a
+    /// first-run download lands the user in the conversation view.
+    private func modelDidInstall(_ coordinator: ModelInstallCoordinator) {
+        guard coordinator.id == selectedModelID else {
+            if loadState == .notLoaded, !isRunning, !selectedInstall.isInstalled {
+                selectModel(coordinator)
+            }
+            return
+        }
+        modelPathText = coordinator.directoryURL.path
+        loadState = .notLoaded
+        refreshVisionInstallReadiness()
+    }
+
+    public var isRunning: Bool { runState == .running }
+
+    public var isModelAvailable: Bool { loadState.isReady }
+
+    public var hasStaleLoadedRuntime: Bool {
+        guard loadState.isReady, let loadedRuntimeKey else { return false }
+        return loadedRuntimeKey != currentRuntimeKey
+    }
+
+    public var canLoadModel: Bool {
+        isModelInstalled && selectedModelHardwareEligibility.isCompatible
+            && selectedContextHardwareEligibility.isCompatible
+            && !isRunning && !serverStore.isBusy
+            && !isVisionCompanionOperationInProgress
+            && (loadState == .notLoaded || loadState.isFailed)
+    }
+
+    public var canCancelLoad: Bool {
+        if case .loading = loadState { return loadTask != nil }
+        return false
+    }
+
+    public var canReloadModel: Bool {
+        isModelInstalled && selectedModelHardwareEligibility.isCompatible
+            && selectedContextHardwareEligibility.isCompatible
+            && !isRunning && !serverStore.isBusy
+            && !isVisionCompanionOperationInProgress
+            && loadState.isReady && hasStaleLoadedRuntime
+    }
+
+    public var canUnloadModel: Bool {
+        isModelInstalled && !isRunning && !serverStore.isBusy
+            && !isVisionCompanionOperationInProgress
+            && loadState.isReady
+    }
+
+    // MARK: - Selected model's install (delegates to `selectedInstall`)
+
+    public var installState: AppModelInstallState { selectedInstall.state }
+
+    public var installReadiness: AppModelInstallReadiness { selectedInstall.readiness }
+
+    public var installationStatus: AppModelInstallationStatus {
+        selectedInstall.installationStatus
+    }
+
+    public var installETAPresentation: DownloadETAPresentation {
+        selectedInstall.etaPresentation
+    }
+
+    public var installETAText: String? { selectedInstall.etaText }
+
+    public var isModelInstalled: Bool { selectedInstall.isInstalled }
+
+    public var requiresModelInstallation: Bool { !isModelInstalled }
+
+    public var installDescriptor: AppModelInstallDescriptor { selectedDescriptor }
+
+    public var installRequirement: AppModelInstallRequirement? {
+        installReadiness.requirement
+    }
+
+    public var isInstallingModel: Bool { installState.isInstalling }
+
+    public var canInstallModel: Bool {
+        canInstallModel(selectedInstall)
+    }
+
+    public var selectedModelHardwareEligibility: AppModelHardwareEligibility {
+        hardwareEligibility(for: selectedInstall)
+    }
+
+    public var selectedContextHardwareEligibility: AppModelContextEligibility {
+        contextEligibility(
+            for: selectedInstall,
+            contextTokens: maxContextTokens,
+            expertCacheSlots: runtimeOptions.expertCacheSlots)
+    }
+
+    public func hardwareEligibility(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelHardwareEligibility {
+        coordinator.descriptor.hardwareEligibility(on: deviceCapabilities)
+    }
+
+    public func contextEligibility(
+        for coordinator: ModelInstallCoordinator,
+        contextTokens: Int,
+        expertCacheSlots: Int
+    ) -> AppModelContextEligibility {
+        coordinator.descriptor.contextEligibility(
+            contextTokens: contextTokens,
+            expertCacheSlots: expertCacheSlots,
+            on: deviceCapabilities)
+    }
+
+    public func canInstallModel(_ coordinator: ModelInstallCoordinator) -> Bool {
+        hardwareEligibility(for: coordinator).isCompatible
+            && coordinator.canInstall && !isRunning && !loadState.isLoading
+            && !isVisionCompanionOperationInProgress
+    }
+
+    public var canCancelInstall: Bool { selectedInstall.canCancel }
+
+    public var isVisionPackInstalled: Bool {
+        visionInstallationStatus == .complete
+    }
+
+    public var isInstallingVisionPack: Bool { visionInstallState.isInstalling }
+
+    public var visionInstallOutstandingBytes: UInt64 {
+        guard let targetID = visionInstallTargetModelID,
+              let target = installs.first(where: { $0.id == targetID }),
+              target.descriptor.supportsImageInput else { return 0 }
+        switch visionInstallState {
+        case .checking, .downloadingMetadata, .planning, .reservingOutput,
+             .hashingOutput, .finalizing:
+            return visionInstallDescriptor(for: target).installedBytes
+        case .copyingPayload(let reused, let downloaded, let total):
+            let completed = reused.addingReportingOverflow(downloaded)
+            guard !completed.overflow, total > completed.partialValue else { return 0 }
+            return total - completed.partialValue
+        case .idle, .activating, .cancelling, .discarding, .cancelled,
+             .readyToActivate, .recoverable, .installed, .failed:
+            return 0
+        }
+    }
+
+    public var visionInstallDescriptor: AppModelInstallDescriptor {
+        visionInstallDescriptor(for: selectedInstall)
+    }
+
+    public func visionInstallDescriptor(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelInstallDescriptor {
+        .visionCompanion(for: coordinator.descriptor.family)
+    }
+
+    public func visionInstallationStatus(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppVisionPackInstallationStatus {
+        AppVisionPackInstallationProbe.status(at: coordinator.directoryURL)
+    }
+
+    public func isVisionPackInstalled(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        visionInstallationStatus(for: coordinator) == .complete
+    }
+
+    public func isVisionInstallTarget(
+        _ coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        visionInstallTargetModelID == coordinator.id
+    }
+
+    /// Selected-model surfaces must not relabel another catalog row's active
+    /// transfer as though it belonged to the model currently in use.
+    public var selectedModelOwnsVisionInstallState: Bool {
+        visionInstallTargetModelID == nil
+            || visionInstallTargetModelID == selectedModelID
+    }
+
+    public func visionDownloadButtonLabel(
+        for coordinator: ModelInstallCoordinator
+    ) -> String {
+        let verb: String
+        if hasPartialVisionPackDownload(for: coordinator) {
+            verb = "Resume"
+        } else if hasVisionPackDirectory(for: coordinator) {
+            verb = "Repair"
+        } else {
+            verb = "Download"
+        }
+        return "\(verb) \(visionInstallDescriptor(for: coordinator).displayName)"
+    }
+
+    /// Every companion Download, Resume, Verify, Activate, Repair, and Remove
+    /// operation is one app-blocking state: model actions stay disabled until it
+    /// reaches a resting state, so a companion transaction never overlaps a
+    /// loaded session or another companion operation.
+    public var isVisionCompanionOperationInProgress: Bool {
+        visionInstallState.isInstalling
+    }
+
+    /// Downloading prepares a sibling directory and does not touch the loaded
+    /// runtime or the active companion. Activation and destructive mutations
+    /// still require an unloaded session below.
+    public var canPrepareVisionCompanionOperation: Bool {
+        !isRunning && !loadState.isLoading
+            && !isVisionCompanionOperationInProgress
+    }
+
+    /// Activation, discard, and removal mutate companion state and therefore
+    /// require an unloaded model session.
+    public var canBeginVisionCompanionOperation: Bool {
+        canPrepareVisionCompanionOperation && !loadState.isReady
+    }
+
+    public var canInstallVisionPack: Bool {
+        canInstallVisionPack(for: selectedInstall)
+    }
+
+    public func canInstallVisionPack(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        guard isVisionRuntimeSupported,
+              coordinator.descriptor.supportsImageInput,
+              hardwareEligibility(for: coordinator).isCompatible else { return false }
+        // A layout with nowhere to put a companion cannot be repaired by
+        // downloading one, so do not offer to.
+        let status = visionInstallationStatus(for: coordinator)
+        guard status != .unsupportedLayout, status != .complete,
+              coordinator.isInstalled else { return false }
+        if isVisionInstallTarget(coordinator),
+           case .readyToActivate = visionInstallState { return false }
+        guard canPrepareVisionCompanionOperation else { return false }
+        do {
+            return try checkedVisionInstallRequirement(
+                textModelDirectory: coordinator.directoryURL).canInstall
+        } catch {
+            return false
+        }
+    }
+
+    public func visionInstallRequirement(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelInstallRequirement? {
+        try? checkedVisionInstallRequirement(
+            textModelDirectory: coordinator.directoryURL)
+    }
+
+    public var canActivateVisionPack: Bool {
+        guard isVisionRuntimeSupported else { return false }
+        guard case .readyToActivate = visionInstallState else { return false }
+        guard visionInstallTargetModelID == nil
+                || visionInstallTargetModelID == selectedModelID else { return false }
+        return canBeginVisionCompanionOperation
+    }
+
+    public var canCancelVisionInstall: Bool { visionInstallState.canCancel }
+
+    public var visionInstallProgressFraction: Double? {
+        // Activation hashes about 1.5 GB, so it gets a bar of its own rather
+        // than an indeterminate spinner for minutes.
+        if case .activating = visionInstallState { return visionActivationProgress }
+        guard case .copyingPayload(let reused, let downloaded, let total) = visionInstallState,
+              total > 0 else { return nil }
+        let addition = reused.addingReportingOverflow(downloaded)
+        let done = addition.overflow ? UInt64.max : addition.partialValue
+        return min(max(Double(done) / Double(total), 0), 1)
+    }
+
+    public var visionInstallPhaseLabel: String {
+        switch visionInstallState {
+        case .idle: return isVisionPackInstalled ? "Installed" : "Not installed"
+        case .checking: return "Checking image support"
+        case .downloadingMetadata: return "Downloading metadata"
+        case .planning: return "Planning image support"
+        case .reservingOutput: return "Reserving storage"
+        case .copyingPayload: return "Downloading image support"
+        case .hashingOutput(let file): return "Verifying \(file)"
+        case .finalizing: return "Finalizing download"
+        case .activating:
+            guard let fraction = visionActivationProgress else {
+                return "Activating image support"
+            }
+            return "Verifying image support \(Int(fraction * 100))%"
+        case .cancelling: return "Cancelling"
+        case .discarding: return "Cleaning up"
+        case .cancelled: return "Download paused"
+        case .readyToActivate: return "Ready to activate"
+        case .recoverable: return "Saved download needs attention"
+        case .installed: return "Installed"
+        case .failed: return "Installation failed"
+        }
+    }
+
+    public var installDownloadedBytes: UInt64? {
+        guard case .copyingPayload(let reused, let downloaded, let total) = installState else {
+            return nil
+        }
+        return min(reused.addingReportingOverflow(downloaded).partialValue, total)
+    }
+
+    public var installTotalBytes: UInt64? {
+        guard case .copyingPayload(_, _, let total) = installState else {
+            return nil
+        }
+        return total
+    }
+
+    public var installReusedBytes: UInt64? {
+        guard case .copyingPayload(let reused, _, _) = installState else {
+            return nil
+        }
+        return reused
+    }
+
+    public var installDownloadedThisRunBytes: UInt64? {
+        guard case .copyingPayload(_, let downloaded, _) = installState else {
+            return nil
+        }
+        return downloaded
+    }
+
+    public var installProgressFraction: Double? {
+        guard case .copyingPayload(let reused, let downloaded, let total) = installState,
+              total > 0 else {
+            return nil
+        }
+        let addition = reused.addingReportingOverflow(downloaded)
+        let done = addition.overflow ? UInt64.max : addition.partialValue
+        return min(max(Double(done) / Double(total), 0), 1)
+    }
+
+    public var installPhaseLabel: String {
+        switch installState {
+        case .idle: return "Model required"
+        case .checking: return "Checking installation"
+        case .downloadingMetadata: return "Downloading metadata"
+        case .planning: return "Planning installation"
+        case .reservingOutput: return "Reserving storage"
+        case .copyingPayload: return "Downloading model"
+        case .hashingOutput(let file): return "Verifying \(file)"
+        case .finalizing: return "Finalizing installation"
+        case .activating:
+            guard let fraction = visionActivationProgress else {
+                return "Activating image support"
+            }
+            return "Verifying image support \(Int(fraction * 100))%"
+        case .cancelling: return "Cancelling"
+        case .discarding: return "Discarding download"
+        case .cancelled: return "Download paused"
+        case .readyToActivate: return "Ready to activate"
+        case .recoverable: return "Saved download needs attention"
+        case .installed: return "Model installed"
+        case .failed: return "Installation failed"
+        }
+    }
+
+    public var canRun: Bool {
+        // Staging copies the files a request will carry. Starting a run while
+        // it is in flight sent a request without those images and then landed
+        // them on the next message instead.
+        !isRunning && !isAddingImages && isModelAvailable && !loadState.isLoading
+            && !isVisionCompanionOperationInProgress
+            && !hasStaleLoadedRuntime
+            && hasComposedInput
+    }
+
+    /// Anything worth sending: typed text, an image, or an attached file.
+    public var hasComposedInput: Bool {
+        !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !imageAttachments.isEmpty
+            || !documentAttachments.isEmpty
+    }
+
+    /// A submission can start immediately against a ready runtime or begin the
+    /// selected model's normal load and run once that same load reaches ready.
+    public var canSubmit: Bool {
+        guard hasComposedInput, !runsAfterCurrentLoad else { return false }
+        return canRun || canLoadModel
+    }
+
+    public var isLoadingForSubmission: Bool {
+        runsAfterCurrentLoad && loadState.isLoading
+    }
+
+    public var canCancel: Bool { isRunning && !isCancellationPending }
+
+    public var hasOutputTranscript: Bool {
+        !conversation.isEmpty || hasLiveMessage
+    }
+
+    /// The exchange the transcript draws below the recorded ones: the one being
+    /// generated, or the one whose run ended without becoming history because
+    /// it was cancelled or failed.
+    ///
+    /// A completed exchange stays in the output slot — the copy commands and
+    /// the diagnostics describe the last run — so "recorded" rather than
+    /// "empty" is what takes it off the bottom of the transcript.
+    public var hasLiveMessage: Bool {
+        guard !conversationStore.outputTurnIsRecorded else { return false }
+        return isRunning || !outputPromptText.isEmpty
+            || !outputImageAttachments.isEmpty
+            || !outputDocumentAttachments.isEmpty || !outputText.isEmpty
+            || !outputThinkingText.isEmpty
+    }
+
+    /// Completed turns the next prompt will carry as context.
+    public var conversationTurnCount: Int { conversation.count }
+
+    public var outputResponsePlainText: String {
+        generationTranscriptMailbox?.completeText ?? outputText
+    }
+
+    public var outputConversationPlainText: String {
+        let response = outputResponsePlainText
+        let modelLabel = selectedDescriptor.shortName
+        switch (outputPromptText.isEmpty, response.isEmpty) {
+        case (true, true):
+            return ""
+        case (false, true):
+            return "You:\n\(outputPromptText)"
+        case (true, false):
+            return "\(modelLabel):\n\(response)"
+        case (false, false):
+            return "You:\n\(outputPromptText)\n\n\(modelLabel):\n\(response)"
+        }
+    }
+
+    public var liveTokensPerSecond: Double {
+        liveElapsedDecodeSeconds > 0 ? Double(liveTokenCount) / liveElapsedDecodeSeconds : 0
+    }
+
+    public var presentation: AppPresentationState {
+        AppPresentationState.resolve(AppPresentationSnapshot(
+            requiresInstallation: requiresModelInstallation,
+            installState: installState,
+            installReadiness: installReadiness,
+            loadState: loadState,
+            hasStaleRuntime: hasStaleLoadedRuntime,
+            isRunning: isRunning,
+            isGenerationCancellationPending: isCancellationPending,
+            generationPhase: phase,
+            livePrefillDone: livePrefillDone,
+            livePrefillTotal: livePrefillTotal,
+            lastStopReason: diagnostics?.stopReason,
+            isVisionCompanionOperationInProgress: isVisionCompanionOperationInProgress))
+    }
+
+    public var currentProcessMemoryBytes: UInt64? {
+        guard loadState.isReady || isRunning else { return nil }
+        // `liveMemoryBytes` first because it is a tracked property: reading the
+        // reporter alone told the truth but was invisible to observation, so
+        // the figure only refreshed when something else — a generated token —
+        // happened to redraw the view. Through prefill, nothing did.
+        if let liveMemoryBytes { return liveMemoryBytes }
+        // When inference runs in another process, its memory is the only
+        // memory worth showing. Falling back to this app's own sampler put the
+        // UI's footprint in a row labelled as the model's.
+        if let reporter = client as? any AppInferenceMemoryReporting {
+            return reporter.currentInferenceMemoryBytes
+        }
+        return memorySampler.sample()
+    }
+
+    public var generationTranscriptMailbox: GenerationTranscriptMailbox? {
+        (client as? any AppInferenceTranscriptReporting)?.generationTranscriptMailbox
+    }
+
+    private var currentRuntimeKey: AppLoadedRuntimeKey {
+        AppLoadedRuntimeKey(modelDirectory: URL(fileURLWithPath: modelPathText),
+                            maxContextTokens: maxContextTokens,
+                            options: runtimeOptions,
+                            forceLogitsHead: currentForceLogitsHead)
+    }
+
+    private var currentForceLogitsHead: Bool {
+        temperature != 0
+    }
+
+    /// Point the selected model at a different directory. Any install running
+    /// against the old location is abandoned; other models are untouched.
+    public func setModelURL(_ url: URL) {
+        guard !isRunning else { return }
+        let path = url.standardizedFileURL.path
+        guard path != modelPathText else { return }
+        selectedInstall.setDirectory(url)
+        applySelectedModelDirectory(url)
+    }
+
+    /// Shared tail of selecting a model and repointing one: adopt the
+    /// directory's persisted settings and drop everything tied to the runtime
+    /// that was loaded from the previous one.
+    private func applySelectedModelDirectory(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        let preservesPreparedVisionPack = visionInstallTargetModelID == selectedModelID
+            && visionInstallTargetDirectory?.standardizedFileURL.path == path
+            && {
+                if case .readyToActivate = visionInstallState { return true }
+                return false
+            }()
+        modelPathText = path
+        clearImages()
+        applyPersistedSettings(
+            forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
+        loadGeneration &+= 1
+        loadTask?.cancel()
+        loadTask = nil
+        if !preservesPreparedVisionPack {
+            visionInstallGeneration &+= 1
+            visionInstallCancellationRequested = false
+            visionInstallTask?.cancel()
+            visionInstaller.cancel()
+            visionInstallTask = nil
+            visionInstallTargetModelID = nil
+            visionInstallTargetDirectory = nil
+            resetVisionInstallETA()
+            visionInstallState = .idle
+        }
+        pendingExplicitLoadRuntimeKey = nil
+        activeRunRuntimeKey = nil
+        loadedRuntimeKey = nil
+        loadState = .notLoaded
+        diagnostics = nil
+        error = nil
+        phase = .idle
+        selectedInstall.refresh()
+        visionInstallationStatus = AppVisionPackInstallationProbe.status(
+            at: URL(fileURLWithPath: path))
+        refreshVisionInstallReadiness()
+
+        if let lifecycle = client as? AppModelLifecycleClient {
+            unloadGeneration &+= 1
+            let generation = unloadGeneration
+            let task = Task { [weak self, lifecycle] in
+                await lifecycle.unload()
+                self?.clearUnloadTask(generation: generation)
+            }
+            unloadTask = task
+        }
+    }
+
+    public func loadModel() {
+        guard canLoadModel else { return }
+        beginLoad()
+    }
+
+    public func perform(_ action: AppModelAction) {
+        switch action {
+        case .install: installModel()
+        case .cancelInstall: cancelInstall()
+        case .load, .retryLoad: loadModel()
+        case .cancelLoad: cancelLoad()
+        case .reload: reloadModel()
+        case .unload: unloadModel()
+        }
+    }
+
+    public func setNewlineShortcut(_ shortcut: AppNewlineShortcut) {
+        guard newlineShortcut != shortcut else { return }
+        newlineShortcut = shortcut
+        persistSettings()
+    }
+
+    public func setShowPromptExamples(_ show: Bool) {
+        guard showPromptExamples != show else { return }
+        showPromptExamples = show
+        persistSettings()
+    }
+
+    public func setSentPromptBehavior(_ behavior: AppSentPromptBehavior) {
+        guard sentPromptBehavior != behavior else { return }
+        sentPromptBehavior = behavior
+        persistSettings()
+    }
+
+    public func setLoadModelOnLaunch(_ enabled: Bool) {
+        guard loadModelOnLaunch != enabled else { return }
+        loadModelOnLaunch = enabled
+        persistSettings()
+    }
+
+    public func settingsProfile(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelSettingsProfile {
+        if coordinator.id == selectedModelID {
+            return currentSettingsProfile
+        }
+        guard settingsPersistenceEnabled else {
+            return .defaults(for: coordinator.descriptor.settingsProfileKey)
+        }
+        return MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: coordinator.directoryURL,
+            profileKey: coordinator.descriptor.settingsProfileKey)
+            .profile(for: coordinator.descriptor.settingsProfileKey)
+    }
+
+    public func updateSettingsProfile(
+        _ profile: AppModelSettingsProfile,
+        for coordinator: ModelInstallCoordinator
+    ) {
+        guard profile.isValid() else { return }
+        if coordinator.id == selectedModelID {
+            applySettingsProfile(profile)
+            persistSettings()
+            return
+        }
+        guard settingsPersistenceEnabled else { return }
+        let profileKey = coordinator.descriptor.settingsProfileKey
+        var settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: coordinator.directoryURL,
+            profileKey: profileKey)
+        settings.setProfile(profile, for: profileKey)
+        try? MacAppSettingsFileStore.save(
+            settings,
+            forModelDirectory: coordinator.directoryURL)
+    }
+
+    /// Starts the launch load if it is switched on and the model can be loaded.
+    /// Called once, when the window first appears; a model that is missing,
+    /// already loading, or busy with a companion operation is left alone.
+    public func loadModelAtLaunchIfEnabled() {
+        guard loadModelOnLaunch, canLoadModel else { return }
+        loadModel()
+    }
+
+    /// Whether an image can be attached at all.
+    ///
+    /// The runtime flag only says this build *can* use images; the companion
+    /// pack is what makes it possible for this model. Gating on the flag alone
+    /// offered an Add-images button with no tower behind it, and the failure
+    /// only surfaced when the user pressed Generate.
+    public var isImageInputAvailable: Bool {
+        selectedDescriptor.supportsImageInput
+            && isVisionRuntimeSupported && isVisionPackInstalled
+    }
+
+    /// Image support is part of this build. Hardware support and companion-pack
+    /// availability are separate so the inspector can explain either absence.
+    public var visionRuntimeEnabled: Bool { selectedDescriptor.supportsImageInput }
+
+    /// Room left for the prompt when working out how many images fit. The
+    /// runtime still rejects a combination that does not fit, so this only has
+    /// to be a defensible reserve rather than an exact prompt measurement.
+    static let reservedPromptTokens = 1_024
+
+    /// How many images this conversation can hold, derived from the context
+    /// exactly as the server derives its budget. It used to be a fixed four,
+    /// which meant the same set of images was accepted over the API and refused
+    /// in the app.
+    public var maximumImageAttachments: Int {
+        guard selectedDescriptor.supportsImageInput else { return 0 }
+        // The context a run will actually use, which is the loaded session's
+        // until it is reloaded. Capping on the pending setting instead let the
+        // composer accept images the request then refused.
+        return max(1, VisionImageTokenBudget.capacity(
+            maxContext: effectiveMaxContextTokens,
+            reservedTextTokens: Self.reservedPromptTokens,
+            family: selectedDescriptor.family))
+    }
+
+    /// The context a generation would run with right now.
+    public var effectiveMaxContextTokens: Int {
+        (loadedRuntimeKey ?? currentRuntimeKey).maxContextTokens
+    }
+
+    /// `discardingSourceDirectory` is the temp directory a file-promise drop
+    /// wrote into. It is ours, it holds nothing but those copies, and staging
+    /// takes its own copy — so it must not outlive the staging that consumed
+    /// it, which is exactly how it leaked.
+    public func addImages(_ urls: [URL], discardingSourceDirectory: URL? = nil) {
+        // Every early return has to discard the promise directory itself. The
+        // staging task's `defer` below owns it only once that task exists, so a
+        // return above it strands the full-size copies with nothing left to
+        // delete them: the attachment sweep only covers the staging root.
+        func discardSource() {
+            if let discardingSourceDirectory {
+                try? FileManager.default.removeItem(at: discardingSourceDirectory)
+            }
+        }
+        guard isImageInputAvailable, !urls.isEmpty else {
+            discardSource()
+            return
+        }
+        guard !isRunning else {
+            // A promise drop admitted before the run started can be delivered
+            // after it. Returning silently made the images look as though they
+            // had simply vanished.
+            imageAttachmentError =
+                "Wait for the current run to finish before attaching images."
+            discardSource()
+            return
+        }
+        let capacity = maximumImageAttachments
+        let available = max(0, capacity - imageAttachments.count)
+        guard available > 0 else {
+            imageAttachmentError = Self.imageCapacityMessage(
+                capacity: capacity, context: effectiveMaxContextTokens)
+            discardSource()
+            return
+        }
+        addingImagesCount += 1
+        imageAttachmentError = nil
+        // Dropping the rest silently left the user believing every image they
+        // chose was attached.
+        let selected = Array(urls.prefix(available))
+        if selected.count < urls.count {
+            imageAttachmentError = Self.imageCapacityMessage(
+                capacity: capacity, context: effectiveMaxContextTokens)
+        }
+        let store = attachmentStore
+        Task.detached(priority: .userInitiated) { [weak self] in
+            var staged: [AppImageAttachment] = []
+            defer {
+                if let discardingSourceDirectory {
+                    try? FileManager.default.removeItem(at: discardingSourceDirectory)
+                }
+            }
+            do {
+                for url in selected {
+                    staged.append(try store.stage(url))
+                }
+                await self?.finishAddingImages(staged)
+            } catch {
+                // The batch is all-or-nothing, so the copies made before the
+                // failure are referenced by nothing and would never be deleted.
+                for attachment in staged { store.remove(attachment) }
+                await self?.finishAddingImages(error: error)
+            }
+        }
+    }
+
+    /// Attaches image bytes that have no file behind them: an image copied out
+    /// of another app arrives on the pasteboard as data, and a drag from an app
+    /// that has not written the file yet arrives as a promise.
+    public func addImageData(_ data: Data, displayName: String) {
+        guard isImageInputAvailable, !isRunning else { return }
+        let capacity = maximumImageAttachments
+        guard imageAttachments.count < capacity else {
+            imageAttachmentError = Self.imageCapacityMessage(
+                capacity: capacity, context: effectiveMaxContextTokens)
+            return
+        }
+        addingImagesCount += 1
+        imageAttachmentError = nil
+        let store = attachmentStore
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let staged = try store.stage(data: data, displayName: displayName)
+                await self?.finishAddingImages([staged])
+            } catch {
+                await self?.finishAddingImages(error: error)
+            }
+        }
+    }
+
+    static func imageCapacityMessage(capacity: Int, context: Int) -> String {
+        "At most \(capacity) image\(capacity == 1 ? "" : "s") fit in the "
+            + "\(context / 1_024)K context this session is running with. Raise "
+            + "Context in Memory and reload the model to send more."
+    }
+
+    public func reportImageAttachmentError(_ error: Error) {
+        imageAttachmentError = String(describing: error)
+    }
+
+    public func reportImageAttachmentError(_ message: String) {
+        imageAttachmentError = message
+    }
+
+    public func removeImage(id: UUID) {
+        guard !isRunning,
+              let index = imageAttachments.firstIndex(where: { $0.id == id }) else { return }
+        let attachment = imageAttachments.remove(at: index)
+        attachmentStore.remove(attachment)
+        imageAttachmentError = nil
+    }
+
+    public func clearImages() {
+        guard !isRunning else { return }
+        for attachment in imageAttachments { attachmentStore.remove(attachment) }
+        imageAttachments.removeAll()
+        imageAttachmentError = nil
+    }
+
+    private func finishAddingImages(_ staged: [AppImageAttachment]) {
+        // Two adds can be in flight at once — the picker and a drop — and each
+        // sized itself against the count it saw at admission, so the second to
+        // land can push past the cap. Re-check against the real count here and
+        // delete what does not fit, rather than leaving staged copies that
+        // nothing references.
+        defer { addingImagesCount = max(0, addingImagesCount - 1) }
+        // The counter keeps `canRun` closed until every batch lands, so a run
+        // should not be able to start underneath one. If it ever does, the run
+        // has already snapshotted its images: appending here would attach them
+        // to the *next* message with no way to take them off, which is worse
+        // than saying so. `addImages` refuses a mid-run drop the same way.
+        guard !isRunning else {
+            for attachment in staged { attachmentStore.remove(attachment) }
+            imageAttachmentError =
+                "Wait for the current run to finish before attaching images."
+            return
+        }
+        let capacity = maximumImageAttachments
+        let available = max(0, capacity - imageAttachments.count)
+        let accepted = staged.prefix(available)
+        for attachment in staged.dropFirst(accepted.count) {
+            attachmentStore.remove(attachment)
+        }
+        imageAttachments.append(contentsOf: accepted)
+        if accepted.count < staged.count {
+            imageAttachmentError = Self.imageCapacityMessage(
+                capacity: capacity, context: effectiveMaxContextTokens)
+        }
+    }
+
+    private func finishAddingImages(error: Error) {
+        addingImagesCount = max(0, addingImagesCount - 1)
+        imageAttachmentError = String(describing: error)
+    }
+
+    public func reloadModel() {
+        guard canReloadModel else { return }
+        beginLoad()
+    }
+
+    private func beginLoad() {
+        guard let lifecycle = client as? AppModelLifecycleClient else {
+            loadState = .failed(.modelLoadFailed("This client has no model load lifecycle."))
+            return
+        }
+        let directory = URL(fileURLWithPath: modelPathText)
+        let maxContext = maxContextTokens
+        let forceLogitsHead = currentForceLogitsHead
+        let runtimeKey = AppLoadedRuntimeKey(modelDirectory: directory,
+                                             maxContextTokens: maxContext,
+                                             options: runtimeOptions,
+                                             forceLogitsHead: forceLogitsHead)
+        // The session is loaded with the same normalized options a run sends.
+        // Loading with the raw settings instead meant a control that is off but
+        // still carries a non-default value — RDADVISE off with its policy left
+        // on `bounded` — produced a loaded session no run could match, and the
+        // staleness check compares two normalized keys, so nothing ever offered
+        // the reload that would have cleared it.
+        let options = runtimeKey.options(prefillEnabled: runtimeOptions.prefillEnabled,
+                                        prefillChunkTokens: runtimeOptions.prefillChunkTokens)
+        let pendingUnload = unloadTask
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        pendingExplicitLoadRuntimeKey = runtimeKey
+        error = nil
+        appliedLoadSequence = 0
+        loadState = .loading(.validatingDirectory)
+        let emitted = Mutex<UInt64>(0)
+        loadTask = Task.detached { [weak self, lifecycle, pendingUnload] in
+            do {
+                await pendingUnload?.value
+                try Task.checkCancellation()
+                try await lifecycle.ensureLoaded(modelDirectory: directory,
+                                                 maxContextTokens: maxContext,
+                                                 options: options,
+                                                 forceLogitsHead: forceLogitsHead) { [weak self] state in
+                    // Stamped where the phase is emitted, in order; checked
+                    // where it is applied, which is not.
+                    let sequence = emitted.withLock { value -> UInt64 in
+                        value += 1
+                        return value
+                    }
+                    Task { @MainActor in
+                        self?.applyLoadState(state, generation: generation,
+                                             sequence: sequence)
+                    }
+                }
+            } catch is CancellationError {
+            } catch let appError as AppInferenceError {
+                await self?.applyLoadState(.failed(appError), generation: generation)
+            } catch {
+                await self?.applyLoadState(
+                    .failed(.modelLoadFailed("\(error)")),
+                    generation: generation)
+            }
+            await self?.clearLoadTask(generation: generation)
+        }
+    }
+
+    public func cancelLoad() {
+        guard canCancelLoad, let lifecycle = client as? AppModelLifecycleClient else { return }
+        runsAfterCurrentLoad = false
+        loadState = .cancelling
+        loadGeneration &+= 1
+        loadTask?.cancel()
+        loadTask = nil
+        pendingExplicitLoadRuntimeKey = nil
+        unloadGeneration &+= 1
+        let generation = unloadGeneration
+        unloadTask = Task { [weak self, lifecycle] in
+            await lifecycle.unload()
+            guard let self, generation == self.unloadGeneration else { return }
+            self.loadedRuntimeKey = nil
+            self.loadState = .notLoaded
+            self.clearUnloadTask(generation: generation)
+        }
+    }
+
+    public func unloadModel() {
+        guard canUnloadModel, let lifecycle = client as? AppModelLifecycleClient else { return }
+        runsAfterCurrentLoad = false
+        loadState = .unloading
+        unloadGeneration &+= 1
+        let generation = unloadGeneration
+        unloadTask = Task { [weak self, lifecycle] in
+            await lifecycle.unload()
+            guard let self, generation == self.unloadGeneration else { return }
+            self.loadedRuntimeKey = nil
+            self.liveMemoryBytes = nil
+            self.loadState = .notLoaded
+            self.clearUnloadTask(generation: generation)
+        }
+    }
+
+    public func installModel() {
+        installModel(selectedInstall)
+    }
+
+    public func installModel(_ coordinator: ModelInstallCoordinator) {
+        guard canInstallModel(coordinator) else { return }
+        coordinator.install()
+    }
+
+    public func cancelInstall() {
+        selectedInstall.cancel()
+    }
+
+    public var hasPartialModelDownload: Bool { selectedInstall.hasPartialDownload }
+
+    public var canDiscardModelDownload: Bool {
+        selectedInstall.canDiscard && !isRunning
+    }
+
+    public func discardModelDownload() {
+        guard !isRunning else { return }
+        selectedInstall.discard()
+    }
+
+    /// Re-probe every catalog model, so a download that finished in another
+    /// model's coordinator and a model installed outside the app both show up.
+
+    public var hasPartialVisionPackDownload: Bool {
+        hasPartialVisionPackDownload(for: selectedInstall)
+    }
+
+    public func hasPartialVisionPackDownload(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        guard let output = try? VisionPackLocation.companionURL(
+            forTextModel: coordinator.directoryURL),
+              let paths = try? RemoteInstallPaths(outputDirectory: output.path) else {
+            return false
+        }
+        return FileManager.default.fileExists(atPath: paths.partialDirectory)
+            || FileManager.default.fileExists(atPath: paths.checkpointFile)
+    }
+
+    public var canDiscardVisionPackDownload: Bool {
+        canDiscardVisionPackDownload(for: selectedInstall)
+    }
+
+    public var canRemoveVisionPack: Bool {
+        canRemoveVisionPack(for: selectedInstall)
+    }
+
+    public func canDiscardVisionPackDownload(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        hasPartialVisionPackDownload(for: coordinator)
+            && canMutateVisionPack(for: coordinator)
+    }
+
+    public func canRemoveVisionPack(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        hasVisionPackDirectory(for: coordinator)
+            && canMutateVisionPack(for: coordinator)
+    }
+
+    public var hasVisionPackDirectory: Bool {
+        hasVisionPackDirectory(for: selectedInstall)
+    }
+
+    public func hasVisionPackDirectory(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        guard let output = try? VisionPackLocation.companionURL(
+            forTextModel: coordinator.directoryURL) else {
+            return false
+        }
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(
+            atPath: output.path,
+            isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    public func installVisionPack() {
+        installVisionPack(for: selectedInstall)
+    }
+
+    public func installVisionPack(for coordinator: ModelInstallCoordinator) {
+        guard canInstallVisionPack(for: coordinator) else { return }
+        visionInstallCancellationRequested = false
+        visionInstallTask?.cancel()
+        visionInstaller.cancel()
+        let textModelDirectory = coordinator.directoryURL.standardizedFileURL
+        visionInstallTargetModelID = coordinator.id
+        visionInstallTargetDirectory = textModelDirectory
+        visionInstallGeneration &+= 1
+        let generation = visionInstallGeneration
+        visionInstallState = .checking
+        visionInstallTask = Task { [weak self, visionInstaller] in
+            do {
+                for try await event in visionInstaller.install(
+                    textModelDirectory: textModelDirectory) {
+                    guard let self else { return }
+                    self.applyVisionInstallEvent(event, generation: generation)
+                }
+                self?.finishVisionInstallStream(generation: generation)
+            } catch is CancellationError {
+                self?.finishVisionInstallCancellation(generation: generation)
+            } catch {
+                self?.finishVisionInstallFailure(error, generation: generation)
+            }
+        }
+    }
+
+    public func cancelVisionInstall() {
+        guard canCancelVisionInstall else { return }
+        visionInstallCancellationRequested = true
+        visionInstallState = .cancelling
+        visionInstaller.cancel()
+        // A cancel raised before the stream registers its own task would find no
+        // active install; cancelling the consumer terminates the stream, which
+        // routes through the same cooperative drain-to-checkpoint path.
+        visionInstallTask?.cancel()
+    }
+
+    public func activateVisionPack() {
+        guard canActivateVisionPack else { return }
+        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
+            .standardizedFileURL
+        visionInstallCancellationRequested = false
+        visionInstallGeneration &+= 1
+        let generation = visionInstallGeneration
+        resetVisionInstallETA()
+        visionInstallState = .activating
+        visionActivationProgress = 0
+        visionInstallTask = Task { [weak self, visionInstaller] in
+            do {
+                let output = try await visionInstaller.activatePreparedInstall(
+                    textModelDirectory: directory,
+                    onVerifyProgress: { [weak self] fraction in
+                        Task { @MainActor in
+                            guard let self,
+                                  generation == self.visionInstallGeneration,
+                                  case .activating = self.visionInstallState else { return }
+                            // Each hop is its own task, and tasks are not
+                            // ordered against each other, so a late one must
+                            // not walk the bar backwards.
+                            guard fraction >= (self.visionActivationProgress ?? 0)
+                            else { return }
+                            self.visionActivationProgress = fraction
+                        }
+                    })
+                // Applied first: a progress hop still in flight is dropped
+                // once the state is no longer `.activating`, so clearing before
+                // this could be undone by a late update.
+                self?.applyVisionInstallEvent(
+                    .installed(output), generation: generation)
+                self?.visionActivationProgress = nil
+            } catch is CancellationError {
+                // Cancellation can only land during verification, before
+                // anything is renamed, so the prepared pack is untouched and
+                // still activatable.
+                self?.finishVisionActivationCancelled(generation: generation)
+                self?.visionActivationProgress = nil
+            } catch {
+                self?.finishVisionInstallFailure(
+                    error, generation: generation, phase: .activation)
+                self?.visionActivationProgress = nil
+            }
+        }
+    }
+
+    private func finishVisionActivationCancelled(generation: UInt64) {
+        guard generation == visionInstallGeneration else { return }
+        resetVisionInstallETA()
+        visionInstallTask = nil
+        visionInstallCancellationRequested = false
+        visionInstallState = .idle
+        refreshVisionInstallReadiness()
+    }
+
+    public func discardVisionPackDownload() {
+        discardVisionPackDownload(for: selectedInstall)
+    }
+
+    public func discardVisionPackDownload(
+        for coordinator: ModelInstallCoordinator
+    ) {
+        guard canDiscardVisionPackDownload(for: coordinator) else { return }
+        let directory = coordinator.directoryURL.standardizedFileURL
+        visionInstallCancellationRequested = false
+        visionInstallTargetModelID = coordinator.id
+        visionInstallTargetDirectory = directory
+        visionInstallGeneration &+= 1
+        let generation = visionInstallGeneration
+        visionInstallState = .discarding
+        visionInstallTask = Task { [weak self, visionInstaller] in
+            do {
+                try await visionInstaller.discardPartialInstall(
+                    textModelDirectory: directory)
+                guard let self, generation == self.visionInstallGeneration else { return }
+                self.visionInstallTask = nil
+                self.visionInstallState = .idle
+                self.visionInstallTargetModelID = nil
+                self.visionInstallTargetDirectory = nil
+                self.refreshVisionInstallReadiness()
+            } catch {
+                self?.finishVisionInstallFailure(error, generation: generation)
+            }
+        }
+    }
+
+    /// Drives the confirmation the Model menu puts in front of `removeVisionPack`.
+    ///
+    /// The Inspector hides its own Remove button once the pack is installed, so
+    /// the menu item is the only reachable way to delete 1.14 GB — and it called
+    /// straight through, with the dialog sitting on an unreachable branch.
+    public func requestVisionPackRemoval() {
+        guard canRemoveVisionPack else { return }
+        isConfirmingVisionPackRemoval = true
+    }
+
+    public func removeVisionPack() {
+        isConfirmingVisionPackRemoval = false
+        removeVisionPack(for: selectedInstall)
+    }
+
+    public func removeVisionPack(for coordinator: ModelInstallCoordinator) {
+        guard canRemoveVisionPack(for: coordinator) else { return }
+        let directory = coordinator.directoryURL.standardizedFileURL
+        visionInstallCancellationRequested = false
+        visionInstallTargetModelID = coordinator.id
+        visionInstallTargetDirectory = directory
+        visionInstallGeneration &+= 1
+        let generation = visionInstallGeneration
+        visionInstallState = .discarding
+        visionInstallTask = Task { [weak self, visionInstaller] in
+            do {
+                try await visionInstaller.removeInstalled(
+                    textModelDirectory: directory)
+                guard let self, generation == self.visionInstallGeneration else { return }
+                self.visionInstallTask = nil
+                self.visionInstallState = .idle
+                if coordinator.id == self.selectedModelID {
+                    self.visionInstallationStatus = .missing
+                }
+                self.visionInstallTargetModelID = nil
+                self.visionInstallTargetDirectory = nil
+                self.refreshVisionInstallReadiness()
+            } catch {
+                self?.finishVisionInstallFailure(error, generation: generation)
+            }
+        }
+    }
+
+    public func refreshInstallReadiness() {
+        for coordinator in installs { coordinator.refresh() }
+    }
+
+    /// Adopt whatever path the user typed into the location field, then
+    /// re-probe. The field is authoritative here — this is the "Check Again"
+    /// action after pointing the app at an existing install.
+    public func recheckModelAtCurrentLocation() {
+        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
+            .standardizedFileURL
+        modelPathText = directory.path
+        selectedInstall.setDirectory(directory)
+        refreshInstallReadiness()
+        refreshVisionInstallReadiness(at: directory)
+    }
+
+    public func refreshVisionInstallReadiness() {
+        refreshVisionInstallReadiness(
+            at: URL(fileURLWithPath: modelPathText, isDirectory: true)
+                .standardizedFileURL)
+    }
+
+    private func refreshVisionInstallReadiness(at textModelDirectory: URL) {
+        visionInstallationStatus = AppVisionPackInstallationProbe.status(
+            at: textModelDirectory)
+        // Removing the companion leaves any attached image unsendable, and the
+        // composer would keep offering it with nothing able to encode it.
+        // Only once the dust has settled: the probe verifies the pack on disk,
+        // and a companion operation renames that directory underneath it, so
+        // refreshing mid-operation can briefly report no image support. Acting
+        // on that would delete images the user had staged.
+        if !isImageInputAvailable, !isVisionCompanionOperationInProgress,
+           !imageAttachments.isEmpty {
+            for attachment in imageAttachments { attachmentStore.remove(attachment) }
+            imageAttachments.removeAll()
+            // Say so. Clearing the error alongside the images removed them and
+            // the only explanation for their absence in one step, so the
+            // composer just quietly emptied itself.
+            imageAttachmentError =
+                "Image support is unavailable, so the attached images were removed."
+        }
+        guard isModelInstalled else {
+            visionInstallReadiness = .failed("Install the text model first")
+            return
+        }
+        guard !isVisionPackInstalled else { return }
+        if visionInstaller.preparedInstallIsValid(
+            textModelDirectory: textModelDirectory) {
+            let output = try? VisionPackLocation.companionURL(
+                forTextModel: textModelDirectory)
+            // A pack that failed to activate must not be re-offered for
+            // activation: `preparedInstallIsValid` does not hash the weights,
+            // so a corrupt pack still looks ready and the user would loop
+            // between Activate and the same failure.
+            let reportedBroken: Bool
+            switch visionInstallState {
+            case .recoverable, .failed: reportedBroken = true
+            default: reportedBroken = false
+            }
+            if let output, !isInstallingVisionPack, !reportedBroken {
+                visionInstallTargetModelID = selectedModelID
+                visionInstallTargetDirectory = textModelDirectory
+                visionInstallState = .readyToActivate(output)
+            }
+        }
+        visionInstallReadiness = .checking
+        do {
+            let requirement = try checkedVisionInstallRequirement(
+                textModelDirectory: textModelDirectory)
+            visionInstallReadiness = requirement.canInstall
+                ? .ready(requirement)
+                : .insufficientSpace(requirement)
+        } catch {
+            visionInstallReadiness = .failed("\(error)")
+        }
+    }
+
+    private var textInstallOutstandingBytes: UInt64 {
+        installs.reduce(UInt64(0)) { partial, install in
+            let addition = partial.addingReportingOverflow(install.outstandingBytes)
+            return addition.overflow ? .max : addition.partialValue
+        }
+    }
+
+    private func checkedVisionInstallRequirement(
+        textModelDirectory: URL
+    ) throws -> AppModelInstallRequirement {
+        let measured = try visionInstaller.checkInstallRequirement(
+            textModelDirectory: textModelDirectory)
+        let reserved = textInstallOutstandingBytes
+        return AppModelInstallRequirement(
+            probePath: measured.probePath,
+            requiredBytes: measured.requiredBytes,
+            availableBytes: measured.availableBytes > reserved
+                ? measured.availableBytes - reserved : 0)
+    }
+
+    private func canMutateVisionPack(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        canPrepareVisionCompanionOperation
+            && (coordinator.id != selectedModelID || !loadState.isReady)
+    }
+
+    private func applyVisionInstallEvent(
+        _ event: AppModelInstallEvent,
+        generation: UInt64
+    ) {
+        guard generation == visionInstallGeneration else { return }
+        if visionInstallCancellationRequested {
+            switch event {
+            case .readyToActivate, .installed:
+                // Work that finished before the cancel landed is reported as it
+                // actually ended, not as a pause.
+                visionInstallCancellationRequested = false
+            default:
+                return
+            }
+        }
+        switch event {
+        case .checking:
+            resetVisionInstallETA()
+            visionInstallState = .checking
+        case .downloadingMetadata:
+            resetVisionInstallETA()
+            visionInstallState = .downloadingMetadata
+        case .planning:
+            resetVisionInstallETA()
+            visionInstallState = .planning
+        case .reservingOutput:
+            resetVisionInstallETA()
+            visionInstallState = .reservingOutput
+        case .copyingPayload(let reused, let downloaded, let total):
+            visionInstallState = .copyingPayload(
+                reusedBytes: reused,
+                downloadedThisRunBytes: downloaded,
+                totalBytes: total)
+            updateVisionInstallETA(
+                reusedBytes: reused,
+                downloadedThisRunBytes: downloaded,
+                totalBytes: total)
+        case .hashingOutput(let file):
+            resetVisionInstallETA()
+            visionInstallState = .hashingOutput(file)
+        case .finalizing:
+            resetVisionInstallETA()
+            visionInstallState = .finalizing
+        case .readyToActivate(let directory):
+            resetVisionInstallETA()
+            visionInstallState = .readyToActivate(directory)
+            visionInstallTask = nil
+        case .installed:
+            resetVisionInstallETA()
+            let textModelDirectory = visionInstallTargetDirectory
+                ?? URL(fileURLWithPath: modelPathText, isDirectory: true)
+                    .standardizedFileURL
+            let status = AppVisionPackInstallationProbe.status(at: textModelDirectory)
+            if visionInstallTargetModelID == selectedModelID {
+                visionInstallationStatus = status
+            }
+            guard status == .complete else {
+                finishVisionInstallFailure(
+                    RepackError.configurationInvalid(
+                        detail: "completed vision install failed verification"),
+                    generation: generation)
+                return
+            }
+            visionInstallState = .installed(modelDirectory: textModelDirectory)
+            visionInstallTask = nil
+        }
+    }
+
+    private func finishVisionInstallStream(generation: UInt64) {
+        guard generation == visionInstallGeneration,
+              visionInstallTask != nil else { return }
+        if visionInstallCancellationRequested || visionInstallState == .cancelling {
+            finishVisionInstallCancellation(generation: generation)
+        } else if !isVisionPackInstalled {
+            finishVisionInstallFailure(
+                RepackError.configurationInvalid(
+                    detail: "vision installer ended before completion"),
+                generation: generation)
+        }
+    }
+
+    private func finishVisionInstallCancellation(generation: UInt64) {
+        guard generation == visionInstallGeneration else { return }
+        resetVisionInstallETA()
+        visionInstallCancellationRequested = false
+        visionInstallTask = nil
+        visionInstallState = .cancelled
+        if visionInstallTargetModelID == selectedModelID {
+            refreshVisionInstallReadiness()
+        }
+    }
+
+    /// Which phase failed. Only a download failure may leave a prepared pack
+    /// that is worth activating; a verification failure must never send the
+    /// user back to Activate, or the same corrupt pack is offered forever.
+    enum VisionFailurePhase { case download, activation }
+
+    func finishVisionInstallFailure(
+        _ error: Error, generation: UInt64,
+        phase: VisionFailurePhase = .download
+    ) {
+        guard generation == visionInstallGeneration else { return }
+        // An error raised because the user cancelled is a pause with saved
+        // progress, not an installation failure.
+        guard !visionInstallCancellationRequested else {
+            finishVisionInstallCancellation(generation: generation)
+            return
+        }
+        resetVisionInstallETA()
+        visionInstallTask = nil
+        let textModelDirectory = visionInstallTargetDirectory
+            ?? URL(fileURLWithPath: modelPathText, isDirectory: true)
+                .standardizedFileURL
+        let target = installs.first { $0.id == visionInstallTargetModelID }
+        let hasSavedDownload = target.map(hasPartialVisionPackDownload(for:))
+            ?? hasPartialVisionPackDownload
+        // A download that finished and verifies is activatable whatever went
+        // wrong afterwards. Reporting it as "needs attention" hid the Activate
+        // button behind a Resume that only repeats work already done. The one
+        // failure that must not come back here is verification itself, or the
+        // same corrupt pack is offered forever — but a lock held by another
+        // process is contention, not corruption.
+        let isContention: Bool
+        if let repackError = error as? RepackError, case .installBusy = repackError {
+            isContention = true
+        } else {
+            isContention = false
+        }
+        if phase == .download || isContention, hasSavedDownload,
+           let output = try? VisionPackLocation.companionURL(
+            forTextModel: textModelDirectory),
+            visionInstaller.preparedInstallIsValid(
+            textModelDirectory: textModelDirectory) {
+            visionInstallState = .readyToActivate(output)
+            if visionInstallTargetModelID == selectedModelID {
+                refreshVisionInstallReadiness(at: textModelDirectory)
+            }
+            return
+        }
+        visionInstallState = hasSavedDownload
+            ? .recoverable("\(error)")
+            : .failed("\(error)")
+        if let repackError = error as? RepackError,
+           case .diskSpaceInsufficient(let path, let required, let available) = repackError {
+            visionInstallReadiness = .insufficientSpace(AppModelInstallRequirement(
+                probePath: path,
+                requiredBytes: required,
+                availableBytes: available))
+        } else {
+            if visionInstallTargetModelID == selectedModelID {
+                refreshVisionInstallReadiness()
+            }
+            if hasSavedDownload {
+                visionInstallState = .recoverable("\(error)")
+            }
+        }
+    }
+
+    private var installETATimestamp: Double {
+        let components = installETAOrigin.duration(to: installETAClock.now).components
+        return Double(components.seconds)
+            + Double(components.attoseconds) / 1_000_000_000_000_000_000
+    }
+
+    private func updateVisionInstallETA(
+        reusedBytes: UInt64,
+        downloadedThisRunBytes: UInt64,
+        totalBytes: UInt64
+    ) {
+        let observation = DownloadETAObservation(
+            reusedBytes: reusedBytes,
+            downloadedThisRunBytes: downloadedThisRunBytes,
+            totalBytes: totalBytes)
+        let presentation = visionInstallETAEstimator.update(
+            observation, timestamp: installETATimestamp)
+        visionInstallETAPresentation = presentation
+        visionInstallETAText = DownloadETAFormatter.string(for: presentation)
+    }
+
+    private func resetVisionInstallETA() {
+        visionInstallETAEstimator.reset()
+        visionInstallETAPresentation = .hidden
+        visionInstallETAText = nil
+    }
+
+    private func applyPersistedSettings(forModelDirectory modelDirectory: URL) {
+        guard settingsPersistenceEnabled else { return }
+        let profileKey = selectedDescriptor.settingsProfileKey
+        let settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory,
+            profileKey: profileKey)
+        let modelSettings = settings.profile(for: profileKey)
+        applySettingsProfile(modelSettings)
+        newlineShortcut = settings.newlineShortcut
+        showPromptExamples = settings.showPromptExamples
+        sentPromptBehavior = settings.sentPromptBehavior
+        loadModelOnLaunch = settings.loadModelOnLaunch
+    }
+
+    private var currentSettingsProfile: AppModelSettingsProfile {
+        AppModelSettingsProfile(
+            contextTokens: maxContextTokens,
+            expertCacheSlots: runtimeOptions.expertCacheSlots,
+            temperature: temperature,
+            topKEnabled: topKEnabled,
+            topK: topK,
+            topPEnabled: topPEnabled,
+            topP: topP,
+            prefillEnabled: runtimeOptions.prefillEnabled,
+            visionResidencyPolicy: runtimeOptions.visionResidencyPolicy,
+            rdadvisePolicy: runtimeOptions.rdadvisePolicy,
+            defaultReasoning: reasoning,
+            defaultReasoningEffort: reasoningEffort,
+            preserveThinking: preserveThinking)
+    }
+
+    private func applySettingsProfile(_ profile: AppModelSettingsProfile) {
+        runtimeOptions = AppRuntimeOptions(
+            expertCacheSlots: profile.expertCacheSlots,
+            prefillEnabled: profile.prefillEnabled,
+            rdadvisePolicy: profile.rdadvisePolicy,
+            // Pinned for the same reason as `init`: the app always releases the
+            // image tower. Reading the persisted value here would let a
+            // `keepReady` written by an older build resurrect ~1 GB of resident
+            // tower on a machine with no control that shows or clears it.
+            visionResidencyPolicy: .onDemand)
+        maxContextTokens = profile.contextTokens
+        temperature = profile.temperature
+        topKEnabled = profile.topKEnabled
+        topK = profile.topK
+        topPEnabled = profile.topPEnabled
+        topP = profile.topP
+        reasoning = profile.defaultReasoning
+        reasoningEffort = profile.defaultReasoningEffort
+        preserveThinking = profile.preserveThinking
+    }
+
+    private func persistSettings() {
+        guard settingsPersistenceEnabled else { return }
+        let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
+        let profileKey = selectedDescriptor.settingsProfileKey
+        var settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory,
+            profileKey: profileKey)
+        settings.setProfile(currentSettingsProfile, for: profileKey)
+        settings.newlineShortcut = newlineShortcut
+        settings.showPromptExamples = showPromptExamples
+        settings.sentPromptBehavior = sentPromptBehavior
+        settings.loadModelOnLaunch = loadModelOnLaunch
+        try? MacAppSettingsFileStore.save(
+            settings,
+            forModelDirectory: modelDirectory)
+    }
+
+    func applyLoadState(_ state: AppModelLoadState) {
+        applyLoadState(state, generation: loadGeneration)
+    }
+
+    /// `sequence` orders the phases a load emits. It is 0 for states this model
+    /// raises itself, which bypass the ordering check.
+    func applyLoadState(_ state: AppModelLoadState, generation: UInt64,
+                        sequence: UInt64 = 0) {
+        guard generation == loadGeneration else { return }
+        if sequence > 0 {
+            guard sequence > appliedLoadSequence else { return }
+            appliedLoadSequence = sequence
+        }
+        if case .ready(let directory, _) = state,
+           directory.standardizedFileURL.path
+            != URL(fileURLWithPath: modelPathText).standardizedFileURL.path {
+            return
+        }
+        loadState = state
+        // An outcome closes the load. Phases emitted before it but delivered
+        // after it must not reopen one that has already finished: `.failed` is
+        // raised here at sequence 0, so it never advanced the counter, and a
+        // late `.loading` hop could put the UI back into a load with no task
+        // left to cancel and no way to start another. `beginLoad` resets the
+        // counter, so the seal lasts exactly one load.
+        switch state {
+        case .notLoaded, .ready, .failed:
+            appliedLoadSequence = .max
+        case .loading, .cancelling, .unloading:
+            break
+        }
+        switch state {
+        case .notLoaded:
+            loadedRuntimeKey = nil
+        case .loading, .cancelling, .unloading:
+            break
+        case .ready(_, let seconds):
+            loadedRuntimeKey = pendingExplicitLoadRuntimeKey
+                ?? activeRunRuntimeKey
+                ?? currentRuntimeKey
+            pendingExplicitLoadRuntimeKey = nil
+            // The freshly loaded model's footprint, so the figure is right
+            // before the first generation rather than after it.
+            sampleLiveMemory()
+            _ = seconds
+        case .failed(let loadError):
+            pendingExplicitLoadRuntimeKey = nil
+            runsAfterCurrentLoad = false
+            error = loadError
+        }
+        if case .ready = state, runsAfterCurrentLoad {
+            runsAfterCurrentLoad = false
+            run()
+        }
+    }
+
+    /// Clear the transcript and start a fresh conversation. The next prompt
+    /// carries no history, so the model starts from nothing.
+
+    /// Releases the transcript's own references to the images this chat was
+    /// showing. They are separate files from the composer's, so nothing else
+    /// frees them — and they outlive the message they were sent with, because
+    /// every earlier turn in the chat is still drawing its own.
+    private func releaseTranscriptImages() {
+        for attachment in retainedRunImages { attachmentStore.remove(attachment) }
+        retainedRunImages = []
+        outputImageAttachments = []
+    }
+
+    private var retainedRunImages: [AppImageAttachment] {
+        get { conversationStore.retainedRunImages }
+        set { conversationStore.retainedRunImages = newValue }
+    }
+
+    /// Deletes every file this session staged. Called when the app is quitting,
+    /// which is the only moment they are all certainly unwanted.
+    public func releaseAllAttachments() {
+        releaseTranscriptImages()
+        for attachment in imageAttachments { attachmentStore.remove(attachment) }
+        imageAttachments.removeAll()
+        attachmentStore.removeAll()
+    }
+
+    /// Memory comes from the process doing the work: the decode service when
+    /// there is one, this process otherwise.
+    private func sampleLiveMemory() {
+        if let reporter = client as? any AppInferenceMemoryReporting {
+            if let bytes = reporter.currentInferenceMemoryBytes {
+                liveMemoryBytes = bytes
+            }
+            if let resident = reporter.currentInferenceResidentBytes {
+                liveResidentBytes = resident
+            }
+            // Refreshed on every sample, so the tower figure tracks a run
+            // instead of appearing only in its final diagnostics.
+            if let tower = reporter.currentInferenceTowerBytes {
+                visionTowerMappedBytes = tower
+            }
+        } else {
+            liveMemoryBytes = memorySampler.sample()
+            // The occupied figure, not the footprint again: this row is the one
+            // that includes the mapped weights, and feeding it the footprint
+            // made both numbers report the same thing.
+            liveResidentBytes = memorySampler.occupiedSample()
+        }
+    }
+
+    /// Resident bytes for display, on the same terms as
+    /// `currentProcessMemoryBytes`.
+    public var currentProcessResidentBytes: UInt64? {
+        guard loadState.isReady || isRunning else { return nil }
+        if let liveResidentBytes { return liveResidentBytes }
+        if let reporter = client as? any AppInferenceMemoryReporting {
+            return reporter.currentInferenceResidentBytes
+        }
+        return memorySampler.occupiedSample()
+    }
+
+    public func clearOutput() {
+        guard !isRunning else { return }
+        releaseTranscriptImages()
+        clearDocuments()
+        beginNewConversation(modelID: selectedDescriptor.settingsProfileKey)
+        generationTranscriptMailbox?.reset()
+        diagnostics = nil
+        error = nil
+    }
+
+    private func beginNewConversation(modelID: String) {
+        conversationStore.startNewConversation(modelID: modelID)
+    }
+
+    public func run() {
+        guard canRun else { return }
+        var request: AppGenerationRequest
+        do {
+            request = try makeRequest()
+        } catch let appError as AppInferenceError {
+            error = appError
+            return
+        } catch {
+            let appError = AppInferenceError.unknown("\(error)")
+            self.error = appError
+            return
+        }
+
+        // The run reads the transcript's own hard links rather than the
+        // composer's files, so clearing the composer below cannot delete an
+        // image this request has not opened yet. One set of files, one owner.
+        // A failed retain leaves no reference that is guaranteed to outlive
+        // the composer, so the run is refused instead of started against files
+        // that are about to be removed.
+        var retained: [AppImageAttachment] = []
+        do {
+            for attachment in request.imageAttachments {
+                retained.append(try attachmentStore.retain(attachment))
+            }
+        } catch {
+            for attachment in retained { attachmentStore.remove(attachment) }
+            imageAttachmentError = String(describing: error)
+            self.error = .invalidRequest(
+                "Could not prepare the attached images for this run: \(error)")
+            return
+        }
+        request.imageAttachments = retained
+
+        persistSettings()
+
+        generationTranscriptMailbox?.reset()
+        runIdentity &+= 1
+        conversationStore.outputTurnIsRecorded = false
+        // The transcript shows what was typed, not the flattened text the
+        // model reads: the attached files are drawn as files beside it.
+        outputPromptText = promptText
+        outputImageAttachments = retained
+        retainedRunImages.append(contentsOf: retained)
+        outputDocumentAttachments = documentAttachments
+        outputText = ""
+        outputThinkingText = ""
+        diagnostics = nil
+        error = nil
+        hasHandledTerminalEvent = false
+        activeRunRuntimeKey = AppLoadedRuntimeKey(
+            modelDirectory: request.modelDirectory,
+            maxContextTokens: request.maxContextTokens,
+            options: request.runtimeOptions,
+            forceLogitsHead: !request.isPureGreedy)
+        isCancellationPending = false
+        liveTokenCount = 0
+        liveElapsedDecodeSeconds = 0
+        livePrefillDone = 0
+        livePrefillTotal = 0
+        sampleLiveMemory()
+        phase = .prefill
+        runState = .running
+        // The chat exists from here, not from the first finished answer. This
+        // names it, puts it at the top of the sidebar, and writes the message to
+        // disk before a single token is generated, so stopping the model — or
+        // quitting — leaves the question that was asked rather than nothing.
+        conversationStore.beginTurn(
+            AppChatTurn(
+                prompt: outputPromptText,
+                response: "",
+                documents: outputDocumentAttachments,
+                images: retained,
+                modelID: selectedDescriptor.settingsProfileKey),
+            attachments: retained,
+            modelID: selectedDescriptor.settingsProfileKey)
+        if sentPromptBehavior == .clear {
+            promptText = ""
+            documentAttachments.removeAll()
+            documentAttachmentNotice = nil
+            // Images used to survive a cleared prompt, so the next Run silently
+            // re-attached them to a completely different message. Dropping them
+            // is safe because the request above was repointed at the retained
+            // links: removing these files cannot pull the ground out from under
+            // a run that has not opened its images yet.
+            for attachment in imageAttachments { attachmentStore.remove(attachment) }
+            imageAttachments.removeAll()
+            imageAttachmentError = nil
+        }
+
+        runTask = Task.detached { [weak self, client, request] in
+            guard let self else { return }
+            do {
+                for try await event in client.generate(request) {
+                    await self.apply(event)
+                }
+            } catch let appError as AppInferenceError {
+                await self.finishStreamFailure(appError)
+            } catch {
+                await self.finishStreamFailure(.unknown("\(error)"))
+            }
+        }
+    }
+
+    public func submit() {
+        guard canSubmit else { return }
+        if canRun {
+            run()
+        } else {
+            runsAfterCurrentLoad = true
+            loadModel()
+        }
+    }
+
+    public func cancel() {
+        guard canCancel else { return }
+        isCancellationPending = true
+        client.cancel()
+    }
+
+    /// What the model reads for the message being composed: attached files
+    /// first, then what was typed.
+    public var composedPromptText: String {
+        let preamble = documentAttachments.promptPreamble
+        if preamble.isEmpty { return promptText }
+        if promptText.isEmpty { return preamble }
+        return preamble + "\n\n" + promptText
+    }
+
+    /// Completed turns as the inference client should see them: documents
+    /// flattened back into the prompt, and images kept on the newest turns that
+    /// still fit the image budget.
+    ///
+    /// The budget matters. Every image carried costs an encode on every turn,
+    /// and the context cannot hold more of them than `maximumImageAttachments`
+    /// anyway — a conversation that has collected a dozen would otherwise
+    /// encode all twelve only for the renderer to drop most of them.
+    func requestHistory(imageBudget: Int) -> [AppChatTurn] {
+        var remaining = imageBudget
+        var reversed: [AppChatTurn] = []
+        // A message that was never answered is not an exchange. Since a turn is
+        // now saved the moment it is sent, a run stopped before its first token
+        // — or one the app was quit during — leaves a turn with no response,
+        // and rendering that as an empty assistant message would tell the model
+        // it had already replied with nothing. It still shows in the transcript
+        // as the unanswered question it is.
+        for turn in conversation.reversed() where !turn.response.isEmpty {
+            // A file the archive no longer holds cannot be encoded, and sending
+            // its path fails the whole run rather than one image.
+            let readable = turn.images.filter {
+                FileManager.default.fileExists(atPath: $0.fileURL.path)
+            }
+            let carries = !readable.isEmpty && readable.count <= remaining
+            if carries { remaining -= readable.count }
+            reversed.append(turn.requestTurn(carrying: carries ? readable : []))
+        }
+        return reversed.reversed()
+    }
+
+    public func makeRequest() throws -> AppGenerationRequest {
+        // A run executes against the session that is actually loaded. Sending
+        // the current settings instead meant that changing Context, Slots or
+        // image residency and pressing Generate — without reloading first —
+        // was refused outright with "generation runtime options do not match
+        // the loaded session". The settings still apply on reload, which is
+        // what the Memory section promises; they simply no longer break the
+        // run in the meantime.
+        let effective = loadedRuntimeKey ?? currentRuntimeKey
+        let request = AppGenerationRequest(
+            modelDirectory: URL(fileURLWithPath: modelPathText),
+            // Attached files become prompt text here, at the one point where
+            // the model's view of the message is built. Everything above this
+            // line keeps them as attachments.
+            prompt: composedPromptText,
+            history: requestHistory(
+                imageBudget: max(0, maximumImageAttachments - imageAttachments.count)),
+            imageAttachments: imageAttachments,
+            maxNewTokens: maxNewTokensOverride ?? effective.maxContextTokens,
+            maxContextTokens: effective.maxContextTokens,
+            reasoning: selectedDescriptor.family == .gptOss ? .off : reasoning,
+            reasoningEffort: selectedDescriptor.family == .gptOss
+                ? reasoningEffort : nil,
+            preserveThinking: selectedDescriptor.family == .qwen36
+                && preserveThinking,
+            temperature: Float(temperature),
+            topK: topKEnabled ? topK : nil,
+            topP: topKEnabled && topPEnabled ? Float(topP) : nil,
+            repetitionPenalty: 1.0,
+            runtimeOptions: effective.options(
+                prefillEnabled: runtimeOptions.prefillEnabled,
+                prefillChunkTokens: runtimeOptions.prefillChunkTokens))
+        try request.validate(requireModelDirectory: true)
+        return request
+    }
+
+    func apply(_ event: AppInferenceEvent) {
+        switch event {
+        case .memorySample:
+            sampleLiveMemory()
+        case .prefillProgress(let done, let total):
+            phase = .prefill
+            livePrefillDone = done
+            livePrefillTotal = total
+            sampleLiveMemory()
+        case .token(let token):
+            phase = .decode
+            liveTokenCount = token.index + 1
+            liveElapsedDecodeSeconds = token.elapsedDecodeSeconds
+            sampleLiveMemory()
+            if !token.textDelta.isEmpty {
+                outputText += token.textDelta
+            }
+        case .thinking(let token):
+            phase = .decode
+            liveTokenCount = token.index + 1
+            liveElapsedDecodeSeconds = token.elapsedDecodeSeconds
+            sampleLiveMemory()
+            if !token.textDelta.isEmpty {
+                outputThinkingText += token.textDelta
+            }
+        case .toolCall:
+            // Chat does not advertise tools. The app-hosted server consumes
+            // this event through the shared broker instead.
+            break
+        case .finished(let diagnostics):
+            visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
+            finishSuccessfully(diagnostics)
+        case .cancelled(let diagnostics):
+            finishCancelled(diagnostics)
+        case .failed(let appError, let partial):
+            diagnostics = partial
+            materializeServiceTranscript()
+            finishWithError(appError)
+        }
+    }
+
+    private func finishSuccessfully(_ diagnostics: AppDiagnostics) {
+        guard !hasHandledTerminalEvent else { return }
+        hasHandledTerminalEvent = true
+        materializeServiceTranscript()
+        self.diagnostics = diagnostics
+        recordAnswer()
+        finishTerminalRun()
+    }
+
+    /// Files whatever the run produced against the turn `run` already saved.
+    ///
+    /// Every terminal outcome comes through here, a stop included. An answer
+    /// cut off halfway is what the reader has in front of them, and discarding
+    /// it — which is what a cancelled run used to do — threw away the whole
+    /// exchange, question and all.
+    private func recordAnswer() {
+        conversationStore.completeTurn(
+            response: outputResponsePlainText,
+            thinking: outputThinkingText.isEmpty ? nil : outputThinkingText)
+    }
+
+    private func finishCancelled(_ diagnostics: AppDiagnostics) {
+        guard !hasHandledTerminalEvent else { return }
+        hasHandledTerminalEvent = true
+        materializeServiceTranscript()
+        self.diagnostics = diagnostics
+        error = .cancelled
+        recordAnswer()
+        finishTerminalRun()
+    }
+
+    private func materializeServiceTranscript() {
+        guard let reporter = client as? any AppInferenceTranscriptReporting else { return }
+        outputText = reporter.generationTranscriptMailbox.completeText
+    }
+
+    private func finishWithError(_ appError: AppInferenceError) {
+        guard !hasHandledTerminalEvent else { return }
+        hasHandledTerminalEvent = true
+        error = appError
+        recordAnswer()
+        finishTerminalRun()
+    }
+
+    private func finishStreamFailure(_ appError: AppInferenceError) {
+        materializeServiceTranscript()
+        finishWithError(appError)
+    }
+
+    private func finishTerminalRun() {
+        phase = .idle
+        runState = .idle
+        isCancellationPending = false
+        activeRunRuntimeKey = nil
+        runTask = nil
+    }
+
+    private func clearLoadTask(generation: UInt64) {
+        guard generation == loadGeneration else { return }
+        loadTask = nil
+        pendingExplicitLoadRuntimeKey = nil
+    }
+
+    private func clearUnloadTask(generation: UInt64) {
+        guard generation == unloadGeneration else { return }
+        unloadTask = nil
+    }
+}

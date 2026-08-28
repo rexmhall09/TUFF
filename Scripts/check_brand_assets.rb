@@ -22,7 +22,7 @@ def png_header(relative_path)
   { width: width, height: height, depth: depth, color_type: color_type }
 end
 
-theme = read("Sources/TurboFieldfareApp/MacPresentation/TurboFieldfareMacTheme.swift")
+theme = read("Sources/TUFFApp/MacPresentation/TUFFMacTheme.swift")
 [
   "srgbRed: 111.0 / 255.0",
   "green: 77.0 / 255.0",
@@ -88,7 +88,7 @@ fail_check("the icon must use both approved violet shades") unless
 {
   "Brand/TUFFLogo.png" => true,
   "docs/assets/tuff-logo.png" => true,
-  "Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png" => true,
+  "Sources/TUFFApp/Mac/Resources/tuff-app-icon.png" => true,
 }.each do |path, requires_alpha|
   header = png_header(path)
   fail_check("#{path} must be 1024 by 1024") unless

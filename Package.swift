@@ -2,18 +2,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "TurboFieldfare",
+    name: "TUFF",
     platforms: [
         .macOS(.v15),
         .iOS(.v26),
     ],
     products: [
-        .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
-        .executable(name: "TUFFRepack", targets: ["TurboFieldfareRepack"]),
-        .executable(name: "TUFFCLI", targets: ["TurboFieldfareCLI"]),
-        .executable(name: "TUFF", targets: ["TurboFieldfareMac"]),
-        .executable(name: "TUFFDecodeService", targets: ["TurboFieldfareDecodeService"]),
-        .executable(name: "TUFFServer", targets: ["TurboFieldfareServer"]),
+        .library(name: "TUFFEngine", targets: ["TUFFEngine"]),
+        .executable(name: "TUFFRepack", targets: ["TUFFRepack"]),
+        .executable(name: "TUFFCLI", targets: ["TUFFCLI"]),
+        .executable(name: "TUFF", targets: ["TUFFMac"]),
+        .executable(name: "TUFFDecodeService", targets: ["TUFFDecodeService"]),
+        .executable(name: "TUFFServer", targets: ["TUFFServer"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -27,117 +27,117 @@ let package = Package(
             path: "Sources/TUFFModelCatalog"
         ),
         .target(
-            name: "TurboFieldfareFormat",
-            path: "Sources/TurboFieldfareFormat"
+            name: "TUFFFormat",
+            path: "Sources/TUFFFormat"
         ),
         .target(
-            name: "TurboFieldfare",
+            name: "TUFFEngine",
             dependencies: [
-                "TurboFieldfareFormat",
+                "TUFFFormat",
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Hub", package: "swift-transformers"),
             ],
-            path: "Sources/TurboFieldfare",
+            path: "Sources/TUFFEngine",
             resources: [
                 .copy("Metal"),
             ]
         ),
         .target(
-            name: "TurboFieldfareRepackCore",
-            dependencies: ["TUFFModelCatalog", "TurboFieldfareFormat"],
-            path: "Sources/TurboFieldfareRepack/Core"
+            name: "TUFFRepackCore",
+            dependencies: ["TUFFModelCatalog", "TUFFFormat"],
+            path: "Sources/TUFFRepack/Core"
         ),
         .executableTarget(
-            name: "TurboFieldfareRepack",
-            dependencies: ["TurboFieldfareRepackCore"],
-            path: "Sources/TurboFieldfareRepack/Command"
+            name: "TUFFRepack",
+            dependencies: ["TUFFRepackCore"],
+            path: "Sources/TUFFRepack/Command"
         ),
         .target(
-            name: "TurboFieldfareCLICore",
-            dependencies: ["TurboFieldfare"],
-            path: "Sources/TurboFieldfareCLI",
+            name: "TUFFCLICore",
+            dependencies: ["TUFFEngine"],
+            path: "Sources/TUFFCLI",
             exclude: ["Command"]
         ),
         .executableTarget(
-            name: "TurboFieldfareCLI",
-            dependencies: ["TurboFieldfareCLICore"],
-            path: "Sources/TurboFieldfareCLI/Command"
+            name: "TUFFCLI",
+            dependencies: ["TUFFCLICore"],
+            path: "Sources/TUFFCLI/Command"
         ),
         .target(
-            name: "TurboFieldfareAppCore",
-            dependencies: ["TUFFModelCatalog", "TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol"],
-            path: "Sources/TurboFieldfareApp/Core",
+            name: "TUFFAppCore",
+            dependencies: ["TUFFModelCatalog", "TUFFEngine", "TUFFRepackCore", "TUFFDecodeProtocol"],
+            path: "Sources/TUFFApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
             ]
         ),
         .target(
-            name: "TurboFieldfareMacPresentation",
+            name: "TUFFMacPresentation",
             dependencies: [
-                "TurboFieldfareAppCore",
+                "TUFFAppCore",
                 .product(name: "SwiftMath", package: "SwiftMath"),
             ],
-            path: "Sources/TurboFieldfareApp/MacPresentation"
+            path: "Sources/TUFFApp/MacPresentation"
         ),
         .target(
-            name: "TurboFieldfareDecodeProtocol",
-            dependencies: ["TurboFieldfare"],
-            path: "Sources/TurboFieldfareDecodeProtocol"
+            name: "TUFFDecodeProtocol",
+            dependencies: ["TUFFEngine"],
+            path: "Sources/TUFFDecodeProtocol"
         ),
         .executableTarget(
-            name: "TurboFieldfareDecodeService",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfareDecodeProtocol"],
-            path: "Sources/TurboFieldfareDecodeService"
+            name: "TUFFDecodeService",
+            dependencies: ["TUFFAppCore", "TUFFDecodeProtocol"],
+            path: "Sources/TUFFDecodeService"
         ),
         .target(
-            name: "TurboFieldfareServerCore",
+            name: "TUFFServerCore",
             dependencies: [
                 "TUFFModelCatalog",
-                "TurboFieldfare",
+                "TUFFEngine",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Sources/TurboFieldfareServer/Core"
+            path: "Sources/TUFFServer/Core"
         ),
         .target(
-            name: "TurboFieldfareAppServer",
+            name: "TUFFAppServer",
             dependencies: [
-                "TurboFieldfareAppCore",
-                "TurboFieldfareServerCore",
+                "TUFFAppCore",
+                "TUFFServerCore",
                 .product(name: "NIOCore", package: "swift-nio"),
             ],
-            path: "Sources/TurboFieldfareApp/Server"
+            path: "Sources/TUFFApp/Server"
         ),
         .target(
-            name: "TurboFieldfareAppUpdater",
+            name: "TUFFAppUpdater",
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
-            path: "Sources/TurboFieldfareApp/Updater"
+            path: "Sources/TUFFApp/Updater"
         ),
         .executableTarget(
-            name: "TurboFieldfareServer",
-            dependencies: ["TurboFieldfareServerCore"],
-            path: "Sources/TurboFieldfareServer/Command"
+            name: "TUFFServer",
+            dependencies: ["TUFFServerCore"],
+            path: "Sources/TUFFServer/Command"
         ),
         .executableTarget(
-            name: "TurboFieldfareMac",
+            name: "TUFFMac",
             dependencies: [
-                "TurboFieldfareAppCore",
-                "TurboFieldfareAppServer",
-                "TurboFieldfareAppUpdater",
-                "TurboFieldfareMacPresentation",
+                "TUFFAppCore",
+                "TUFFAppServer",
+                "TUFFAppUpdater",
+                "TUFFMacPresentation",
             ],
-            path: "Sources/TurboFieldfareApp/Mac",
+            path: "Sources/TUFFApp/Mac",
             resources: [
                 .copy("Resources/tuff-app-icon.png"),
             ]
         ),
         .target(
-            name: "TurboFieldfareValidationSupport",
-            dependencies: ["TurboFieldfare"],
-            path: "Sources/TurboFieldfareValidation/Support"
+            name: "TUFFValidationSupport",
+            dependencies: ["TUFFEngine"],
+            path: "Sources/TUFFValidation/Support"
         ),
         .testTarget(
             name: "TUFFModelCatalogTests",
@@ -145,86 +145,86 @@ let package = Package(
             path: "Tests/TUFFModelCatalog"
         ),
         .testTarget(
-            name: "TurboFieldfareFormatTests",
-            dependencies: ["TurboFieldfareFormat"],
-            path: "Tests/TurboFieldfareFormat"
+            name: "TUFFFormatTests",
+            dependencies: ["TUFFFormat"],
+            path: "Tests/TUFFFormat"
         ),
         .testTarget(
-            name: "TurboFieldfareFormatCompatibilityTests",
-            dependencies: ["TurboFieldfareFormat", "TurboFieldfare", "TurboFieldfareRepackCore"],
-            path: "Tests/TurboFieldfareFormatCompatibility",
+            name: "TUFFFormatCompatibilityTests",
+            dependencies: ["TUFFFormat", "TUFFEngine", "TUFFRepackCore"],
+            path: "Tests/TUFFFormatCompatibility",
             resources: [.copy("Fixtures")]
         ),
         .testTarget(
-            name: "TurboFieldfareTestsCore",
+            name: "TUFFTestsCore",
             dependencies: [
-                "TurboFieldfare",
-                "TurboFieldfareValidationSupport",
-                "TurboFieldfareRepackCore",
-                "TurboFieldfareCLICore",
+                "TUFFEngine",
+                "TUFFValidationSupport",
+                "TUFFRepackCore",
+                "TUFFCLICore",
                 .product(name: "Hub", package: "swift-transformers"),
             ],
-            path: "Tests/TurboFieldfare/Core",
+            path: "Tests/TUFFEngine/Core",
             resources: [
                 .copy("Tokenization/Fixtures"),
                 .copy("Runtime/Vision/Fixtures/images"),
             ]
         ),
         .testTarget(
-            name: "TurboFieldfareRepackTests",
-            dependencies: ["TurboFieldfareFormat", "TurboFieldfareRepackCore"],
-            path: "Tests/TurboFieldfareRepack/Core"
+            name: "TUFFRepackTests",
+            dependencies: ["TUFFFormat", "TUFFRepackCore"],
+            path: "Tests/TUFFRepack/Core"
         ),
         .testTarget(
-            name: "TurboFieldfareAppCoreTests",
+            name: "TUFFAppCoreTests",
             dependencies: [
                 "TUFFModelCatalog",
-                "TurboFieldfareAppCore",
-                "TurboFieldfare",
-                "TurboFieldfareRepackCore",
-                "TurboFieldfareDecodeProtocol",
+                "TUFFAppCore",
+                "TUFFEngine",
+                "TUFFRepackCore",
+                "TUFFDecodeProtocol",
             ],
-            path: "Tests/TurboFieldfareApp/Core"
+            path: "Tests/TUFFApp/Core"
         ),
         .testTarget(
-            name: "TurboFieldfareDecodeServiceTests",
-            dependencies: ["TurboFieldfareDecodeService", "TurboFieldfareAppCore", "TurboFieldfareDecodeProtocol"],
-            path: "Tests/TurboFieldfareDecodeService"
+            name: "TUFFDecodeServiceTests",
+            dependencies: ["TUFFDecodeService", "TUFFAppCore", "TUFFDecodeProtocol"],
+            path: "Tests/TUFFDecodeService"
         ),
         .testTarget(
-            name: "TurboFieldfareMacPresentationTests",
+            name: "TUFFMacPresentationTests",
             dependencies: [
                 "TUFFModelCatalog",
-                "TurboFieldfareAppCore",
-                "TurboFieldfareAppServer",
-                "TurboFieldfareAppUpdater",
-                "TurboFieldfareMac",
-                "TurboFieldfareMacPresentation",
+                "TUFFAppCore",
+                "TUFFAppServer",
+                "TUFFAppUpdater",
+                "TUFFMac",
+                "TUFFMacPresentation",
             ],
-            path: "Tests/TurboFieldfareApp/MacPresentation"
+            path: "Tests/TUFFApp/MacPresentation"
         ),
         .testTarget(
-            name: "TurboFieldfareServerTests",
+            name: "TUFFServerTests",
             dependencies: [
-                "TurboFieldfareServerCore",
+                "TUFFServerCore",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
-            path: "Tests/TurboFieldfareServer",
+            path: "Tests/TUFFServer",
             resources: [.copy("Fixtures")]
         ),
         .testTarget(
-            name: "TurboFieldfareAppServerTests",
+            name: "TUFFAppServerTests",
             dependencies: [
-                "TurboFieldfareAppCore",
-                "TurboFieldfareAppServer",
-                "TurboFieldfareServerCore",
+                "TUFFAppCore",
+                "TUFFAppServer",
+                "TUFFServerCore",
             ],
-            path: "Tests/TurboFieldfareAppServer"
+            path: "Tests/TUFFAppServer"
         ),
         .testTarget(
-            name: "TurboFieldfareAppUpdaterTests",
-            dependencies: ["TurboFieldfareAppUpdater"],
-            path: "Tests/TurboFieldfareAppUpdater"
+            name: "TUFFAppUpdaterTests",
+            dependencies: ["TUFFAppUpdater"],
+            path: "Tests/TUFFAppUpdater"
         ),
     ]
 )

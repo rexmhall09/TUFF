@@ -33,7 +33,7 @@ xcrun actool --compile "$build" --platform macosx \
   --output-partial-info-plist "$partial" Brand/TUFF.icon
 ```
 
-`Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png` is no longer what
+`Sources/TUFFApp/Mac/Resources/tuff-app-icon.png` is no longer what
 the app installs as its icon. It is a flattened 1024 preview that the app shows
 inside its own interface and that the README uses. Regenerate it after changing
 the mark:
@@ -44,7 +44,7 @@ the mark:
   --output-file /tmp/tuff-app-icon-16bit.png \
   --platform macOS --rendition Default --width 1024 --height 1024 --scale 1
 magick /tmp/tuff-app-icon-16bit.png -depth 8 \
-  PNG32:Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png
+  PNG32:Sources/TUFFApp/Mac/Resources/tuff-app-icon.png
 ruby Scripts/check_brand_assets.rb
 ```
 

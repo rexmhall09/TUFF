@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Sources/TurboFieldfareApp/Mac/Resources/tuff-app-icon.png" alt="TUFF app icon" width="170">
+  <img src="Sources/TUFFApp/Mac/Resources/tuff-app-icon.png" alt="TUFF app icon" width="170">
 </p>
 
 <h1 align="center">TUFF</h1>
@@ -31,10 +31,10 @@ resident, reads the experts it needs from SSD, and reuses them through a bounded
 cache. That is how I can run the 61 GiB GPT-OSS 120B checkpoint on my 16 GB M2
 MacBook Air without swap.
 
-Version 2 is a much bigger project than the original app. It has five models,
-persistent chats, Markdown and native LaTeX rendering, image add-ons, per-model
-settings, a shared local server, hardware eligibility checks, and signed binary
-updates.
+Version 3 is a much bigger project than the original app. It has five models,
+persistent and continuous chats, Markdown and native LaTeX rendering on both
+sides of the conversation, image and file attachments, per-model settings, a
+shared local server, hardware eligibility checks, and signed binary updates.
 
 ## Why TUFF
 
@@ -123,7 +123,11 @@ The interface has four places:
 - **Chat** keeps named conversations, restores them after a restart, and binds
   each conversation to its model. Return sends by default. If the selected
   model is installed but unloaded, sending a message loads it and continues
-  automatically.
+  automatically. The conversation is one continuous scroll: images, files and
+  reasoning belong to the message they were sent with, and every answer is
+  labelled with the model that produced it, so a chat that switched models
+  mid-way still says which answer came from where. The model picker in the
+  message box offers the models that are on this Mac; downloads live in Models.
 - **Models** shows all five checkpoints and their real disk and memory
   requirements. Image support lives inside the model card as a separate,
   optional download.
@@ -132,9 +136,15 @@ The interface has four places:
 - **Settings** keeps simple chat behavior separate from per-model context,
   sampling, cache, prefill, and memory controls.
 
-Assistant responses render headings, lists, links, quotes, code blocks, inline
-code, emphasis, and LaTeX math such as `$a^2 + b^2 = c^2$`. Math is typeset
-locally. Nothing is sent to a web renderer.
+Both sides of the conversation render headings, lists, links, quotes, code
+blocks, inline code, emphasis, and LaTeX math such as `$a^2 + b^2 = c^2$`. Math
+is typeset locally. Nothing is sent to a web renderer.
+
+Text, Markdown, CSV, JSON and PDF attach as files rather than as pasted text.
+The extracted text is what the model reads — every model reads text — but the
+composer and the transcript show the file, with its name and an estimate of how
+much of the context it uses. A file stays with its message, so a follow-up
+question can still refer to it.
 
 ## Models
 
@@ -217,6 +227,11 @@ Image input fails closed. If the companion is missing, corrupt, built for a
 different model, or unsupported by the Mac, TUFF rejects the image. It never
 silently drops an image and answers the remaining text.
 
+Images stay in the conversation. A follow-up question is answered by a model
+that can still see the picture, up to as many images as the context window
+holds; older ones are dropped from the context, oldest first, exactly as older
+turns are.
+
 ## Local server
 
 The easiest way to start the server is from the Server screen in the app. The
@@ -250,7 +265,7 @@ swift build -c release
 To build the complete app bundle, embedded updater, ZIP, and checksum:
 
 ```bash
-Scripts/package_app.sh 2.2.0
+Scripts/package_app.sh 3.0.0
 open dist/TUFF.app
 ```
 
