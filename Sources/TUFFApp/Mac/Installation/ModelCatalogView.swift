@@ -42,17 +42,10 @@ struct ModelCatalogView: View {
     }
 
     private func groupHeader(_ group: ModelCatalogGroup) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(group.title)
-                .font(.headline)
-            Text(group.subtitle)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.top, 4)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
+        Text(group.title)
+            .font(.headline)
+            .padding(.top, 4)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -73,21 +66,7 @@ enum ModelCatalogGroup: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .streaming: "Streamed from SSD"
-        case .resident: "Held in memory"
-        }
-    }
-
-    var subtitle: String {
-        switch self {
-        case .streaming:
-            "Mixture-of-experts models. TUFF keeps the shared weights resident "
-                + "and reads each token's experts from disk, so how large a "
-                + "model you can run is governed by free storage rather than by "
-                + "RAM. Decode is slower in exchange."
-        case .resident:
-            "Dense models, loaded whole. Every weight is used for every token, "
-                + "so these are the fastest to decode and are bounded by memory "
-                + "rather than by disk."
+        case .resident: "Held in Memory"
         }
     }
 }

@@ -10,11 +10,26 @@ enum RepackModelFamily: String, Sendable, Equatable {
 }
 
 enum RepackModelVariant: String, Sendable, Equatable {
+    case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
+}
+
+/// Which dense Gemma a checkpoint is, from its own shape.
+///
+/// Every dense Gemma used to be labelled E4B, which was true while E4B was the
+/// only one. E2B repacked correctly — every shape in the manifest was its
+/// own — and then carried E4B's variant name, so the installed model was
+/// validated against E4B's architecture and a complete, correct download was
+/// reported as "completed install did not pass metadata validation".
+///
+/// Keyed on two dimensions rather than one so a future dense Gemma that
+/// happens to share a hidden size cannot silently inherit a name.
+func denseGemmaVariant(hiddenSize: Int, numLayers: Int) -> RepackModelVariant {
+    hiddenSize == 1_536 && numLayers == 35 ? .gemma4_E2B : .gemma4_E4B
 }
 
 enum RepackFeedForwardKind: String, Sendable, Equatable {
@@ -303,7 +318,9 @@ struct ArchInfo: Sendable, Equatable {
             fullAttentionLayerMask: mask,
             hiddenActivation: act,
             family: .gemma4,
-            variant: dense ? .gemma4_E4B : .gemma4_26B_A4B,
+            variant: dense ? denseGemmaVariant(
+                hiddenSize: try i("hidden_size"),
+                numLayers: try i("num_hidden_layers")) : .gemma4_26B_A4B,
             feedForwardKind: dense ? .dense : .mixtureOfExperts,
             hiddenSizePerLayerInput: optionalInt("hidden_size_per_layer_input") ?? 0,
             vocabSizePerLayerInput: optionalInt("vocab_size_per_layer_input") ?? 0,

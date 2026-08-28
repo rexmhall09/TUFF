@@ -310,9 +310,21 @@ public final class ModelInstallCoordinator: Identifiable {
             installationStatus = AppModelInstallationProbe.status(
                 at: directory, descriptor: descriptor)
             guard installationStatus == .complete else {
+                // Say what failed. The probe knows exactly which check did not
+                // hold, and throwing that away left "did not pass metadata
+                // validation" as the only clue to a download that had in fact
+                // completed correctly and was merely labelled with the wrong
+                // variant.
+                let reason: String
+                if case .partial(let detail) = installationStatus {
+                    reason = detail
+                } else {
+                    reason = "the installed files are incomplete"
+                }
                 finishFailure(
                     RepackError.configurationInvalid(
-                        detail: "completed install did not pass metadata validation"),
+                        detail: "completed install did not pass metadata "
+                            + "validation: \(reason)"),
                     generation: generation)
                 return
             }
