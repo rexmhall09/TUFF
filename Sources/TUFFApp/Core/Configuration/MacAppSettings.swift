@@ -16,10 +16,10 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
     public var defaultReasoning: ChatReasoning
     public var defaultReasoningEffort: GPTOSSReasoningEffort
     public var preserveThinking: Bool
-    /// Standing instructions sent as a system message ahead of every chat with
-    /// this model. Empty means none, which is what every model shipped with
-    /// before v3: the tokenizer has always rendered a system message and
-    /// nothing in the app could put one there.
+    /// The system prompt sent ahead of every chat with this model. Empty means
+    /// none, which is what every model shipped with before v3: the tokenizer
+    /// has always rendered a system message and nothing in the app could put
+    /// one there.
     ///
     /// Decoded with a default so an archive written by an older build loads.
     public var systemPrompt: String = ""

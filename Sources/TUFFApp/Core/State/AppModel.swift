@@ -2549,10 +2549,11 @@ public final class AppModel {
     /// as soon as it is spent, so it applies to one run only.
     private var pendingAssistantPrefix: String?
 
-    // MARK: - Standing instructions
+    // MARK: - System prompt
 
-    /// The model's standing instructions, used by every chat that has not
-    /// overridden them.
+    /// The selected model's system prompt, sent ahead of every chat with it.
+    /// Set in Settings and stored with the rest of that model's profile, so
+    /// each model carries its own.
     public var modelSystemPrompt: String {
         get { settingsStore.systemPrompt }
         set {
@@ -2562,21 +2563,9 @@ public final class AppModel {
         }
     }
 
-    /// This chat's own instructions, or nil when it follows the model's.
-    public var conversationSystemPrompt: String? {
-        conversationStore.selectedConversation?.systemPrompt
-    }
-
-    /// What the next run will actually send. A chat override wins, including an
-    /// empty one — "this chat has no instructions" is a real choice and must not
-    /// fall back to the model's.
+    /// What the next run will send, or nil when there is nothing to send.
     public var effectiveSystemPrompt: String? {
-        let resolved = conversationSystemPrompt ?? modelSystemPrompt
-        return resolved.isEmpty ? nil : resolved
-    }
-
-    public func setConversationSystemPrompt(_ prompt: String?) {
-        conversationStore.setSystemPrompt(prompt)
+        modelSystemPrompt.isEmpty ? nil : modelSystemPrompt
     }
 
     /// Turns the last run had to drop to make its prompt fit, or nil when it

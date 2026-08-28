@@ -4,7 +4,7 @@ import TUFFEngine
 public struct AppGenerationRequest: Equatable, Sendable {
     public var modelDirectory: URL
     public var prompt: String
-    /// Standing instructions rendered as a system message ahead of the whole
+    /// The system prompt, rendered as a system message ahead of the whole
     /// conversation. Empty means none.
     public var systemPrompt: String
     /// Text the model should treat as the beginning of its own reply, appended

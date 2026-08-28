@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import TUFFAppCore
 
-/// Rewinding a conversation, the context estimate, and standing instructions.
-@Suite(.serialized) @MainActor struct AppRewindAndInstructionsTests {
+/// Rewinding a conversation, the context estimate, and the system prompt.
+@Suite(.serialized) @MainActor struct AppRewindAndSystemPromptTests {
     private func makeStore() -> (URL, AppConversationStore) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("tuff-rewind-\(UUID().uuidString)", isDirectory: true)
@@ -95,50 +95,44 @@ import Testing
         #expect(model.conversation.count == 1)
     }
 
-    // MARK: - Standing instructions
+    // MARK: - System prompt
 
-    @Test func aChatOverridesTheModelDefault() {
+    @Test func theSystemPromptIsSentWhenSetAndOmittedWhenNot() {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
         let model = AppModel(conversationStore: store)
-        store.startNewConversation(modelID: "gemma4-e4b")
-        model.modelSystemPrompt = "Be brief."
 
+        #expect(model.effectiveSystemPrompt == nil,
+                "no system prompt means no system message, not an empty one")
+
+        model.modelSystemPrompt = "Be brief."
         #expect(model.effectiveSystemPrompt == "Be brief.")
 
-        model.setConversationSystemPrompt("Answer in French.")
-        #expect(model.effectiveSystemPrompt == "Answer in French.")
-    }
-
-    /// "This chat has none" is a different thing from "this chat follows the
-    /// model", and must not quietly become the model's.
-    @Test func anEmptyOverrideMeansNoInstructionsRatherThanTheDefault() {
-        let (root, store) = makeStore()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
-        store.startNewConversation(modelID: "gemma4-e4b")
-        model.modelSystemPrompt = "Be brief."
-
-        model.setConversationSystemPrompt("")
+        model.modelSystemPrompt = ""
         #expect(model.effectiveSystemPrompt == nil)
-
-        model.setConversationSystemPrompt(nil)
-        #expect(model.effectiveSystemPrompt == "Be brief.")
     }
 
-    @Test func theOverrideSurvivesAReload() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tuff-rewind-\(UUID().uuidString)", isDirectory: true)
+    @Test func theSystemPromptReachesTheRequest() throws {
+        let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let repository = AppConversationRepository(rootURL: root)
-        let first = AppConversationStore(repository: repository)
-        first.recordCompletedTurn(
-            AppChatTurn(prompt: "hi", response: "hello"),
-            attachments: [], modelID: "gemma4-e4b")
-        first.setSystemPrompt("Answer in French.")
+        let model = AppModel(conversationStore: store)
+        model.modelPathText = FileManager.default.temporaryDirectory.path
+        model.modelSystemPrompt = "Answer in French."
+        model.promptText = "Hello."
 
-        let reloaded = AppConversationStore(repository: repository)
-        #expect(reloaded.selectedConversation?.systemPrompt == "Answer in French.")
+        #expect(try model.makeRequest().systemPrompt == "Answer in French.")
+    }
+
+    /// It is part of what the message will cost, so it belongs in the estimate.
+    @Test func theSystemPromptCountsTowardTheContextEstimate() {
+        let (root, store) = makeStore()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(conversationStore: store)
+        model.promptText = "Hello."
+        let without = model.contextUsage.estimatedTokens
+
+        model.modelSystemPrompt = String(repeating: "x", count: 4_000)
+        #expect(model.contextUsage.estimatedTokens > without)
     }
 
     // MARK: - Context estimate

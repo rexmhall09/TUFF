@@ -29,7 +29,6 @@ struct RootView: View {
     @State private var navigation = AppNavigationState()
     @State private var renameTarget: AppConversationRecord?
     @State private var renameText = ""
-    @State private var isEditingChatInstructions = false
     @State private var isFullScreen = false
 
     var body: some View {
@@ -72,9 +71,6 @@ struct RootView: View {
         .animation(.smooth(duration: 0.25), value: model.error)
         .transaction { transaction in
             if model.isRunning { transaction.animation = nil }
-        }
-        .sheet(isPresented: $isEditingChatInstructions) {
-            ChatInstructionsSheet(model: model)
         }
         .alert("Rename Chat", isPresented: renameAlertIsPresented) {
             TextField("Name", text: $renameText)
@@ -126,16 +122,6 @@ struct RootView: View {
                     Label("New Chat", systemImage: "square.and.pencil")
                 }
                 .disabled(!canStartNewChat)
-                Button {
-                    navigation.select(.chat)
-                    isEditingChatInstructions = true
-                } label: {
-                    Label(model.conversationSystemPrompt == nil
-                          ? "Instructions" : "Instructions (custom)",
-                          systemImage: "text.badge.star")
-                }
-                .disabled(model.conversationStore.selectedConversation == nil)
-                .help("Instructions for this chat, overriding the model's")
             }
             Section("Chats") {
                 if model.conversationStore.conversations.isEmpty {

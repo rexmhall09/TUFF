@@ -90,19 +90,13 @@ public struct AppConversationRecord: Codable, Equatable, Sendable, Identifiable 
     public let createdAt: Date
     public var updatedAt: Date
     public var turns: [AppPersistedChatTurn]
-    /// Instructions for this chat alone, overriding the model's default. Nil
-    /// means "use the model's"; empty string means "this chat has none", which
-    /// is a different thing and has to survive a reload.
-    public var systemPrompt: String?
-
     public init(
         id: UUID = UUID(),
         title: String = "New Chat",
         modelID: String,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
-        turns: [AppPersistedChatTurn] = [],
-        systemPrompt: String? = nil
+        turns: [AppPersistedChatTurn] = []
     ) {
         self.id = id
         self.title = title
@@ -110,7 +104,6 @@ public struct AppConversationRecord: Codable, Equatable, Sendable, Identifiable 
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.turns = turns
-        self.systemPrompt = systemPrompt
     }
 }
 

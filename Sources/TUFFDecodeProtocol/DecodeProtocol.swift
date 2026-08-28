@@ -100,7 +100,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     /// Prior turns, oldest first. Decoded as empty when absent, so an older
     /// client and a newer service still agree.
     public var history: [DecodeChatTurn]
-    /// Standing instructions rendered ahead of the conversation. Absent on a
+    /// The system prompt, rendered ahead of the conversation. Absent on a
     /// request from a client that predates the field.
     public var systemPrompt: String?
     /// Text the model continues rather than a fresh reply. Absent on a request

@@ -121,7 +121,7 @@ struct AppSettingsView: View {
             if advanced {
                 advancedProfileSettings
             } else {
-                instructionsSettings
+                systemPromptSettings
                 memorySettings
                 reasoningSettings
                 samplingSettings
@@ -176,17 +176,16 @@ struct AppSettingsView: View {
         }
     }
 
-    /// Standing instructions for this model. A chat can override them, so this
-    /// is the default rather than the last word.
-    private var instructionsSettings: some View {
-        Section("Instructions") {
+    /// This model's system prompt. Stored with the rest of its profile, so
+    /// each model carries its own.
+    private var systemPromptSettings: some View {
+        Section("System prompt") {
             TextEditor(text: profileBinding(\.systemPrompt))
                 .font(.body)
                 .frame(minHeight: 96)
                 .overlay(alignment: .topLeading) {
                     if selectedProfile.systemPrompt.isEmpty {
-                        Text("Standing instructions sent ahead of every chat "
-                             + "with this model.")
+                        Text("Sent ahead of every chat with this model.")
                             .font(.body)
                             .foregroundStyle(.tertiary)
                             .padding(.leading, 5)
@@ -194,9 +193,10 @@ struct AppSettingsView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .accessibilityLabel("Model instructions")
-            Text("Sent as a system message before the conversation. A single "
-                 + "chat can override this from the Chat menu.")
+                .accessibilityLabel("System prompt")
+            Text("Sent as a system message before the conversation. It applies "
+                 + "from the next message; answers already given were not "
+                 + "written with it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

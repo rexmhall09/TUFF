@@ -384,7 +384,7 @@ actor RealInferenceSession {
         func encode(_ turns: ArraySlice<AppChatTurn>) throws -> [Int32] {
             var messages: [GFTokenizer.Message] = []
             messages.reserveCapacity(turns.count * 2 + 2)
-            // Standing instructions lead the conversation. Every template this
+            // The system prompt leads the conversation. Every template this
             // renderer drives accepts a system message first and only first,
             // which is why it goes here rather than folded into the prompt.
             if !request.systemPrompt.isEmpty {
@@ -499,7 +499,7 @@ actor RealInferenceSession {
         func render(_ turns: ArraySlice<AppChatTurn>) throws -> MultimodalPrefillInput {
             var messages: [MultimodalMessage] = []
             messages.reserveCapacity(turns.count * 2 + 2)
-            // Standing instructions lead the conversation, as in the text path.
+            // The system prompt leads the conversation, as in the text path.
             if !request.systemPrompt.isEmpty {
                 messages.append(MultimodalMessage(
                     role: .system, content: [.text(request.systemPrompt)]))

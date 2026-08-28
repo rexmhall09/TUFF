@@ -129,18 +129,6 @@ public final class AppConversationStore {
         persistArchive()
     }
 
-    /// Sets this chat's own instructions. Nil restores the model's default;
-    /// an empty string is a deliberate "no instructions for this chat" and is
-    /// stored as such.
-    public func setSystemPrompt(_ prompt: String?) {
-        guard let selectedConversationID,
-              let index = conversations.firstIndex(where: { $0.id == selectedConversationID })
-        else { return }
-        conversations[index].systemPrompt = prompt
-        conversations[index].updatedAt = Date()
-        persistArchive()
-    }
-
     /// Drops every turn from `turnID` onward, and hands back the one that was
     /// removed so it can be sent again.
     ///
@@ -446,7 +434,7 @@ public final class AppSettingsStore {
     public var showPromptExamples = true
     public var sentPromptBehavior: AppSentPromptBehavior = .keep
     public var loadModelOnLaunch = false
-    /// Standing instructions for the selected model, loaded from its profile.
+    /// The selected model's system prompt, loaded from its profile.
     public var systemPrompt = ""
 
     public init() {}
