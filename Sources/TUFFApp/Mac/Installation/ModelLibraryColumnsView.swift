@@ -9,7 +9,8 @@ struct ModelLibraryColumnsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Models")
                     .font(.title3.weight(.semibold))
-                Text("Each model includes its verified optional downloads in the same card.")
+                Text("Grouped by how each one runs. Optional downloads live in "
+                     + "the card of the model they belong to.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

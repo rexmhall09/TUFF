@@ -17,14 +17,77 @@ struct ModelCatalogView: View {
     var showsAddOns: Bool = true
 
     var body: some View {
-        VStack(spacing: compact ? 8 : 14) {
-            ForEach(model.installs) { install in
-                ModelCatalogRow(
-                    model: model,
-                    install: install,
-                    compact: compact,
-                    showsAddOns: showsAddOns)
+        VStack(alignment: .leading, spacing: compact ? 8 : 14) {
+            // Grouped by how the model is run, because that is the difference
+            // that decides whether it fits this Mac. A streaming model's size
+            // is governed by disk and a resident one's by memory, so listing a
+            // 61 GiB model beside a 4 GiB one with nothing to separate them
+            // made the catalogue look like a straight size ranking.
+            ForEach(ModelCatalogGroup.allCases) { group in
+                let installs = model.installs.filter {
+                    group.contains($0.descriptor)
+                }
+                if !installs.isEmpty {
+                    if !compact { groupHeader(group) }
+                    ForEach(installs) { install in
+                        ModelCatalogRow(
+                            model: model,
+                            install: install,
+                            compact: compact,
+                            showsAddOns: showsAddOns)
+                    }
+                }
             }
+        }
+    }
+
+    private func groupHeader(_ group: ModelCatalogGroup) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(group.title)
+                .font(.headline)
+            Text(group.subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// How a model is run, which is what decides what it needs from the Mac.
+enum ModelCatalogGroup: String, CaseIterable, Identifiable {
+    case streaming
+    case resident
+
+    var id: String { rawValue }
+
+    func contains(_ descriptor: AppModelInstallDescriptor) -> Bool {
+        switch self {
+        case .streaming: descriptor.usesExpertCache
+        case .resident: !descriptor.usesExpertCache
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .streaming: "Streamed from SSD"
+        case .resident: "Held in memory"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .streaming:
+            "Mixture-of-experts models. TUFF keeps the shared weights resident "
+                + "and reads each token's experts from disk, so how large a "
+                + "model you can run is governed by free storage rather than by "
+                + "RAM. Decode is slower in exchange."
+        case .resident:
+            "Dense models, loaded whole. Every weight is used for every token, "
+                + "so these are the fastest to decode and are bounded by memory "
+                + "rather than by disk."
         }
     }
 }
