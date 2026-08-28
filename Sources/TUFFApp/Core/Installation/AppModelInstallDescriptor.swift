@@ -207,6 +207,32 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         catalogDescriptor?.architecture.feedForwardKind == .mixtureOfExperts
     }
 
+    /// Unified memory to run this model comfortably at its default settings,
+    /// as opposed to the floor below which it is refused outright.
+    ///
+    /// The minimum is a hard gate: at it, the context and expert cache have to
+    /// be cut back before the model will load. This is the size where the
+    /// defaults fit with macOS and other applications still running — the
+    /// measured working set doubled, plus 4 GiB for the system, rounded up to a
+    /// size Macs are actually sold in. It is a rule of thumb and the interface
+    /// labels it as one; the working-set figure it is derived from is measured.
+    public var recommendedUnifiedMemoryBytes: UInt64 {
+        let minimum = catalogDescriptor?.hardware.minimumUnifiedMemoryBytes ?? 0
+        guard let memory = catalogDescriptor?.memory else { return minimum }
+        let workingSet = memory.estimatedWorkingSetBytes(
+            contextTokens: memory.defaultContextTokens,
+            expertCacheSlots: memory.defaultExpertCacheSlots)
+        guard workingSet != .max else { return minimum }
+        let wanted = workingSet * 2 + 4 * 1_073_741_824
+        return Self.unifiedMemoryTiers.first { $0 >= max(wanted, minimum) }
+            ?? max(wanted, minimum)
+    }
+
+    /// Unified memory sizes Apple Silicon Macs ship with. Rounding to these
+    /// keeps the recommendation something a buyer can act on.
+    static let unifiedMemoryTiers: [UInt64] = [8, 16, 24, 32, 36, 48, 64, 96, 128]
+        .map { UInt64($0) * 1_073_741_824 }
+
     public func hardwareEligibility(
         on device: TUFFDeviceCapabilities
     ) -> AppModelHardwareEligibility {

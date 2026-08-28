@@ -221,9 +221,7 @@ struct ModelCatalogRow: View {
                 .foregroundStyle(.secondary)
                 .font(.caption)
         case .notInstalled:
-            Text(MetricFormat.storage(install.descriptor.approximateDownloadBytes))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            EmptyView()
         }
     }
 
@@ -236,40 +234,63 @@ struct ModelCatalogRow: View {
         return .notInstalled
     }
 
+    /// The four numbers that decide whether to download this, on one line.
+    ///
+    /// They used to be four stacked label/value rows, plus a green "Compatible
+    /// with this Mac" on every compatible card, plus the free space on this
+    /// Mac — six lines of chrome per model, five of which said nothing was
+    /// wrong. What is left is the facts, and the warnings only when there is
+    /// something to warn about.
     private var storage: some View {
-        VStack(spacing: 6) {
-            StorageRow(label: "Download",
-                       value: MetricFormat.storage(
-                        install.descriptor.approximateDownloadBytes))
-            StorageRow(label: "Installed size",
-                       value: MetricFormat.storage(install.descriptor.installedBytes))
-            StorageRow(
-                label: "Unified memory",
-                value: "\(MetricFormat.memory(hardwareEligibility.minimumUnifiedMemoryBytes)) min")
-            if hardwareEligibility.isCompatible {
-                Label("Compatible with this Mac", systemImage: "checkmark.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else if let explanation = hardwareEligibility.explanation {
-                Label(explanation, systemImage: "memorychip")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 6) {
+            SpecLine(specs: [
+                Spec(label: "Download",
+                     value: MetricFormat.storage(
+                        install.descriptor.approximateDownloadBytes)),
+                Spec(label: "On disk",
+                     value: MetricFormat.storage(install.descriptor.installedBytes)),
+                // One spec, two figures. As separate specs the second read as a
+                // rival to the "Recommended" badge on the model's own name.
+                Spec(label: "Memory", value: memorySpecValue),
+            ])
+            .help("\(MetricFormat.memory(hardwareEligibility.minimumUnifiedMemoryBytes)) "
+                  + "is the floor below which this model will not load. "
+                  + "\(MetricFormat.memory(install.descriptor.recommendedUnifiedMemoryBytes)) "
+                  + "is where its default context and cache settings fit with "
+                  + "macOS and other apps still running.")
+
+            if !hardwareEligibility.isCompatible,
+               let explanation = hardwareEligibility.explanation {
+                warning(explanation, symbol: "memorychip")
             }
-            if let requirement = install.requirement, !install.isInstalled {
-                StorageRow(label: "Available on this Mac",
-                           value: MetricFormat.storage(requirement.availableBytes))
-                if !requirement.canInstall {
-                    Label("\(MetricFormat.storage(requirement.shortfallBytes)) more is required",
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+            if let requirement = install.requirement, !install.isInstalled,
+               !requirement.canInstall {
+                warning("\(MetricFormat.storage(requirement.shortfallBytes)) more "
+                        + "free space is required; this Mac has "
+                        + "\(MetricFormat.storage(requirement.availableBytes)).",
+                        symbol: "externaldrive.badge.exclamationmark")
             }
         }
+    }
+
+    /// "8 GB min" when that is also the comfortable size, and both figures when
+    /// they differ. Printing "8 GB min · 8 GB recommended" says nothing twice.
+    private var memorySpecValue: String {
+        let minimum = hardwareEligibility.minimumUnifiedMemoryBytes
+        let recommended = install.descriptor.recommendedUnifiedMemoryBytes
+        guard recommended > minimum else {
+            return "\(MetricFormat.memory(minimum)) min"
+        }
+        return "\(MetricFormat.memory(minimum)) min · "
+            + "\(MetricFormat.memory(recommended)) recommended"
+    }
+
+    private func warning(_ text: String, symbol: String) -> some View {
+        Label(text, systemImage: symbol)
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -580,18 +601,65 @@ struct ModelCatalogRow: View {
     }
 }
 
-struct StorageRow: View {
+/// One labelled figure in a model's spec line.
+struct Spec: Identifiable {
     let label: String
     let value: String
+    var id: String { label }
+}
+
+/// A model's numbers as one wrapping line rather than a stack of rows.
+///
+/// A row per figure gave each of them a full line of the card and a lot of
+/// vertical whitespace between the name and the button, which is what made the
+/// catalogue feel heavy. These read left to right and wrap when the column is
+/// narrow.
+struct SpecLine: View {
+    let specs: [Spec]
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.secondary)
-            Spacer(minLength: 16)
+        ViewThatFits(in: .horizontal) {
+            line(spacing: 14)
+            grid
+        }
+        .font(.caption)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func line(spacing: CGFloat) -> some View {
+        HStack(spacing: spacing) {
+            ForEach(specs) { spec in
+                spec.view
+            }
+        }
+    }
+
+    /// Two columns when one line will not fit, which keeps a narrow window
+    /// from turning four figures into four lines.
+    private var grid: some View {
+        let half = (specs.count + 1) / 2
+        return VStack(alignment: .leading, spacing: 4) {
+            ForEach(0..<half, id: \.self) { row in
+                HStack(spacing: 14) {
+                    specs[row].view
+                    if row + half < specs.count {
+                        specs[row + half].view
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+}
+
+private extension Spec {
+    var view: some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .foregroundStyle(.secondary)
             Text(value)
                 .monospacedDigit()
-                .multilineTextAlignment(.trailing)
         }
-        .font(.callout)
+        .fixedSize()
     }
 }
