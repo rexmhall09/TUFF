@@ -71,6 +71,8 @@ struct ArchInfo: Sendable, Equatable {
     // predates the family split still builds the architecture it meant to.
     var family: RepackModelFamily = .gemma4
     var variant: RepackModelVariant = .gemma4_26B_A4B
+    /// First layer whose MLP is twice `intermediateSize` wide; -1 for none.
+    var ffnDoubleWideFromLayer: Int = -1
     var feedForwardKind: RepackFeedForwardKind = .mixtureOfExperts
     var hiddenSizePerLayerInput: Int = 0
     var vocabSizePerLayerInput: Int = 0
@@ -294,6 +296,16 @@ struct ArchInfo: Sendable, Equatable {
         let act = (tc["hidden_activation"] as? String) ?? "gelu_pytorch_tanh"
         let dense = (tc["enable_moe_block"] as? Bool) == false
             || optionalInt("num_experts") == nil
+        // `use_double_wide_mlp` is not a whole-model property: on Gemma 4 E2B
+        // the first layers hold a normal MLP and the last `num_kv_shared_layers`
+        // hold one twice as wide. Sizing every layer from `intermediate_size`
+        // rejected the checkpoint at the first wide layer.
+        let doubleWideMLP = (tc["use_double_wide_mlp"] as? Bool) ?? false
+        let sharedKV = optionalInt("num_kv_shared_layers") ?? 0
+        let totalLayers = try i("num_hidden_layers")
+        let doubleWideFrom = (doubleWideMLP && sharedKV > 0 && sharedKV < totalLayers)
+            ? totalLayers - sharedKV
+            : -1
         let numKVHeads = try i("num_key_value_heads")
         let arch = ArchInfo(
             hiddenSize: try i("hidden_size"),
@@ -321,6 +333,7 @@ struct ArchInfo: Sendable, Equatable {
             variant: dense ? denseGemmaVariant(
                 hiddenSize: try i("hidden_size"),
                 numLayers: try i("num_hidden_layers")) : .gemma4_26B_A4B,
+            ffnDoubleWideFromLayer: doubleWideFrom,
             feedForwardKind: dense ? .dense : .mixtureOfExperts,
             hiddenSizePerLayerInput: optionalInt("hidden_size_per_layer_input") ?? 0,
             vocabSizePerLayerInput: optionalInt("vocab_size_per_layer_input") ?? 0,

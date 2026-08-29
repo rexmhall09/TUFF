@@ -884,14 +884,15 @@ extension Model {
             try requireAffine("\(prefix).self_attn.o_proj.weight",
                               rows: config.hiddenSize, columns: queryDimension,
                               slot: quant.attention)
+            let ffn = config.ffnIntermediateSize(layer: layer)
             try requireAffine("\(prefix).mlp.gate_proj.weight",
-                              rows: config.intermediateSize, columns: config.hiddenSize,
+                              rows: ffn, columns: config.hiddenSize,
                               slot: quant.sharedExpert)
             try requireAffine("\(prefix).mlp.up_proj.weight",
-                              rows: config.intermediateSize, columns: config.hiddenSize,
+                              rows: ffn, columns: config.hiddenSize,
                               slot: quant.sharedExpert)
             try requireAffine("\(prefix).mlp.down_proj.weight",
-                              rows: config.hiddenSize, columns: config.intermediateSize,
+                              rows: config.hiddenSize, columns: ffn,
                               slot: quant.sharedExpert)
             try requireAffine("\(prefix).router.proj.weight",
                               rows: config.numExperts, columns: config.hiddenSize,
@@ -1073,12 +1074,13 @@ extension Model {
             }
             try requireAffine("\(prefix).self_attn.o_proj.weight",
                               config.hiddenSize, queryDimension, quant.attention)
+            let ffn = config.ffnIntermediateSize(layer: layer)
             try requireAffine("\(prefix).mlp.gate_proj.weight",
-                              config.intermediateSize, config.hiddenSize, quant.sharedExpert)
+                              ffn, config.hiddenSize, quant.sharedExpert)
             try requireAffine("\(prefix).mlp.up_proj.weight",
-                              config.intermediateSize, config.hiddenSize, quant.sharedExpert)
+                              ffn, config.hiddenSize, quant.sharedExpert)
             try requireAffine("\(prefix).mlp.down_proj.weight",
-                              config.hiddenSize, config.intermediateSize, quant.sharedExpert)
+                              config.hiddenSize, ffn, quant.sharedExpert)
             try requireAffine("\(prefix).per_layer_input_gate.weight",
                               config.hiddenSizePerLayerInput, config.hiddenSize,
                               quant.sharedExpert)

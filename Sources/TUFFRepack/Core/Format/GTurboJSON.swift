@@ -75,6 +75,8 @@ enum GTurboJSON {
                 ? nil : arch.vocabSizePerLayerInput,
             numKVSharedLayers: arch.numKVSharedLayers == 0
                 ? nil : arch.numKVSharedLayers,
+            ffnDoubleWideFromLayer: arch.ffnDoubleWideFromLayer < 0
+                ? nil : arch.ffnDoubleWideFromLayer,
             // Gemma 4 omits every family extension field, so its manifests stay
             // byte-identical to the pre-family format.
             family: isGemma ? nil : arch.family.rawValue,

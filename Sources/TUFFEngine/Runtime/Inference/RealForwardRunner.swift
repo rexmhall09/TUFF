@@ -356,7 +356,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
         let device = context.device
         let D = cfg.hiddenSize
-        let F = cfg.intermediateSize
+        // Scratch is shared across layers, so it is sized for the widest
+        // feed-forward block rather than the nominal one. E2B's last 20 layers
+        // are twice as wide as its first 15.
+        let F = cfg.maxFFNIntermediateSize
         let maxQ = cfg.numHeads * max(cfg.headDim, cfg.fullHeadDim)
 
         func buf(_ count: Int, _ stride: Int = MemoryLayout<Float16>.size) throws -> MTLBuffer {
@@ -1494,7 +1497,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     scratchAct: scratch.sharedActScratch,
                     queryCount: t,
                     d: D,
-                    intermediate: cfg.intermediateSize,
+                    intermediate: cfg.ffnIntermediateSize(layer: L),
                     xStrideElements: D,
                     yStrideElements: D)
                 prefillRMS.encodeBF16W(
@@ -1693,7 +1696,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                         scratchAct: scratch.sharedActScratch,
                                                         queryCount: t,
                                                         d: D,
-                                                        intermediate: cfg.intermediateSize,
+                                                        intermediate: cfg.ffnIntermediateSize(layer: L),
                                                         xStrideElements: D,
                                                         yStrideElements: D)
                     if cfg.ffnSandwichNorms {

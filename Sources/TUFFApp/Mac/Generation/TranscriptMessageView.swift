@@ -52,13 +52,7 @@ struct TranscriptMessageView: View {
             if hasAssistantMessage { assistantMessage }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        // The controls appear on the message under the pointer. Showing them on
-        // every message at once turned a conversation into a wall of buttons.
-        .onHover { isHovered = $0 }
-        .animation(.smooth(duration: 0.12), value: isHovered)
     }
-
-    @State private var isHovered = false
 
     private var hasUserMessage: Bool {
         !prompt.isEmpty || !images.isEmpty || !documents.isEmpty
@@ -70,16 +64,13 @@ struct TranscriptMessageView: View {
 
     private var userMessage: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 MessageRoleLabel(text: "You")
                 if let actions {
-                    Button("Edit", systemImage: "pencil", action: actions.edit)
-                        .font(.caption)
-                        .labelStyle(.titleAndIcon)
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(.secondary)
-                        .help("Edit this message and send it again")
-                        .opacity(isHovered ? 1 : 0)
+                    MessageActionButton(
+                        symbol: "pencil",
+                        help: "Edit this message and send it again",
+                        action: actions.edit)
                 }
                 Spacer(minLength: 0)
             }
@@ -98,7 +89,11 @@ struct TranscriptMessageView: View {
 
     private var assistantMessage: some View {
         VStack(alignment: .leading, spacing: 8) {
-            MessageRoleLabel(text: modelName)
+            HStack(spacing: 6) {
+                MessageRoleLabel(text: modelName)
+                if showsActions { answerActions }
+                Spacer(minLength: 0)
+            }
             if !thinking.isEmpty {
                 ThinkingDisclosure(
                     text: thinking,
@@ -107,8 +102,43 @@ struct TranscriptMessageView: View {
                     reduceTransparency: reduceTransparency)
             }
             responseBody
-            if showsCopyRow { copyRow }
         }
+    }
+
+    /// Copy, regenerate and continue, beside the name of whoever produced the
+    /// answer. They used to sit under it and appear only on hover, which meant
+    /// the reader had to know they were there before they would show.
+    private var answerActions: some View {
+        HStack(spacing: 6) {
+            MessageActionButton(
+                symbol: copied ? "checkmark" : "doc.on.doc",
+                help: copied ? "Copied" : "Copy this answer",
+                tint: copied ? TUFFMacTheme.accentColor : nil,
+                action: copyResponse)
+            if let actions {
+                MessageActionButton(
+                    symbol: "arrow.clockwise",
+                    help: "Send this message again for a different answer",
+                    action: actions.regenerate)
+                if let carryOn = actions.carryOn {
+                    MessageActionButton(
+                        symbol: "text.append",
+                        help: "Carry on from where this answer stopped",
+                        tint: TUFFMacTheme.accentColor,
+                        action: carryOn)
+                }
+            }
+        }
+        .task(id: copied) {
+            guard copied else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            copied = false
+        }
+    }
+
+    private var showsActions: Bool {
+        !response.isEmpty && live?.isTerminal != false
     }
 
     @ViewBuilder
@@ -129,58 +159,36 @@ struct TranscriptMessageView: View {
         }
     }
 
-    private var showsCopyRow: Bool {
-        !response.isEmpty && live?.isTerminal != false
-    }
-
-    private var copyRow: some View {
-        HStack(spacing: 8) {
-            Button {
-                copyResponse()
-            } label: {
-                Label(copied ? "Copied" : "Copy",
-                      systemImage: copied ? "checkmark" : "doc.on.doc")
-                    .font(.caption)
-                    .labelStyle(.titleAndIcon)
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .help("Copy this answer")
-
-            if let actions {
-                Button("Regenerate", systemImage: "arrow.clockwise",
-                       action: actions.regenerate)
-                    .font(.caption)
-                    .labelStyle(.titleAndIcon)
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    .help("Send this message again for a different answer")
-                    .opacity(isHovered ? 1 : 0)
-
-                if let carryOn = actions.carryOn {
-                    Button("Continue", systemImage: "text.append", action: carryOn)
-                        .font(.caption)
-                        .labelStyle(.titleAndIcon)
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(TUFFMacTheme.accentColor)
-                        .help("Carry on from where this answer stopped")
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .task(id: copied) {
-            guard copied else { return }
-            try? await Task.sleep(for: .seconds(1.5))
-            guard !Task.isCancelled else { return }
-            copied = false
-        }
-    }
-
     private func copyResponse() {
         let plain = renderer.plainText(response)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(plain, forType: .string)
         copied = true
+    }
+}
+
+/// One icon-only control on a message: copy, edit, regenerate, continue.
+///
+/// Small, quiet, and always present. Text labels beside the role name made the
+/// line read as a sentence rather than a heading with tools on it.
+struct MessageActionButton: View {
+    let symbol: String
+    let help: String
+    var tint: Color?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.caption)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(tint ?? .secondary)
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 

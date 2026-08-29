@@ -256,9 +256,21 @@ struct RootView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
-        .padding(.top, isFullScreen ? 22 : 10)
+        // Windowed, the title bar sits above this and supplies the top margin.
+        // Full screen removes it, so the same margin is added back explicitly —
+        // measured from AppKit rather than guessed, so it stays right if the
+        // system metric ever changes.
+        .padding(.top, 10 + (isFullScreen ? Self.titleBarHeight : 0))
         .padding(.bottom, 10)
     }
+
+    /// Height of a standard title bar: the difference between a titled
+    /// window's frame and its content rect.
+    private static let titleBarHeight: CGFloat = {
+        let frame = NSWindow.frameRect(
+            forContentRect: .zero, styleMask: [.titled])
+        return max(0, frame.height)
+    }()
 
     private var selectedModelFooter: some View {
         Button {
@@ -327,7 +339,11 @@ private struct WindowFullScreenReader: NSViewRepresentable {
             NotificationCenter.default.removeObserver(self)
             guard let window else { return }
             for name in [NSWindow.didEnterFullScreenNotification,
-                         NSWindow.didExitFullScreenNotification] {
+                         NSWindow.didExitFullScreenNotification,
+                         // A window restored into full screen posts neither of
+                         // the above; it does become key, and the style mask is
+                         // correct by then.
+                         NSWindow.didBecomeKeyNotification] {
                 NotificationCenter.default.addObserver(
                     self, selector: #selector(windowFullScreenChanged),
                     name: name, object: window)

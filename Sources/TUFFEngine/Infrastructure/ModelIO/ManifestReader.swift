@@ -31,6 +31,7 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let hiddenSizePerLayerInput: Int?
     public let vocabSizePerLayerInput: Int?
     public let numKVSharedLayers: Int?
+    public let ffnDoubleWideFromLayer: Int?
 
     // Family extensions. Optional so legacy Gemma manifests decode unchanged;
     // absent values validate against the Gemma defaults in `ArchConfig`.
@@ -264,6 +265,8 @@ public enum ManifestReader {
                   a.hiddenSizePerLayerInput ?? 0, e.hiddenSizePerLayerInput)
         try check("vocabSizePerLayerInput",
                   a.vocabSizePerLayerInput ?? 0, e.vocabSizePerLayerInput)
+        try check("ffnDoubleWideFromLayer",
+                  a.ffnDoubleWideFromLayer ?? -1, e.ffnDoubleWideFromLayer)
         try check("numKVSharedLayers",
                   a.numKVSharedLayers ?? 0, e.numKVSharedLayers)
         let actualMask = a.fullAttentionLayerMask.map { UInt8($0) }
@@ -402,6 +405,7 @@ private extension ManifestArch {
                   hiddenSizePerLayerInput: wire.hiddenSizePerLayerInput,
                   vocabSizePerLayerInput: wire.vocabSizePerLayerInput,
                   numKVSharedLayers: wire.numKVSharedLayers,
+                  ffnDoubleWideFromLayer: wire.ffnDoubleWideFromLayer,
                   family: wire.family,
                   variant: wire.variant,
                   feedForwardKind: wire.feedForwardKind,

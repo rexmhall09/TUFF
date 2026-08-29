@@ -87,10 +87,6 @@ struct ModelCatalogRow: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             if !compact {
-                Text(install.descriptor.summary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 storage
             }
             if install.isInstalling {
@@ -178,9 +174,13 @@ struct ModelCatalogRow: View {
         }
     }
 
+    /// The add-on names itself, not its model: it lives inside that model's
+    /// card, so repeating the name was the model's name twice on one row.
+    private static let imageSupportName = "Image support"
+
     private var visionDisplayName: String {
         guard install.descriptor.supportsImageInput else { return "image support" }
-        return visionDescriptor.displayName
+        return Self.imageSupportName
     }
 
     @ViewBuilder
@@ -387,7 +387,7 @@ struct ModelCatalogRow: View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Label(visionDescriptor.displayName, systemImage: "photo")
+                Label(Self.imageSupportName, systemImage: "photo")
                     .font(.caption.weight(.semibold))
                 Spacer(minLength: 8)
                 Text(visionStatusText)
@@ -402,7 +402,7 @@ struct ModelCatalogRow: View {
             if model.isVisionInstallTarget(install),
                let fraction = model.visionInstallProgressFraction {
                 ProgressView(value: fraction)
-                    .accessibilityLabel("\(visionDescriptor.displayName) download")
+                    .accessibilityLabel("Image support download")
                     .accessibilityValue(Text(MetricFormat.percent(fraction * 100)))
                 HStack {
                     Text(MetricFormat.percent(fraction * 100))
@@ -431,7 +431,7 @@ struct ModelCatalogRow: View {
     @ViewBuilder
     private var visionAction: some View {
         if model.isVisionInstallTarget(install), model.isInstallingVisionPack {
-            Button("Cancel \(visionDescriptor.displayName)") {
+            Button("Cancel Download") {
                 model.cancelVisionInstall()
             }
             .disabled(!model.canCancelVisionInstall)
@@ -446,12 +446,12 @@ struct ModelCatalogRow: View {
         } else if visionIsPrepared {
             if isSelected {
                 if model.loadState.isReady {
-                    Button("Unload to Activate \(visionDescriptor.displayName)") {
+                    Button("Unload to Activate Image Support") {
                         model.unloadModel()
                     }
                     .disabled(!model.canUnloadModel)
                 } else {
-                    Button("Activate \(visionDescriptor.displayName)") {
+                    Button("Activate Image Support") {
                         model.activateVisionPack()
                     }
                     .buttonStyle(.borderedProminent)

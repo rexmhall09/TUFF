@@ -118,6 +118,8 @@ public struct ArchConfig: Sendable, Equatable {
     /// Final decoder layers that reuse K/V projections from the most recent
     /// non-sharing layer of the same attention kind.
     public let numKVSharedLayers: Int
+    /// Backing store for `doubleWideFFNFromLayer`; -1 means "no wide layers".
+    public let ffnDoubleWideFromLayer: Int
 
     // Family-dependent extensions. Defaults describe Gemma 4 so that legacy
     // manifests (which omit them) validate unchanged.
@@ -183,6 +185,7 @@ public struct ArchConfig: Sendable, Equatable {
         hiddenSizePerLayerInput: Int = 0,
         vocabSizePerLayerInput: Int = 0,
         numKVSharedLayers: Int = 0,
+        ffnDoubleWideFromLayer: Int = -1,
         family: ModelFamily = .gemma4,
         variant: ModelVariant? = nil,
         feedForwardKind: FeedForwardKind = .mixtureOfExperts,
@@ -222,6 +225,7 @@ public struct ArchConfig: Sendable, Equatable {
         self.hiddenSizePerLayerInput = hiddenSizePerLayerInput
         self.vocabSizePerLayerInput = vocabSizePerLayerInput
         self.numKVSharedLayers = numKVSharedLayers
+        self.ffnDoubleWideFromLayer = ffnDoubleWideFromLayer
         self.family = family
         self.variant = variant ?? ModelVariant.legacyDefault(for: family)
         self.feedForwardKind = feedForwardKind
@@ -329,6 +333,8 @@ public struct ArchConfig: Sendable, Equatable {
         hiddenSizePerLayerInput: 256,
         vocabSizePerLayerInput: 262_144,
         numKVSharedLayers: 20,
+        // Layers 15-34 hold a 12,288-wide MLP; layers 0-14 hold 6,144.
+        ffnDoubleWideFromLayer: 15,
         variant: .gemma4_E2B,
         feedForwardKind: .dense)
 
@@ -548,6 +554,33 @@ public struct ArchConfig: Sendable, Equatable {
     public func layerIsLinear(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 2 }
     public var hasLinearAttentionLayers: Bool { fullAttentionLayerMask.contains(2) }
     public var hasPerLayerInputs: Bool { hiddenSizePerLayerInput > 0 }
+
+    /// Index of the first layer whose feed-forward block is twice
+    /// `intermediateSize` wide, or nil when every layer is the same width.
+    ///
+    /// Gemma 4 E2B declares `use_double_wide_mlp`, and it is not a whole-model
+    /// property: its first 15 layers hold a 6,144-wide MLP and its last 20 hold
+    /// a 12,288-wide one. Sizing every layer from `intermediateSize` rejected
+    /// the checkpoint at layer 15 with a shape mismatch. The wide layers are an
+    /// ordinary wider MLP — gate and up gain rows, down gains columns — so only
+    /// the width varies, never the arithmetic.
+    public var doubleWideFFNFromLayer: Int? {
+        ffnDoubleWideFromLayer >= 0 ? ffnDoubleWideFromLayer : nil
+    }
+
+    /// The feed-forward width of one layer.
+    public func ffnIntermediateSize(layer: Int) -> Int {
+        guard let first = doubleWideFFNFromLayer, layer >= first else {
+            return intermediateSize
+        }
+        return intermediateSize * 2
+    }
+
+    /// The widest feed-forward block in the model. Scratch buffers are shared
+    /// across layers, so they are sized for the widest one.
+    public var maxFFNIntermediateSize: Int {
+        doubleWideFFNFromLayer == nil ? intermediateSize : intermediateSize * 2
+    }
     public var firstKVSharedLayer: Int { numLayers - numKVSharedLayers }
     public func layerSharesKV(_ layer: Int) -> Bool {
         numKVSharedLayers > 0 && layer >= firstKVSharedLayer

@@ -35,6 +35,8 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let hiddenSizePerLayerInput: Int?
     package let vocabSizePerLayerInput: Int?
     package let numKVSharedLayers: Int?
+    /// First layer whose MLP is twice as wide, absent when none is.
+    package let ffnDoubleWideFromLayer: Int?
 
     // Family extension fields. Gemma 4 manifests omit every one of them, so
     // they stay byte-identical to the pre-family format; a reader treats
@@ -66,6 +68,7 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  hiddenSizePerLayerInput: Int? = nil,
                  vocabSizePerLayerInput: Int? = nil,
                  numKVSharedLayers: Int? = nil,
+                 ffnDoubleWideFromLayer: Int? = nil,
                  family: String? = nil,
                  variant: String? = nil,
                  feedForwardKind: String? = nil,
@@ -105,6 +108,7 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.hiddenSizePerLayerInput = hiddenSizePerLayerInput
         self.vocabSizePerLayerInput = vocabSizePerLayerInput
         self.numKVSharedLayers = numKVSharedLayers
+        self.ffnDoubleWideFromLayer = ffnDoubleWideFromLayer
         self.family = family
         self.variant = variant
         self.feedForwardKind = feedForwardKind

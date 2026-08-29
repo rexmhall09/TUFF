@@ -53,6 +53,31 @@ import TUFFModelCatalog
         #expect(config.tieWordEmbeddings)
     }
 
+    /// `use_double_wide_mlp` is not a whole-model property. E2B's first 15
+    /// layers hold a 6,144-wide MLP and its last 20 hold a 12,288-wide one.
+    /// Sizing every layer from `intermediateSize` rejected the real checkpoint
+    /// at layer 15 with an affine metadata mismatch.
+    @Test func theLastTwentyLayersAreTwiceAsWide() {
+        #expect(config.doubleWideFFNFromLayer == 15)
+        #expect(config.ffnIntermediateSize(layer: 0) == 6_144)
+        #expect(config.ffnIntermediateSize(layer: 14) == 6_144)
+        #expect(config.ffnIntermediateSize(layer: 15) == 12_288)
+        #expect(config.ffnIntermediateSize(layer: 34) == 12_288)
+        // Scratch is shared across layers, so it is sized for the widest.
+        #expect(config.maxFFNIntermediateSize == 12_288)
+    }
+
+    /// Every other model keeps one width throughout, and must be untouched.
+    @Test func modelsWithoutWideLayersAreUnaffected() {
+        for config in [ArchConfig.gemma4_E4B, .gemma4_26B_A4B, .qwen36_35B_A3B] {
+            #expect(config.doubleWideFFNFromLayer == nil)
+            #expect(config.maxFFNIntermediateSize == config.intermediateSize)
+            #expect(config.ffnIntermediateSize(layer: 0) == config.intermediateSize)
+            #expect(config.ffnIntermediateSize(layer: config.numLayers - 1)
+                    == config.intermediateSize)
+        }
+    }
+
     @Test func itIsRegisteredAndReachable() {
         #expect(ArchConfig.registeredArchitectures[.gemma4_E2B] != nil)
         let descriptor = TUFFModelCatalog.model(id: .gemma4_E2B)
