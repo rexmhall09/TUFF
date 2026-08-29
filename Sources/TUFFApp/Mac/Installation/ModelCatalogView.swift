@@ -176,7 +176,7 @@ struct ModelCatalogRow: View {
 
     /// The add-on names itself, not its model: it lives inside that model's
     /// card, so repeating the name was the model's name twice on one row.
-    private static let imageSupportName = "Image support"
+    private static let imageSupportName = "Image Support"
 
     private var visionDisplayName: String {
         guard install.descriptor.supportsImageInput else { return "image support" }
@@ -394,10 +394,6 @@ struct ModelCatalogRow: View {
                     .font(.caption2)
                     .foregroundStyle(visionStatusColor)
             }
-            Text("Adds local image understanding without reinstalling or changing the text model.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
 
             if model.isVisionInstallTarget(install),
                let fraction = model.visionInstallProgressFraction {
@@ -436,7 +432,7 @@ struct ModelCatalogRow: View {
             }
             .disabled(!model.canCancelVisionInstall)
         } else if visionIsInstalled {
-            Label("Image support installed", systemImage: "checkmark.circle.fill")
+            Label("Image Support installed", systemImage: "checkmark.circle.fill")
                 .font(.caption)
                 .foregroundStyle(.green)
             Button("Remove", role: .destructive) {
