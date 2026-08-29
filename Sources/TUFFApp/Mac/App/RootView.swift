@@ -47,17 +47,18 @@ struct RootView: View {
         }
         .navigationSplitViewStyle(.balanced)
         // Full screen keeps the band the toolbar occupies even though there is
-        // no title bar in it, so the sidebar panel began about 31pt below the
-        // top of the screen while sitting 5pt inside every other edge.
+        // no title bar in it, so the split view starts about 31pt below the top
+        // of the screen while a window insets its panels 5pt from every edge.
         //
-        // Both modifiers go on the split view rather than on the sidebar
-        // column. Applied to the column, the padding insets the column's
-        // *contents* — it moved the TUFF mark down and left the panel itself
-        // against the edge, which is the opposite of what is wanted. Applied
-        // here, the whole split view is inset, so the panel moves as a unit and
-        // full screen matches a window.
-        .ignoresSafeArea(.container, edges: isFullScreen ? .top : [])
-        .padding(.top, isFullScreen ? Self.sidebarEdgeInset : 0)
+        // The band is closed by pulling the split view up through it rather
+        // than by ignoring the safe area, which the split view does not honour
+        // here — asking it to, and then insetting by 5, put the 5 on top of the
+        // 31 and left the panel lower still.
+        //
+        // The padding goes on the split view, not the sidebar column: on the
+        // column it insets the column's *contents*, moving the TUFF mark down
+        // and leaving the panel itself against the edge.
+        .padding(.top, isFullScreen ? Self.fullScreenTopAdjustment : 0)
         .environment(\.windowIsFullScreen, isFullScreen)
         .background {
             WindowFullScreenReader(isFullScreen: $isFullScreen)
@@ -276,10 +277,21 @@ struct RootView: View {
         .padding(.bottom, 10)
     }
 
-    /// The gap the window leaves between its own edge and the sidebar panel.
-    /// Matched by hand to the inset a windowed frame gives the panel on its
-    /// other three edges, because full screen supplies none of its own.
+    /// The gap the window leaves between its own edge and the sidebar panel,
+    /// matched by hand to the inset a windowed frame gives on its other three
+    /// edges.
     private static let sidebarEdgeInset: CGFloat = 5
+
+    /// Height of the band full screen reserves for a toolbar it has no title
+    /// bar in, measured from the running app.
+    private static let fullScreenToolbarBand: CGFloat = 31
+
+    /// How far the split view is pulled up in full screen: far enough to close
+    /// the reserved band, less the gap a window would have left. One number to
+    /// nudge if the panel sits a little high or low.
+    private static var fullScreenTopAdjustment: CGFloat {
+        -(fullScreenToolbarBand - sidebarEdgeInset)
+    }
 
 
     private var selectedModelFooter: some View {
