@@ -38,6 +38,13 @@ struct RootView: View {
                     min: AppWindowLayout.sidebarMinimumWidth,
                     ideal: AppWindowLayout.sidebarIdealWidth,
                     max: AppWindowLayout.sidebarMaximumWidth)
+                // Full screen keeps the band the toolbar occupies even though
+                // there is no title bar in it, so the sidebar panel began about
+                // 31pt below the top of the screen while sitting 5pt from the
+                // bottom. Letting the panel run through that band restores the
+                // symmetry; the header's own top padding, below, is what keeps
+                // the mark and the toggle clear of the edge.
+                .ignoresSafeArea(.container, edges: isFullScreen ? .top : [])
         } detail: {
             AppWorkspaceView(
                 destination: navigation.destination,
