@@ -38,17 +38,6 @@ struct RootView: View {
                     min: AppWindowLayout.sidebarMinimumWidth,
                     ideal: AppWindowLayout.sidebarIdealWidth,
                     max: AppWindowLayout.sidebarMaximumWidth)
-                // Full screen keeps the band the toolbar occupies even though
-                // there is no title bar in it, so the sidebar panel began about
-                // 31pt below the top of the screen while sitting 5pt from the
-                // bottom and 5pt from every edge of a windowed frame.
-                //
-                // The panel is let through that band and then inset by the same
-                // small gap it has everywhere else, so full screen matches a
-                // window rather than either sinking the panel or — the previous
-                // attempt — running it flush into the black.
-                .ignoresSafeArea(.container, edges: isFullScreen ? .top : [])
-                .padding(.top, isFullScreen ? Self.sidebarEdgeInset : 0)
         } detail: {
             AppWorkspaceView(
                 destination: navigation.destination,
@@ -57,6 +46,18 @@ struct RootView: View {
                 updateController: updateController)
         }
         .navigationSplitViewStyle(.balanced)
+        // Full screen keeps the band the toolbar occupies even though there is
+        // no title bar in it, so the sidebar panel began about 31pt below the
+        // top of the screen while sitting 5pt inside every other edge.
+        //
+        // Both modifiers go on the split view rather than on the sidebar
+        // column. Applied to the column, the padding insets the column's
+        // *contents* — it moved the TUFF mark down and left the panel itself
+        // against the edge, which is the opposite of what is wanted. Applied
+        // here, the whole split view is inset, so the panel moves as a unit and
+        // full screen matches a window.
+        .ignoresSafeArea(.container, edges: isFullScreen ? .top : [])
+        .padding(.top, isFullScreen ? Self.sidebarEdgeInset : 0)
         .environment(\.windowIsFullScreen, isFullScreen)
         .background {
             WindowFullScreenReader(isFullScreen: $isFullScreen)
@@ -267,11 +268,11 @@ struct RootView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
-        // Windowed, the title bar sits above this and supplies the top margin.
-        // Full screen removes it, so the same margin is added back explicitly —
-        // measured from AppKit rather than guessed, so it stays right if the
-        // system metric ever changes.
-        .padding(.top, 10 + (isFullScreen ? Self.titleBarHeight : 0))
+        // One value for both. The panel's own inset is what full screen was
+        // missing, and that is now handled where the panel lives; compensating
+        // for it here only pushed the mark down inside a panel that was still
+        // against the edge.
+        .padding(.top, 10)
         .padding(.bottom, 10)
     }
 
@@ -280,13 +281,6 @@ struct RootView: View {
     /// other three edges, because full screen supplies none of its own.
     private static let sidebarEdgeInset: CGFloat = 5
 
-    /// Height of a standard title bar: the difference between a titled
-    /// window's frame and its content rect.
-    private static let titleBarHeight: CGFloat = {
-        let frame = NSWindow.frameRect(
-            forContentRect: .zero, styleMask: [.titled])
-        return max(0, frame.height)
-    }()
 
     private var selectedModelFooter: some View {
         Button {
