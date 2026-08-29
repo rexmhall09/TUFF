@@ -41,10 +41,14 @@ struct RootView: View {
                 // Full screen keeps the band the toolbar occupies even though
                 // there is no title bar in it, so the sidebar panel began about
                 // 31pt below the top of the screen while sitting 5pt from the
-                // bottom. Letting the panel run through that band restores the
-                // symmetry; the header's own top padding, below, is what keeps
-                // the mark and the toggle clear of the edge.
+                // bottom and 5pt from every edge of a windowed frame.
+                //
+                // The panel is let through that band and then inset by the same
+                // small gap it has everywhere else, so full screen matches a
+                // window rather than either sinking the panel or — the previous
+                // attempt — running it flush into the black.
                 .ignoresSafeArea(.container, edges: isFullScreen ? .top : [])
+                .padding(.top, isFullScreen ? Self.sidebarEdgeInset : 0)
         } detail: {
             AppWorkspaceView(
                 destination: navigation.destination,
@@ -270,6 +274,11 @@ struct RootView: View {
         .padding(.top, 10 + (isFullScreen ? Self.titleBarHeight : 0))
         .padding(.bottom, 10)
     }
+
+    /// The gap the window leaves between its own edge and the sidebar panel.
+    /// Matched by hand to the inset a windowed frame gives the panel on its
+    /// other three edges, because full screen supplies none of its own.
+    private static let sidebarEdgeInset: CGFloat = 5
 
     /// Height of a standard title bar: the difference between a titled
     /// window's frame and its content rect.
