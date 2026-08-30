@@ -583,6 +583,10 @@ public final class RemoteVisionPackInstaller {
             throw RepackError.configurationInvalid(
                 detail: "\(visionFamily.rawValue) vision source cannot bind to \(textBinding.family) text model")
         }
+        guard textBinding.sourceSnapshotHash == "sha256:\(sourceIndexSha256)" else {
+            throw RepackError.configurationInvalid(
+                detail: "vision source index does not match the exact text checkpoint")
+        }
         let files = [
             GTurboVisionFormatV1.weightsFile: GTurboManifestFileV1(
                 size: plan.weightsFileSize, sha256: weightsSha256),

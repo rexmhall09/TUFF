@@ -132,13 +132,7 @@ import TUFFEngine
             urls.append(url)
         }
 
-        let previous: String? = nil
         model.addImages(urls)
-        if let previous {
-            _ = previous
-        } else {
-            _ = previous
-        }
         let deadline = Date().addingTimeInterval(60)
         while model.isAddingImages, Date() < deadline {
             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -196,13 +190,8 @@ import TUFFEngine
         let model = AppModel(modelDirectory: directory,
                              client: MockLifecycleInferenceClient(),
                              attachmentStore: store)
-        let previous: String? = nil
-        defer {
-            if let previous { setenv("TUFF_VISION_RUNTIME", previous, 1) }
-            else { unsetenv("TUFF_VISION_RUNTIME") }
-        }
         model.addImages([source])
-        var deadline = Date().addingTimeInterval(60)
+        let deadline = Date().addingTimeInterval(60)
         while model.isAddingImages, Date() < deadline {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }

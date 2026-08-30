@@ -75,6 +75,11 @@ public enum VisionPackVerifier {
             throw RepackError.installStateIncompatible(
                 detail: "vision companion family does not match the text model")
         }
+        guard textManifest.sourceSnapshotHash
+                == "sha256:\(manifest.sourceIndexSha256)" else {
+            throw RepackError.installStateIncompatible(
+                detail: "vision companion source does not match the exact text checkpoint")
+        }
         guard let textSource = textManifest.sourceSnapshotHash,
               manifest.compatibleTextSourceSnapshotHash == textSource else {
             throw RepackError.installStateIncompatible(

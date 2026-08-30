@@ -26,9 +26,11 @@ func installVisionCompanion(forTextModel text: URL) throws -> URL {
     let textManifestSHA = digest(textManifestData)
     guard let object = try JSONSerialization.jsonObject(with: textManifestData)
             as? [String: Any],
-          let sourceSnapshotHash = object["sourceSnapshotHash"] as? String else {
+          let sourceSnapshotHash = object["sourceSnapshotHash"] as? String,
+          sourceSnapshotHash.hasPrefix("sha256:") else {
         throw CocoaError(.fileReadCorruptFile)
     }
+    let sourceIndexSHA256 = String(sourceSnapshotHash.dropFirst("sha256:".count))
 
     let companion = try VisionPackLocation.companionURL(forTextModel: text)
     try FileManager.default.createDirectory(
@@ -45,7 +47,7 @@ func installVisionCompanion(forTextModel text: URL) throws -> URL {
     let revision = String(repeating: "a", count: 40)
     let manifest = GTurboVisionManifestV1(
         modelID: "fixture/model", sourceRevision: revision,
-        sourceIndexSha256: String(repeating: "b", count: 64),
+        sourceIndexSha256: sourceIndexSHA256,
         processorConfigSha256: digest(processor),
         compatibleTextSourceSnapshotHash: sourceSnapshotHash,
         compatibleTextManifestSha256: textManifestSHA,

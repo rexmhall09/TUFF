@@ -414,7 +414,8 @@ struct ModelCatalogRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 visionAction
                 Spacer(minLength: 8)
-                if !visionIsInstalled && !visionIsPrepared {
+                if !visionIsInstalled, !visionIsPrepared,
+                   let visionDescriptor {
                     Text(MetricFormat.storage(visionDescriptor.approximateDownloadBytes))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -499,7 +500,7 @@ struct ModelCatalogRow: View {
         }
     }
 
-    private var visionDescriptor: AppModelInstallDescriptor {
+    private var visionDescriptor: AppModelInstallDescriptor? {
         model.visionInstallDescriptor(for: install)
     }
 

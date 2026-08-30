@@ -353,6 +353,7 @@ public final class AppModel {
         self.reasoning = modelSettings.defaultReasoning
         self.reasoningEffort = modelSettings.defaultReasoningEffort
         self.preserveThinking = modelSettings.preserveThinking
+        self.settingsStore.systemPrompt = modelSettings.systemPrompt
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.sentPromptBehavior = settings.sentPromptBehavior
@@ -624,8 +625,19 @@ public final class AppModel {
         conversationStore.renameConversation(id: record.id, title: title)
     }
 
+    /// Whether deleting this chat can leave the active runtime untouched.
+    /// Deleting a background chat is harmless while the server is running,
+    /// but deleting the selected one implicitly selects another chat and may
+    /// switch models underneath that server.
+    public func canDeleteConversation(_ record: AppConversationRecord) -> Bool {
+        guard conversationStore.conversations.contains(where: { $0.id == record.id }),
+              !isRunning else { return false }
+        guard conversationStore.selectedConversationID == record.id else { return true }
+        return !loadState.isLoading && !serverStore.isBusy
+    }
+
     public func deleteConversation(_ record: AppConversationRecord) {
-        guard !isRunning else { return }
+        guard canDeleteConversation(record) else { return }
         if conversationStore.selectedConversationID == record.id {
             releaseTranscriptImages()
             generationTranscriptMailbox?.reset()
@@ -767,7 +779,7 @@ public final class AppModel {
         switch visionInstallState {
         case .checking, .downloadingMetadata, .planning, .reservingOutput,
              .hashingOutput, .finalizing:
-            return visionInstallDescriptor(for: target).installedBytes
+            return visionInstallDescriptor(for: target)?.installedBytes ?? 0
         case .copyingPayload(let reused, let downloaded, let total):
             let completed = reused.addingReportingOverflow(downloaded)
             guard !completed.overflow, total > completed.partialValue else { return 0 }
@@ -778,14 +790,19 @@ public final class AppModel {
         }
     }
 
-    public var visionInstallDescriptor: AppModelInstallDescriptor {
+    /// `nil` when the selected model ships no image pack, which text-only
+    /// models such as GPT-OSS do not.
+    public var visionInstallDescriptor: AppModelInstallDescriptor? {
         visionInstallDescriptor(for: selectedInstall)
     }
 
     public func visionInstallDescriptor(
         for coordinator: ModelInstallCoordinator
-    ) -> AppModelInstallDescriptor {
-        .visionCompanion(for: coordinator.descriptor.family)
+    ) -> AppModelInstallDescriptor? {
+        guard let variant = coordinator.descriptor.modelVariant else {
+            return .visionCompanion(for: coordinator.descriptor.family)
+        }
+        return .visionCompanion(for: variant)
     }
 
     public func visionInstallationStatus(
@@ -824,7 +841,9 @@ public final class AppModel {
         } else {
             verb = "Download"
         }
-        return "\(verb) \(visionInstallDescriptor(for: coordinator).displayName)"
+        let name = visionInstallDescriptor(for: coordinator)?.displayName
+            ?? "Image Support"
+        return "\(verb) \(name)"
     }
 
     /// Every companion Download, Resume, Verify, Activate, Repair, and Remove
@@ -1067,6 +1086,22 @@ public final class AppModel {
         case (false, false):
             return "You:\n\(outputPromptText)\n\n\(modelLabel):\n\(response)"
         }
+    }
+
+    /// The transcript exactly as it is drawn: saved turns followed by an
+    /// unrecorded live, cancelled, or failed exchange. A completed output slot
+    /// remains available to "Copy Last Response", but must not be appended a
+    /// second time after that turn has joined `conversation`.
+    public var conversationPlainText: String {
+        var blocks = conversation.map { turn in
+            let name = modelShortName(forProfileKey: turn.modelID)
+            return "You:\n\(turn.modelPrompt)\n\n\(name):\n\(turn.response)"
+        }
+        if hasLiveMessage {
+            let live = outputConversationPlainText
+            if !live.isEmpty { blocks.append(live) }
+        }
+        return blocks.joined(separator: "\n\n")
     }
 
     public var liveTokensPerSecond: Double {

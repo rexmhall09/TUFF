@@ -127,12 +127,27 @@ enum RepackPlanner {
             throw RepackError.sourceFingerprintRejected(
                 path: meta.indexPath, sha256: meta.indexSha256Hex)
         }
-        let isQwen36 = modelID == SupportedModelSource.qwen36.modelID
         let tensors = shardHeaders.flatMap(\.tensors).filter {
-            isMultimodalTensorName($0.name)
+            isVisionTensorName($0.name)
         }
-        let expectedTensorCount = isQwen36 ? 333 : 358
-        let expectedSourceBytes: UInt64 = isQwen36 ? 893_142_496 : 1_140_925_536
+        let expected: (count: Int, bytes: UInt64)
+        switch modelID {
+        case SupportedModelSource.qwen36.modelID:
+            expected = (333, 893_142_496)
+        case SupportedModelSource.gemma4E2B.modelID:
+            expected = (213, 335_392_768)
+        case SupportedModelSource.gemma4E4B.modelID:
+            // E4B uses the same 768-wide, 16-layer Gemma vision tower as
+            // E2B. Its only vision-side shape difference is the wider final
+            // projection into the 2,560-wide language model.
+            expected = (213, 335_835_136)
+        case SupportedModelSource.gemma4_12B_QAT.modelID:
+            expected = (14, 40_493_568)
+        default:
+            expected = (358, 1_140_925_536)
+        }
+        let expectedTensorCount = expected.count
+        let expectedSourceBytes = expected.bytes
         guard tensors.count == expectedTensorCount else {
             throw RepackError.configurationInvalid(
                 detail: "expected \(expectedTensorCount) vision tensors for \(modelID), found \(tensors.count)")
@@ -199,6 +214,21 @@ enum RepackPlanner {
         }
         if name.hasPrefix("embed_vision.") {
             return "3000/\(name)"
+        }
+        if name.hasPrefix("vision_embedder.patch_ln1.") {
+            return "0000/\(name)"
+        }
+        if name.hasPrefix("vision_embedder.patch_dense.") {
+            return "1000/\(name)"
+        }
+        if name.hasPrefix("vision_embedder.patch_ln2.") {
+            return "2000/\(name)"
+        }
+        if name.hasPrefix("vision_embedder.pos_embedding") {
+            return "3000/\(name)"
+        }
+        if name.hasPrefix("vision_embedder.pos_norm.") {
+            return "4000/\(name)"
         }
         return "9999/\(name)"
     }
@@ -380,10 +410,23 @@ enum RepackPlanner {
 
     private static func isMultimodalTensorName(_ name: String) -> Bool {
         name.hasPrefix("vision_tower.") ||
+            name.hasPrefix("vision_embedder.") ||
             name.hasPrefix("embed_vision.") ||
             name.hasPrefix("audio_tower.") ||
             name.hasPrefix("embed_audio.") ||
             name.hasPrefix("embed_video.")
+    }
+
+    private static func isVisionTensorName(_ name: String) -> Bool {
+        guard name.hasPrefix("vision_tower.")
+                || name.hasPrefix("vision_embedder.")
+                || name.hasPrefix("embed_vision.") else { return false }
+        // E2B's clipped BF16 linears carry calibration extrema that are not
+        // weights and are never consumed at inference time.
+        return !name.hasSuffix(".input_min")
+            && !name.hasSuffix(".input_max")
+            && !name.hasSuffix(".output_min")
+            && !name.hasSuffix(".output_max")
     }
 
     // MARK: - Resident planning

@@ -225,10 +225,10 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
         for textModelDirectory: URL
     ) -> AppModelInstallDescriptor {
         guard configured == .visionCompanion,
-              (try? ManifestReader.resolveArchitecture(
-                directoryURL: textModelDirectory).family) == .qwen36 else {
-            return configured
-        }
-        return .qwen36VisionCompanion
+              let architecture = try? ManifestReader.resolveArchitecture(
+                directoryURL: textModelDirectory),
+              let resolved = AppModelInstallDescriptor.visionCompanion(
+                for: architecture.variant) else { return configured }
+        return resolved
     }
 }

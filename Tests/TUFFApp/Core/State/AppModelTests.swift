@@ -20,6 +20,31 @@ import Testing
     }
 
     @MainActor
+    @Test func runningServerPreventsDeletingTheSelectedChat() throws {
+        let store = AppConversationStore()
+        let defaultKey = AppModelInstallDescriptor.default.settingsProfileKey
+        let otherKey = AppModelInstallDescriptor.qwen36.settingsProfileKey
+        store.recordCompletedTurn(
+            AppChatTurn(prompt: "other", response: "answer"),
+            attachments: [], modelID: otherKey)
+        store.startNewConversation(modelID: defaultKey)
+        store.recordCompletedTurn(
+            AppChatTurn(prompt: "selected", response: "answer"),
+            attachments: [], modelID: defaultKey)
+        let model = AppModel(conversationStore: store)
+        let selected = try #require(store.selectedConversation)
+        let originalID = model.selectedModelID
+
+        model.serverStore.status = .running
+        #expect(!model.canDeleteConversation(selected))
+        model.deleteConversation(selected)
+
+        #expect(store.selectedConversationID == selected.id)
+        #expect(store.conversations.contains { $0.id == selected.id })
+        #expect(model.selectedModelID == originalID)
+    }
+
+    @MainActor
     @Test func defaultsUseSampledRequest() throws {
         let model = AppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path
@@ -246,6 +271,9 @@ import Testing
         #expect(model.outputPromptText == "original prompt")
         #expect(model.outputResponsePlainText == "answer")
         #expect(model.outputConversationPlainText
+            == "You:\noriginal prompt\n\n"
+                + "\(model.selectedDescriptor.shortName):\nanswer")
+        #expect(model.conversationPlainText
             == "You:\noriginal prompt\n\n"
                 + "\(model.selectedDescriptor.shortName):\nanswer")
         #expect(!model.outputConversationPlainText.contains("edited prompt"))

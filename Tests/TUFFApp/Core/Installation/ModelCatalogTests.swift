@@ -11,6 +11,67 @@ import TUFFRepackCore
 /// concern from downloading — picking a model decides what loads, and must not
 /// start or stop any transfer.
 @Suite struct ModelCatalogTests {
+    /// Every image pack must come from the *same* checkpoint as the text model
+    /// it attaches to. Routing by family alone handed every Gemma the 26B pack,
+    /// which installs cleanly and then fails verification against the text
+    /// manifest it was never built for.
+    @Test func everyImagePackComesFromItsOwnCheckpoint() {
+        for model in TUFFModelCatalog.all {
+            let variant = ModelVariant(rawValue: model.architecture.id.rawValue)
+            let companion = variant.flatMap {
+                AppModelInstallDescriptor.visionCompanion(for: $0)
+            }
+            guard model.capabilities.contains(.imageInput) else {
+                #expect(companion == nil,
+                        "\(model.selector) has no image input but offers a pack")
+                continue
+            }
+            #expect(companion?.repoID == model.source.repoID,
+                    "\(model.selector) image pack points at \(companion?.repoID ?? "nil")")
+            #expect(companion?.revision == model.source.revision)
+            #expect(companion?.sourceIndexSHA256 == model.source.sourceIndexSHA256)
+        }
+    }
+
+    /// Every image pack's advertised download, pinned to the coalesced range
+    /// total measured against the pinned checkpoint's real tensor layout.
+    ///
+    /// Two of these were wrong because they were derived rather than measured:
+    /// E4B reused E2B's figure plus the payload delta, and Qwen used the bare
+    /// vision payload sum. Both checkpoints interleave their vision tensors
+    /// with language tensors, so the bytes actually pulled over the wire
+    /// include the gaps a 64 MiB coalescing window spans.
+    @Test func imagePackDownloadsArePinnedToMeasuredRangeTotals() {
+        let measured: [TUFFModelID: UInt64] = [
+            .gemma4_E2B: 1_169_504_854,
+            .gemma4_E4B: 1_313_596_274,
+            .gemma4_12B_QAT: 102_556_672,
+            .gemma4_26B_A4B: 1_539_478_890,
+            .qwen36_35B_A3B: 1_137_999_008,
+        ]
+        for model in TUFFModelCatalog.all {
+            guard let addon = model.addons.first(where: { $0.kind == .imageInput })
+            else { continue }
+            #expect(measured[model.id] == addon.source.approximateDownloadBytes,
+                    "\(model.selector) image pack download drifted")
+            // A pack can never download less than the tensors it installs.
+            #expect(addon.source.approximateDownloadBytes >= addon.source.installedBytes,
+                    "\(model.selector) claims to download less than it installs")
+        }
+        #expect(measured.count == TUFFModelCatalog.all.filter {
+            $0.addons.contains { $0.kind == .imageInput }
+        }.count)
+    }
+
+    /// Selecting a text-only model on a Mac whose *device* supports the vision
+    /// runtime used to reach a `preconditionFailure` through the inspector's
+    /// download line, because that line is gated on the device, not the model.
+    @Test func textOnlyModelsReportNoImagePackInsteadOfTrapping() {
+        #expect(AppModelInstallDescriptor.visionCompanion(for: .gptOss_20B) == nil)
+        #expect(AppModelInstallDescriptor.visionCompanion(for: .gptOss_120B) == nil)
+        #expect(AppModelInstallDescriptor.visionCompanion(for: ModelFamily.gptOss) == nil)
+    }
+
     @Test func catalogExposesStableAPIIDsAndPromptDialects() {
         for descriptor in AppModelInstallDescriptor.catalog {
             #expect(!descriptor.apiModelID.isEmpty)
@@ -65,6 +126,7 @@ import TUFFRepackCore
         #expect(AppModelInstallDescriptor.catalog.map(\.settingsProfileKey) == [
             "gemma4-e2b",
             "gemma4-e4b",
+            "gemma4-12b-qat",
             "gemma4-26b-a4b",
             "qwen36-35b-a3b",
             "gpt-oss-20b",
@@ -73,6 +135,7 @@ import TUFFRepackCore
         #expect(AppModelInstallDescriptor.catalog.map(\.installDirectoryName) == [
             "gemma4-e2b.gturbo",
             "gemma4-e4b.gturbo",
+            "gemma4-12b-qat.gturbo",
             "gemma4.gturbo",
             "qwen36.gturbo",
             "gpt-oss-20b.gturbo",
@@ -84,6 +147,10 @@ import TUFFRepackCore
         #expect(AppModelInstallDescriptor.default.supportsImageInput)
         #expect(AppModelInstallDescriptor.descriptor(
             for: ModelVariant.gemma4_E4B) == .gemma4E4B)
+        #expect(AppModelInstallDescriptor.visionCompanion(
+            for: .gemma4_E2B)?.repoID == "mlx-community/gemma-4-e2b-it-4bit")
+        #expect(AppModelInstallDescriptor.visionCompanion(
+            for: .gemma4_12B_QAT)?.repoID == "mlx-community/gemma-4-12B-it-qat-4bit")
         #expect(AppModelInstallDescriptor.descriptor(
             for: ModelVariant.qwen36_35B_A3B) == .qwen36)
         #expect(AppModelInstallDescriptor.descriptor(

@@ -339,15 +339,42 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public static let qwen36VisionCompanion = AppModelInstallDescriptor(
         addon: TUFFModelCatalog.qwen36_35B_A3B.addons[0])
 
+    /// Family-only routing, for descriptors that match no catalog row. `nil`
+    /// for a family that ships no image pack at all.
+    ///
+    /// Prefer the `ModelVariant` overload: Gemma 4 checkpoints do not share a
+    /// vision tensor layout, so routing by family alone hands every Gemma the
+    /// 26B pack and silently installs a valid pack for the wrong model.
     public static func visionCompanion(
         for family: ModelFamily
-    ) -> AppModelInstallDescriptor {
+    ) -> AppModelInstallDescriptor? {
         switch family {
         case .gemma4: return .visionCompanion
         case .qwen36: return .qwen36VisionCompanion
-        case .gptOss:
-            preconditionFailure("GPT-OSS does not have a vision companion")
+        case .gptOss: return nil
         }
+    }
+
+    /// The image pack belonging to one exact text architecture, or `nil` when
+    /// that architecture ships none.
+    ///
+    /// Returning `nil` rather than trapping: the only guard in front of the
+    /// inspector's copy of this call is whether the *device* supports the
+    /// vision runtime, so selecting a text-only model on a capable Mac reached
+    /// a `preconditionFailure` and took the app down.
+    public static func visionCompanion(
+        for variant: ModelVariant
+    ) -> AppModelInstallDescriptor? {
+        guard let model = TUFFModelCatalog.all.first(where: {
+            $0.architecture.id.rawValue == variant.rawValue
+        }), let addon = model.addons.first(where: { $0.kind == .imageInput }) else {
+            return nil
+        }
+        return AppModelInstallDescriptor(addon: addon)
+    }
+
+    public var modelVariant: ModelVariant? {
+        catalogDescriptor.flatMap { ModelVariant(rawValue: $0.architecture.id.rawValue) }
     }
 
     private var catalogDescriptor: TUFFModelDescriptor? {

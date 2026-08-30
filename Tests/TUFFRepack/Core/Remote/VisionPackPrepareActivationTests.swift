@@ -412,9 +412,11 @@ struct VisionPackPrepareActivationTests {
         try FileManager.default.createDirectory(
             atPath: paths.partialDirectory,
             withIntermediateDirectories: true)
+        let sourceIndex = String(repeating: "b", count: 64)
 
         let textManifest = GTurboManifestV1(
-            flags: [:], modelID: "fixture/text", sourceSnapshotHash: "text-snapshot",
+            flags: [:], modelID: "fixture/text",
+            sourceSnapshotHash: "sha256:\(sourceIndex)",
             arch: GTurboManifestArchV1(
                 hiddenSize: 1, ffnIntermediate: 1, moeIntermediateSize: 1,
                 numHeads: 1, numKVHeads: 1, numFullKVHeads: 1,
@@ -441,12 +443,11 @@ struct VisionPackPrepareActivationTests {
                 size: UInt64(processor.count), sha256: hash(processor)),
         ]
         let revision = String(repeating: "a", count: 40)
-        let sourceIndex = String(repeating: "b", count: 64)
         let manifest = GTurboVisionManifestV1(
             modelID: "fixture/model", sourceRevision: revision,
             sourceIndexSha256: sourceIndex,
             processorConfigSha256: hash(processor),
-            compatibleTextSourceSnapshotHash: "text-snapshot",
+            compatibleTextSourceSnapshotHash: "sha256:\(sourceIndex)",
             compatibleTextManifestSha256: textSHA,
             files: files,
             tensors: [.init(

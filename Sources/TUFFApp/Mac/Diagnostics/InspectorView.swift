@@ -50,10 +50,10 @@ struct InspectorView: View {
                     .font(.caption)
                     .foregroundStyle(visionStatusColor)
             }
-            if model.isVisionRuntimeSupported && !model.isVisionPackInstalled {
+            if model.isVisionRuntimeSupported, !model.isVisionPackInstalled,
+               let descriptor = model.visionInstallDescriptor {
                 LabeledContent("Download") {
-                    Text(MetricFormat.storage(
-                        model.visionInstallDescriptor.approximateDownloadBytes))
+                    Text(MetricFormat.storage(descriptor.approximateDownloadBytes))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -179,13 +179,10 @@ struct InspectorView: View {
     }
 
     private var visionInstallButtonLabel: String {
-        if model.hasPartialVisionPackDownload {
-            return "Resume \(model.visionInstallDescriptor.displayName)"
-        }
-        if model.hasVisionPackDirectory {
-            return "Repair \(model.visionInstallDescriptor.displayName)"
-        }
-        return "Download \(model.visionInstallDescriptor.displayName)"
+        let name = model.visionInstallDescriptor?.displayName ?? "Image Support"
+        if model.hasPartialVisionPackDownload { return "Resume \(name)" }
+        if model.hasVisionPackDirectory { return "Repair \(name)" }
+        return "Download \(name)"
     }
 
     private func visionAccessibleProgress(fraction: Double) -> String {
