@@ -36,12 +36,32 @@
     display: inline-flex; align-items: center; gap: 9px;
     padding: 13px 26px; border-radius: 999px;
     font-size: 16px; font-weight: 600; text-decoration: none;
-    border: 1px solid transparent; transition: filter .15s ease, background .15s ease;
+    border: 1px solid transparent;
+    transform: translateZ(0);
+    transition: transform .18s cubic-bezier(.2, .7, .3, 1),
+                box-shadow .18s ease, filter .18s ease, background .18s ease,
+                border-color .18s ease;
+  }
+  .button:hover { transform: scale(1.045) translateY(-1px); }
+  .button:active { transform: scale(.985); transition-duration: .06s; }
+  .button:focus-visible {
+    outline: 2px solid var(--violet); outline-offset: 3px;
   }
   .button.primary { background: var(--violet); color: #fff; }
-  .button.primary:hover { filter: brightness(1.12); }
+  .button.primary:hover {
+    filter: brightness(1.12);
+    box-shadow: 0 8px 22px -6px color-mix(in srgb, var(--violet) 65%, transparent);
+  }
   .button.secondary { background: transparent; color: var(--text); border-color: var(--border); }
-  .button.secondary:hover { background: var(--surface-raised); }
+  .button.secondary:hover {
+    background: var(--surface-raised);
+    border-color: color-mix(in srgb, var(--text) 28%, transparent);
+  }
+  /* Scale and lift are decorative; colour still answers the hover without them. */
+  @media (prefers-reduced-motion: reduce) {
+    .button { transition: filter .18s ease, background .18s ease, border-color .18s ease; }
+    .button:hover, .button:active { transform: none; }
+  }
   .meta { color: var(--muted); font-size: 14px; min-height: 20px; }
   .shot { margin: 44px 0 8px; }
   .shot img { width: 100%; height: auto; display: block; border-radius: 14px; }
@@ -88,7 +108,7 @@
   </header>
 
   <div class="shot">
-    <img src="assets/tuff-chat.png" alt="TUFF chatting with Qwen3.6 on a Mac">
+    <img src="assets/tuff-chat.png" alt="TUFF running GPT-OSS 120B on a 16 GB Mac">
   </div>
 
   <section>

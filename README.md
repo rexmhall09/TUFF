@@ -16,7 +16,7 @@
   · <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-![TUFF chatting with Qwen3.6 on a Mac](docs/assets/tuff-v2-chat.png)
+![TUFF running GPT-OSS 120B on a 16 GB Mac](docs/assets/tuff-v3-chat.png)
 
 ## What TUFF is
 
@@ -154,7 +154,9 @@ copy of a checkpoint first.
 
 | Model | What I would use it for | Installed size | Minimum memory | Add-ons |
 | --- | --- | ---: | ---: | --- |
-| Gemma 4 E4B IT | A small and quick general model | 4.23 GB | 8 GB | None |
+| Gemma 4 E2B IT | The smallest model here | 2.64 GB | 8 GB | Image input |
+| Gemma 4 E4B IT | A small and quick general model | 4.23 GB | 8 GB | Image input |
+| Gemma 4 12B IT QAT | Dense quality without a mixture of experts | 10.98 GB | 16 GB | Image input |
 | Gemma 4 26B-A4B IT | The balanced default | 14.29 GB | 8 GB | Image input |
 | Qwen3.6 35B-A3B | Coding, long context, and images | 19.55 GB | 8 GB | Image input |
 | GPT-OSS 20B | Reasoning and local tool workflows | 13.79 GB | 16 GB | None |
@@ -219,9 +221,13 @@ reserve. I have not run these models on an 8 GB Mac.
 
 ## Images
 
-Gemma 4 26B and Qwen3.6 use optional `.vision.gturbo` companion packs. They are
-separate because a text-only user should not have to download image weights.
-Install or remove the add-on from its model card.
+Every Gemma 4 model and Qwen3.6 use optional `.vision.gturbo` companion packs.
+They are separate because a text-only user should not have to download image
+weights. Install or remove the add-on from its model card.
+
+A pack is bound to the exact text checkpoint it was built from, not just to the
+model family. Installing one against a different checkpoint is refused at
+download time rather than at first image.
 
 Image input fails closed. If the companion is missing, corrupt, built for a
 different model, or unsupported by the Mac, TUFF rejects the image. It never
@@ -277,8 +283,8 @@ launch. Existing compatible v1 Gemma and Qwen installations remain readable.
 
 ### Command-line interface
 
-The stable installer selectors are `gemma4-e4b`, `gemma4`, `qwen36`,
-`gpt-oss-20b`, and `gpt-oss-120b`:
+The stable installer selectors are `gemma4-e2b`, `gemma4-e4b`,
+`gemma4-12b-qat`, `gemma4`, `qwen36`, `gpt-oss-20b`, and `gpt-oss-120b`:
 
 ```bash
 swift run -c release TUFFRepack \
