@@ -50,6 +50,11 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private let expertScratch: GPTOSSExpertScratchBuffers
 
     let maxContext: Int
+    /// Decode-phase totals only, matching `RealForwardRunner` and what
+    /// `TUFF_PHASES=1` divides against. Accumulating the prefill passes into
+    /// these as well made the phases sum past the decode window and printed a
+    /// negative "unaccounted (GPU waits)" line on any prompt long enough to
+    /// matter -- on GPT-OSS 120B it read -51,844.7 ms.
     private(set) var totalIoNanos: UInt64 = 0
     private(set) var totalCb1Nanos: UInt64 = 0
     private(set) var totalCb2Nanos: UInt64 = 0
@@ -280,7 +285,6 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         let floatBytes = MemoryLayout<Float>.stride
         let indexBytes = MemoryLayout<UInt32>.stride
 
-        let cb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let cb1 = context.queue.makeCommandBuffer()!
         for row in 0..<queryCount {
             let position = startPosition + row
@@ -397,7 +401,6 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         }
         cb1.commit()
         try waitForCompletion(cb1)
-        totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cb1Start
 
         let indexPointer = routedIndices.contents()
             .assumingMemoryBound(to: UInt32.self)
@@ -418,16 +421,13 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             let groupEnd = min(orderedExperts.count, groupStart + groupSize)
             let expertIDs = Array(orderedExperts[groupStart..<groupEnd])
             prefillExpertGroupCount += 1
-            let ioStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let blobs = try await model.fetchRoutedExperts(
                 layer: layer, experts: expertIDs)
-            totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - ioStart
             var blobByExpert: [Int: TensorView] = [:]
             for (expert, blob) in zip(expertIDs, blobs) {
                 blobByExpert[expert] = blob
             }
 
-            let cb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let cb2 = context.queue.makeCommandBuffer()!
             for row in 0..<queryCount {
                 for routeSlot in 0..<config.topKExperts {
@@ -457,7 +457,6 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             try withExtendedLifetime(blobs) {
                 try waitForCompletion(cb2)
             }
-            totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cb2Start
             groupStart = groupEnd
         }
     }
