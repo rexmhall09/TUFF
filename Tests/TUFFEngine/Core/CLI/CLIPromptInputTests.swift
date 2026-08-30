@@ -235,4 +235,57 @@ import TUFFEngine
         #expect(message.contains("M2 or newer"),
                 "model IO masked the unsupported-hardware error: \(message)")
     }
+
+    /// The check above only runs on an Apple7 Mac, so on every development
+    /// machine here it is skipped and the ordering it guards went unproven
+    /// until CI — which runs on M1 — reached it. Answering the support
+    /// question directly covers the same ordering on any hardware.
+    @Test func unsupportedVisionHardwareIsReportedBeforeTheModelIsRead() async throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-cli-model-\(UUID().uuidString).gturbo")
+        let arguments = try Args.parse([
+            "--model", missing.path,
+            "--chat-prompt", "describe",
+            "--image", missing.appendingPathComponent("missing.png").path,
+        ])
+        let errors = Pipe()
+
+        let result = await run(args: arguments,
+                               stderr: errors.fileHandleForWriting,
+                               visionSupport: { _ in false })
+        errors.fileHandleForWriting.closeFile()
+        let message = String(
+            decoding: errors.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self)
+
+        #expect(result.exitCode == 1)
+        #expect(message.contains("M2 or newer"),
+                "model IO masked the unsupported-hardware error: \(message)")
+    }
+
+    /// And the reordering must not swallow the model error for everyone else:
+    /// hardware that can run the tower still gets told what it could not open.
+    @Test func supportedVisionHardwareStillReportsAnUnreadableModel() async throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-cli-model-\(UUID().uuidString).gturbo")
+        let arguments = try Args.parse([
+            "--model", missing.path,
+            "--chat-prompt", "describe",
+            "--image", missing.appendingPathComponent("missing.png").path,
+        ])
+        let errors = Pipe()
+
+        let result = await run(args: arguments,
+                               stderr: errors.fileHandleForWriting,
+                               visionSupport: { _ in true })
+        errors.fileHandleForWriting.closeFile()
+        let message = String(
+            decoding: errors.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self)
+
+        #expect(result.exitCode == 1)
+        #expect(!message.contains("M2 or newer"))
+        #expect(message.contains(missing.path),
+                "the model that could not be opened went unnamed: \(message)")
+    }
 }

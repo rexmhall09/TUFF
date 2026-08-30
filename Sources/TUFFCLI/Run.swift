@@ -47,11 +47,30 @@ public struct RunResult: Equatable, Sendable {
     public init(exitCode: Int32) { self.exitCode = exitCode }
 }
 
+/// `visionSupport` answers "can this Metal device run the image tower". It is a
+/// parameter so the ordering below can be covered on a Mac that is not the one
+/// the answer is about.
 public func run(args: Args,
                 stdout: FileHandle = .standardOutput,
-                stderr: FileHandle = .standardError) async -> RunResult {
+                stderr: FileHandle = .standardError,
+                visionSupport: (MTLDevice) -> Bool = VisionRuntime.isSupported(on:)
+) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
+        // What the Mac can do is settled before the model is opened. Reading
+        // the manifest first meant an M1 asked for `--image` was told whatever
+        // the model directory happened to fail on — a missing-file errno for a
+        // run that this hardware was never going to be able to make.
+        let input = try parseInput(args: args)
+        var selectedDevice: MTLDevice?
+        if input.hasImages {
+            guard let device = MTLCreateSystemDefaultDevice() else {
+                return errored(stderr, "no Metal device", 1)
+            }
+            try VisionRuntime.requireSupportedDevice(
+                supportsApple8: visionSupport(device))
+            selectedDevice = device
+        }
         let architecture = try ManifestReader.resolveArchitecture(
             directoryURL: modelURL)
         let modelFamily = architecture.family
@@ -63,18 +82,9 @@ public func run(args: Args,
             throw ArgsError.unsupported(
                 flag: "--reasoning", context: modelFamily.rawValue)
         }
-        let input = try parseInput(args: args)
         try validateImageSupport(
             hasImages: input.hasImages,
             family: modelFamily)
-        var selectedDevice: MTLDevice?
-        if input.hasImages {
-            guard let device = MTLCreateSystemDefaultDevice() else {
-                return errored(stderr, "no Metal device", 1)
-            }
-            try VisionRuntime.requireSupportedDevice(device)
-            selectedDevice = device
-        }
         let tokenizer = try await GFTokenizer.load(forModelDirectory: modelURL)
         let currentDate = HarmonyPromptRenderer.calendarDate()
         var promptIds: [Int32]

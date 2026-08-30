@@ -314,7 +314,7 @@ public final class VisionRuntime {
         try requireSupportedDevice(supportsApple8: isSupported(on: device))
     }
 
-    static func requireSupportedDevice(supportsApple8: Bool) throws {
+    public static func requireSupportedDevice(supportsApple8: Bool) throws {
         guard supportsApple8 else {
             throw VisionRuntimeError.unsupportedKernel(
                 "the image tower requires an M2 or newer Apple Silicon Mac")
