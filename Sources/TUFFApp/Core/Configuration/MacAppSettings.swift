@@ -95,6 +95,7 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
         case defaultReasoning
         case defaultReasoningEffort
         case preserveThinking
+        case systemPrompt
     }
 
     public init(from decoder: Decoder) throws {
@@ -117,6 +118,8 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
             GPTOSSReasoningEffort.self, forKey: .defaultReasoningEffort) ?? .medium
         preserveThinking = try container.decodeIfPresent(
             Bool.self, forKey: .preserveThinking) ?? false
+        systemPrompt = try container.decodeIfPresent(
+            String.self, forKey: .systemPrompt) ?? ""
     }
 }
 

@@ -145,7 +145,7 @@ struct ConversationHistoryTests {
     func promptAloneOverflowing() async throws {
         let tokenizer = try await GFTokenizer.load()
         let huge = String(repeating: "overflow ", count: 4000)
-        await #expect(throws: AppInferenceError.self) {
+        #expect(throws: AppInferenceError.self) {
             _ = try RealInferenceSession.renderConversation(
                 request: request(prompt: huge, history: [
                     AppChatTurn(prompt: "earlier", response: "earlier"),

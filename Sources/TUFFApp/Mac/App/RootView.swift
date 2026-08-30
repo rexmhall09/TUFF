@@ -32,33 +32,7 @@ struct RootView: View {
     @State private var isFullScreen = false
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(
-                    min: AppWindowLayout.sidebarMinimumWidth,
-                    ideal: AppWindowLayout.sidebarIdealWidth,
-                    max: AppWindowLayout.sidebarMaximumWidth)
-        } detail: {
-            AppWorkspaceView(
-                destination: navigation.destination,
-                model: model,
-                serverController: serverController,
-                updateController: updateController)
-        }
-        .navigationSplitViewStyle(.balanced)
-        // Full screen keeps the band the toolbar occupies even though there is
-        // no title bar in it, so the split view starts about 31pt below the top
-        // of the screen while a window insets its panels 5pt from every edge.
-        //
-        // The band is closed by pulling the split view up through it rather
-        // than by ignoring the safe area, which the split view does not honour
-        // here — asking it to, and then insetting by 5, put the 5 on top of the
-        // 31 and left the panel lower still.
-        //
-        // The padding goes on the split view, not the sidebar column: on the
-        // column it insets the column's *contents*, moving the TUFF mark down
-        // and leaving the panel itself against the edge.
-        .padding(.top, isFullScreen ? Self.fullScreenTopAdjustment : 0)
+        splitView
         .environment(\.windowIsFullScreen, isFullScreen)
         .background {
             WindowFullScreenReader(isFullScreen: $isFullScreen)
@@ -96,6 +70,43 @@ struct RootView: View {
             }
             .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
+    }
+
+    @ViewBuilder private var splitView: some View {
+        if isFullScreen {
+            HSplitView {
+                sidebar
+                    .frame(
+                        minWidth: AppWindowLayout.sidebarMinimumWidth,
+                        idealWidth: AppWindowLayout.sidebarIdealWidth,
+                        maxWidth: AppWindowLayout.sidebarMaximumWidth,
+                        maxHeight: .infinity)
+                workspace
+                    .frame(
+                        minWidth: AppWindowLayout.detailMinimumWidth,
+                        maxWidth: .infinity,
+                        maxHeight: .infinity)
+            }
+        } else {
+            NavigationSplitView {
+                sidebar
+                    .navigationSplitViewColumnWidth(
+                        min: AppWindowLayout.sidebarMinimumWidth,
+                        ideal: AppWindowLayout.sidebarIdealWidth,
+                        max: AppWindowLayout.sidebarMaximumWidth)
+            } detail: {
+                workspace
+            }
+            .navigationSplitViewStyle(.balanced)
+        }
+    }
+
+    private var workspace: some View {
+        AppWorkspaceView(
+            destination: navigation.destination,
+            model: model,
+            serverController: serverController,
+            updateController: updateController)
     }
 
     private var sidebar: some View {
@@ -149,6 +160,20 @@ struct RootView: View {
             }
         }
         .listStyle(.sidebar)
+        // Windowed, NavigationSplitView supplies the native floating sidebar.
+        // In full screen the content stays inside its safe area, but the
+        // sidebar surface itself extends through the top, bottom, and leading
+        // safe areas so it becomes a conventional full-height side column.
+        .scrollContentBackground(isFullScreen ? .hidden : .automatic)
+        .background {
+            if isFullScreen {
+                Rectangle()
+                    .fill(TUFFMacTheme.surfaceStyle(
+                        reduceTransparency: reduceTransparency,
+                        material: .regular))
+                    .ignoresSafeArea(.container, edges: [.top, .bottom, .leading])
+            }
+        }
         .safeAreaInset(edge: .top, spacing: 0) { brandHeader }
         .safeAreaInset(edge: .bottom, spacing: 0) { selectedModelFooter }
         .navigationTitle("TUFF")
@@ -221,7 +246,7 @@ struct RootView: View {
             Button("Delete", role: .destructive) {
                 model.deleteConversation(conversation)
             }
-            .disabled(model.isRunning)
+            .disabled(!model.canDeleteConversation(conversation))
         }
         .accessibilityLabel("\(conversation.title), \(modelName(for: conversation.modelID))")
         .accessibilityValue(isOpen(conversation) ? "Selected" : "")
@@ -269,30 +294,9 @@ struct RootView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
-        // One value for both. The panel's own inset is what full screen was
-        // missing, and that is now handled where the panel lives; compensating
-        // for it here only pushed the mark down inside a panel that was still
-        // against the edge.
         .padding(.top, 10)
         .padding(.bottom, 10)
     }
-
-    /// The gap the window leaves between its own edge and the sidebar panel,
-    /// matched by hand to the inset a windowed frame gives on its other three
-    /// edges.
-    private static let sidebarEdgeInset: CGFloat = 5
-
-    /// Height of the band full screen reserves for a toolbar it has no title
-    /// bar in, measured from the running app.
-    private static let fullScreenToolbarBand: CGFloat = 31
-
-    /// How far the split view is pulled up in full screen: far enough to close
-    /// the reserved band, less the gap a window would have left. One number to
-    /// nudge if the panel sits a little high or low.
-    private static var fullScreenTopAdjustment: CGFloat {
-        -(fullScreenToolbarBand - sidebarEdgeInset)
-    }
-
 
     private var selectedModelFooter: some View {
         Button {
@@ -376,10 +380,12 @@ private struct WindowFullScreenReader: NSViewRepresentable {
         @objc private func windowFullScreenChanged() { report() }
 
         private func report() {
-            let value = window?.styleMask.contains(.fullScreen) ?? false
+            let fullScreen = window?.styleMask.contains(.fullScreen) ?? false
             // Deferred: this runs inside AppKit's view-hierarchy change, which
             // SwiftUI counts as its own update pass.
-            DispatchQueue.main.async { [weak self] in self?.onChange?(value) }
+            DispatchQueue.main.async { [weak self] in
+                self?.onChange?(fullScreen)
+            }
         }
     }
 }

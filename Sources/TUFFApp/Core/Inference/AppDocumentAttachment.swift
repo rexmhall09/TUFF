@@ -32,11 +32,7 @@ public struct AppDocumentAttachment: Codable, Equatable, Sendable, Identifiable 
     /// so every model reads them the same way, and the name is kept so the
     /// answer can refer to the file.
     public var promptBlock: String {
-        """
-        <document name="\(displayName)">
-        \(text)
-        </document>
-        """
+        documentPromptBlock(displayName: displayName, text: text)
     }
 
     /// A short badge for the tile: "PDF", "MD", "TXT".
@@ -56,6 +52,21 @@ public struct AppDocumentAttachment: Codable, Equatable, Sendable, Identifiable 
             ? "~\(count)"
             : "~\(String(format: "%.1f", Double(count) / 1_000))k"
     }
+}
+
+/// Keep a filename from changing the prompt wrapper itself. File contents are
+/// intentionally unescaped plain text, but the name lives inside a quoted
+/// attribute and macOS filenames may contain quotes or line breaks.
+func documentPromptBlock(displayName: String, text: String) -> String {
+    let escapedName = displayName
+        .replacingOccurrences(of: "&", with: "&amp;")
+        .replacingOccurrences(of: "\"", with: "&quot;")
+        .replacingOccurrences(of: "<", with: "&lt;")
+        .replacingOccurrences(of: ">", with: "&gt;")
+        .replacingOccurrences(of: "\n", with: "&#10;")
+        .replacingOccurrences(of: "\r", with: "&#13;")
+        .replacingOccurrences(of: "\t", with: "&#9;")
+    return "<document name=\"\(escapedName)\">\n\(text)\n</document>"
 }
 
 public extension Array where Element == AppDocumentAttachment {

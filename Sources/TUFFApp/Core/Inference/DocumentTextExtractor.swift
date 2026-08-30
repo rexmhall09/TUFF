@@ -78,8 +78,9 @@ public enum DocumentTextExtractor {
     /// the model `{\rtf1\ansi…` and calls it the document. JSON and YAML also
     /// fail the plain-text test, which is why they stay named above.
     public static func canExtract(from url: URL) -> Bool {
-        if supportedExtensions.contains(url.pathExtension.lowercased()) { return true }
-        guard let type = UTType(filenameExtension: url.pathExtension.lowercased())
+        let ext = url.pathExtension.lowercased()
+        if ext.isEmpty || supportedExtensions.contains(ext) { return true }
+        guard let type = UTType(filenameExtension: ext)
         else { return false }
         return type.conforms(to: .plainText)
     }
@@ -119,10 +120,6 @@ public enum DocumentTextExtractor {
     /// every model reads them the same way, and the name is kept so the answer
     /// can refer to the file.
     public static func promptBlock(for document: ExtractedDocument) -> String {
-        """
-        <document name="\(document.displayName)">
-        \(document.text)
-        </document>
-        """
+        documentPromptBlock(displayName: document.displayName, text: document.text)
     }
 }

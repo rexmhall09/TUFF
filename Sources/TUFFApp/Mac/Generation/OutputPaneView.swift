@@ -28,9 +28,9 @@ struct OutputPaneView: View {
         }
         .contextMenu {
             Button("Copy conversation") {
-                copy(conversationPlainText)
+                copy(model.conversationPlainText)
             }
-            .disabled(conversationPlainText.isEmpty)
+            .disabled(model.conversationPlainText.isEmpty)
 
             Divider()
 
@@ -155,19 +155,6 @@ struct OutputPaneView: View {
     }
 
     private static let sharedRenderer = ResponseMarkdownRenderer()
-
-    /// The whole conversation as plain text, each answer labelled with the
-    /// model that produced it.
-    private var conversationPlainText: String {
-        var blocks: [String] = []
-        for turn in model.conversation {
-            let name = model.modelShortName(forProfileKey: turn.modelID)
-            blocks.append("You:\n\(turn.modelPrompt)\n\n\(name):\n\(turn.response)")
-        }
-        let live = model.outputConversationPlainText
-        if !live.isEmpty { blocks.append(live) }
-        return blocks.joined(separator: "\n\n")
-    }
 
     private var emptyPlaceholderContent: some View {
         VStack(spacing: 8) {

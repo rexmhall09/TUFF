@@ -269,6 +269,43 @@ import TUFFEngine
         #expect(decoded.profile(for: gptKey).defaultReasoningEffort == .high)
     }
 
+    @Test func systemPromptRoundTripsAndDefaultsForOlderProfiles() throws {
+        let profile = AppModelSettingsProfile(systemPrompt: "Answer briefly.")
+        let encoded = try JSONEncoder().encode(profile)
+        let decoded = try JSONDecoder().decode(
+            AppModelSettingsProfile.self, from: encoded)
+
+        #expect(decoded.systemPrompt == "Answer briefly.")
+
+        var object = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "systemPrompt")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let legacy = try JSONDecoder().decode(
+            AppModelSettingsProfile.self, from: legacyData)
+        #expect(legacy.systemPrompt.isEmpty)
+    }
+
+    @MainActor
+    @Test func systemPromptSurvivesAnAppModelRelaunch() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelDirectory = root.appendingPathComponent(
+            "gemma4.gturbo", isDirectory: true)
+
+        let first = AppModel(
+            modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
+        first.modelSystemPrompt = "Persist this instruction."
+
+        let relaunched = AppModel(
+            modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
+        #expect(relaunched.modelSystemPrompt == "Persist this instruction.")
+    }
+
     @Test func gptDefaultsRepresentDisabledTopKWithAValidStoredValue() throws {
         let key = try #require(AppModelInstallDescriptor.descriptor(
             for: ModelVariant.gptOss_20B)?.settingsProfileKey)

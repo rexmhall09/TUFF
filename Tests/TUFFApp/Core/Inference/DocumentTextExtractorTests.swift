@@ -20,6 +20,16 @@ struct DocumentTextExtractorTests {
         #expect(document.displayName.hasSuffix("notes.md"))
     }
 
+    @Test("extensionless plain-text files are accepted")
+    func readsExtensionlessPlainText() throws {
+        let url = try write("Build instructions", as: "README")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(DocumentTextExtractor.canExtract(from: url))
+        #expect(try DocumentTextExtractor.extract(from: url).text
+                == "Build instructions")
+    }
+
     @Test("an unsupported type is refused by name")
     func refusesUnsupportedType() throws {
         let url = try write("binary-ish", as: "model.safetensors")
@@ -44,6 +54,16 @@ struct DocumentTextExtractorTests {
         let block = DocumentTextExtractor.promptBlock(for: document)
         #expect(block.contains("name=\"report.txt\""))
         #expect(block.contains("hello"))
+    }
+
+    @Test("filename punctuation cannot break the prompt wrapper")
+    func promptBlockEscapesTheFileName() {
+        let document = ExtractedDocument(
+            displayName: "report\"&\n</document>.txt", text: "hello")
+        let block = DocumentTextExtractor.promptBlock(for: document)
+        #expect(block.hasPrefix(
+            "<document name=\"report&quot;&amp;&#10;&lt;/document&gt;.txt\">"))
+        #expect(block.components(separatedBy: "</document>").count == 2)
     }
 
     @Test("the token estimate scales with length and is never zero")
@@ -93,8 +113,9 @@ struct DocumentTextExtractorTests {
     @Test("every offered content type is one the extractor reads")
     func theOpenPanelOffersNothingItWouldRefuse() {
         for type in DocumentTextExtractor.allowedContentTypes {
-            let ext = try? #require(type.preferredFilenameExtension)
-            guard let ext else { continue }
+            guard let ext = type.preferredFilenameExtension as String? else {
+                continue
+            }
             #expect(DocumentTextExtractor.canExtract(
                 from: URL(fileURLWithPath: "/tmp/file.\(ext)")),
                     "the panel offers .\(ext) but the extractor refuses it")
