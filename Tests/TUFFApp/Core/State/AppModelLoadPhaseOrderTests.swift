@@ -9,7 +9,7 @@ import Testing
 @Suite struct AppModelLoadPhaseOrderTests {
     @MainActor
     @Test func aLatePhaseNeverOverwritesANewerOne() async throws {
-        let model = AppModel(client: MockLifecycleInferenceClient())
+        let model = makeAppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
 
@@ -27,7 +27,7 @@ import Testing
     /// In-order phases must still all be applied.
     @MainActor
     @Test func phasesInOrderAreAllApplied() async throws {
-        let model = AppModel(client: MockLifecycleInferenceClient())
+        let model = makeAppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
 
@@ -57,7 +57,7 @@ import Testing
         // ordering.
         let directory = try makeCompleteModelInstall("load-phase-order-late-phase")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory,
+        let model = makeAppModel(modelDirectory: directory,
                              client: MockLifecycleInferenceClient())
 
         model.applyLoadState(.loading(.validatingDirectory), generation: 0, sequence: 1)
@@ -78,7 +78,7 @@ import Testing
         let client = MockLifecycleInferenceClient()
         let directory = try makeCompleteModelInstall("load-phase-order-after-failure")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = makeAppModel(modelDirectory: directory, client: client)
 
         model.applyLoadState(.failed(.modelLoadFailed("first attempt")), generation: 0)
         #expect(model.loadState.isFailed)
@@ -97,7 +97,7 @@ import Testing
         let client = MockLifecycleInferenceClient()
         let directory = try makeCompleteModelInstall("load-phase-order")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = makeAppModel(modelDirectory: directory, client: client)
 
         for _ in 0..<3 {
             model.loadModel()

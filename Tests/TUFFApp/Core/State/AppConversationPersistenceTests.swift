@@ -123,7 +123,7 @@ import Testing
             directoryURL: FileManager.default.temporaryDirectory
                 .appendingPathComponent("qwen-switch-\(UUID().uuidString).gturbo"),
             client: qwenInstaller)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: FileManager.default.temporaryDirectory
                 .appendingPathComponent("gemma-switch-\(UUID().uuidString).gturbo"),
             installer: MockModelInstallerClient(descriptor: .default),
@@ -171,7 +171,7 @@ import Testing
             directoryURL: FileManager.default.temporaryDirectory
                 .appendingPathComponent("gptoss-switch-\(UUID().uuidString).gturbo"),
             client: textOnlyInstaller)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: FileManager.default.temporaryDirectory
                 .appendingPathComponent("gemma-switch-\(UUID().uuidString).gturbo"),
             installer: MockModelInstallerClient(descriptor: .default),

@@ -5,7 +5,7 @@ import Testing
 @Suite struct AppModelLiveMetricsTests {
     @MainActor
     @Test func prefillProgressUpdatesPhaseAndCounts() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.apply(.prefillProgress(done: 12, total: 50))
         #expect(model.phase == .prefill)
         #expect(model.livePrefillDone == 12)
@@ -14,7 +14,7 @@ import Testing
 
     @MainActor
     @Test func tokenEventSwitchesToDecodeAndComputesRate() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.apply(.token(AppTokenEvent(
             index: 4, textDelta: " x", elapsedDecodeSeconds: 2.0)))
         #expect(model.phase == .decode)
@@ -26,13 +26,13 @@ import Testing
 
     @MainActor
     @Test func liveRateIsZeroBeforeAnyToken() {
-        let model = AppModel()
+        let model = makeAppModel()
         #expect(model.liveTokensPerSecond == 0)
     }
 
     @MainActor
     @Test func terminalEventsReturnPhaseToIdleKeepingLastValues() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.apply(.token(AppTokenEvent(
             index: 2, textDelta: "a", elapsedDecodeSeconds: 1.0)))
         model.apply(.finished(AppDiagnostics(
@@ -47,7 +47,7 @@ import Testing
     @MainActor
     @Test func runResetsLiveMetricsAndEntersPrefill() async {
         let client = MockInferenceClient(response: "one two", tokenDelayNanos: 1_000_000_000)
-        let model = AppModel(client: client)
+        let model = makeAppModel(client: client)
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
         model.apply(.token(AppTokenEvent(
@@ -66,7 +66,7 @@ import Testing
 
     @MainActor
     @Test func cancelKeepsPartialLiveMetrics() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.apply(.token(AppTokenEvent(
             index: 1, textDelta: "p", elapsedDecodeSeconds: 0.5)))
         model.apply(.cancelled(AppDiagnostics(

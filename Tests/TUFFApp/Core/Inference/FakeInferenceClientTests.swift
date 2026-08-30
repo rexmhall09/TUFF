@@ -9,7 +9,7 @@ import Testing
   @Test func installedModelSupportsLoadAndGenerationWithTestClient() async throws {
     let directory = try makeCompleteModelInstall("fake-runtime")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: directory,
       client: FakeInferenceClient(eventDelay: .zero),
       installer: MockModelInstallerClient())

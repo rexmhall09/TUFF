@@ -7,7 +7,7 @@ import Testing
     @Test func runRequiresReadyStateButSubmissionCanLoadAnInstalledModel() throws {
         let directory = try makeCompleteModelInstall("submit-eligibility")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel()
+        let model = makeAppModel()
         model.setModelURL(directory)
         model.promptText = "go"
 
@@ -31,7 +31,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockLifecycleInferenceClient()
         client.suspendLoads = true
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = makeAppModel(modelDirectory: directory, client: client)
         model.promptText = "Explain local inference"
 
         model.submit()
@@ -58,7 +58,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockLifecycleInferenceClient()
         client.suspendLoads = true
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = makeAppModel(modelDirectory: directory, client: client)
         model.promptText = "Keep this draft"
 
         model.submit()
@@ -78,7 +78,7 @@ import Testing
     @Test func canLoadModelOnlyFromNotLoadedOrFailed() throws {
         let directory = try makeCompleteModelInstall("can-load")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
         model.loadState = .notLoaded
         #expect(model.canLoadModel)
         model.loadState = .failed(.modelLoadFailed("boom"))
@@ -91,7 +91,7 @@ import Testing
 
     @MainActor
     @Test func loadingStateBlocksRun() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.promptText = "go"
         model.loadState = .loading(.preparingRunner)
         #expect(!model.canRun)
@@ -102,7 +102,7 @@ import Testing
     @Test func explicitLoadReloadAndUnloadActionsAreMutuallyExclusive() throws {
         let directory = try makeCompleteModelInstall("action-matrix")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory,
+        let model = makeAppModel(modelDirectory: directory,
                              client: MockLifecycleInferenceClient())
         #expect(model.canLoadModel)
         #expect(!model.canReloadModel)
@@ -124,7 +124,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockLifecycleInferenceClient()
         client.suspendUnloads = true
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = makeAppModel(modelDirectory: directory, client: client)
         model.outputText = "keep me"
         model.promptText = "keep this draft"
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
@@ -146,7 +146,7 @@ import Testing
         let directory = try makeCompleteModelInstall("reload-preserves-conversation")
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockLifecycleInferenceClient()
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = makeAppModel(modelDirectory: directory, client: client)
         model.outputText = "keep me"
         model.promptText = "keep this draft"
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
@@ -169,7 +169,7 @@ import Testing
         let client = MockLifecycleInferenceClient()
         client.suspendLoads = true
         client.suspendUnloads = true
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = makeAppModel(modelDirectory: directory, client: client)
         model.outputText = "keep me"
         model.promptText = "keep this draft"
 
@@ -201,7 +201,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockLifecycleInferenceClient()
         client.suspendLoads = true
-        let model = AppModel(modelDirectory: directory, client: client)
+        let model = makeAppModel(modelDirectory: directory, client: client)
         model.outputText = "keep me"
         model.promptText = "keep this draft"
 
@@ -237,7 +237,7 @@ import Testing
     @Test func loadModelWithoutLifecycleClientFails() throws {
         let directory = try makeCompleteModelInstall("no-lifecycle")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory, client: MockInferenceClient())
+        let model = makeAppModel(modelDirectory: directory, client: MockInferenceClient())
         model.loadModel()
         #expect(model.loadState.isFailed)
     }
@@ -246,7 +246,7 @@ import Testing
     @Test func applyLoadStateUpdatesPresentation() throws {
         let directory = try makeCompleteModelInstall("load-presentation")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
         model.applyLoadState(.loading(.verifyingWeights))
         #expect(model.presentation.label == AppModelLoadPhase.verifyingWeights.label)
         model.applyLoadState(.failed(.modelLoadFailed("boom")))
@@ -263,7 +263,7 @@ import Testing
             try? FileManager.default.removeItem(at: oldURL)
             try? FileManager.default.removeItem(at: newURL)
         }
-        let model = AppModel(modelDirectory: oldURL, client: client)
+        let model = makeAppModel(modelDirectory: oldURL, client: client)
         model.loadState = .ready(modelDirectory: oldURL, loadSeconds: 1)
 
         model.setModelURL(newURL)
@@ -278,7 +278,7 @@ import Testing
 
     @MainActor
     @Test func staleReadyStateForOldModelPathIsIgnored() {
-        let model = AppModel(client: MockInferenceClient())
+        let model = makeAppModel(client: MockInferenceClient())
         let oldURL = URL(fileURLWithPath: "/tmp/old.gturbo")
         let newURL = URL(fileURLWithPath: "/tmp/new.gturbo")
         model.modelPathText = oldURL.path

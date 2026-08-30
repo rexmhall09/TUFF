@@ -69,7 +69,7 @@ import Testing
     @Test func editingAMessagePutsItBackInTheComposer() throws {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         record(store, "first", "one")
         record(store, "second", "two")
         let second = try #require(model.conversation.first { $0.prompt == "second" })
@@ -85,7 +85,7 @@ import Testing
     @Test func rewindingIsRefusedWhileRunning() throws {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         record(store, "first", "one")
         let turn = try #require(model.conversation.first)
         model.runState = .running
@@ -100,7 +100,7 @@ import Testing
     @Test func theSystemPromptIsSentWhenSetAndOmittedWhenNot() {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
 
         #expect(model.effectiveSystemPrompt == nil,
                 "no system prompt means no system message, not an empty one")
@@ -115,7 +115,7 @@ import Testing
     @Test func theSystemPromptReachesTheRequest() throws {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.modelSystemPrompt = "Answer in French."
         model.promptText = "Hello."
@@ -127,7 +127,7 @@ import Testing
     @Test func theSystemPromptCountsTowardTheContextEstimate() {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         model.promptText = "Hello."
         let without = model.contextUsage.estimatedTokens
 
@@ -140,7 +140,7 @@ import Testing
     @Test func theEstimateGrowsWithTheDraftAndTheHistory() {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         let empty = model.contextUsage.estimatedTokens
 
         model.promptText = String(repeating: "word ", count: 400)
@@ -154,7 +154,7 @@ import Testing
     @Test func aDraftLargerThanTheWindowIsReportedAsSuchBeforeSending() {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         model.maxContextTokens = 4_096
         model.promptText = String(repeating: "x", count: 4 * 5_000)
 
@@ -166,7 +166,7 @@ import Testing
     @Test func anIdleChatReportsNothingWorthShowing() {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         let usage = model.contextUsage
         #expect(usage.estimatedTokens == 0)
         #expect(!usage.isTight)
@@ -178,7 +178,7 @@ import Testing
     @Test func droppedTurnsReachTheApp() {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         #expect(model.lastRunDroppedTurns == nil)
 
         model.diagnostics = AppDiagnostics(

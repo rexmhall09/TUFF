@@ -84,7 +84,7 @@ import Testing
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("carry-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel()
+        let model = makeAppModel()
         let older = try writeImage(root, "older.png")
         let newer = try writeImage(root, "newer.png")
         model.conversationStore.conversation = [
@@ -105,7 +105,7 @@ import Testing
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("carry-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel()
+        let model = makeAppModel()
         model.conversationStore.conversation = [
             AppChatTurn(
                 prompt: "look", response: "a",
@@ -119,7 +119,7 @@ import Testing
     /// its path fails the whole run rather than one image, so it is dropped.
     @MainActor
     @Test func anImageTheArchiveNoLongerHoldsIsDroppedNotSent() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.conversationStore.conversation = [
             AppChatTurn(
                 prompt: "look", response: "a",

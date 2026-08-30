@@ -10,7 +10,7 @@ import TUFFRepackCore
   @Test func missingModelCanInstall() {
     let installer = MockModelInstallerClient()
     let directory = temporaryInstallPath("missing")
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: directory,
       client: MockLifecycleInferenceClient(),
       installer: installer)
@@ -24,7 +24,7 @@ import TUFFRepackCore
   @Test func installedModelShowsLoadNotInstall() throws {
     let directory = try makeCompleteModelInstall("installed")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: directory,
       client: MockLifecycleInferenceClient(),
       installer: MockModelInstallerClient())
@@ -41,7 +41,7 @@ import TUFFRepackCore
     let stagedDirectory = directory.deletingLastPathComponent()
       .appendingPathComponent("staged-\(UUID().uuidString).gturbo")
     try FileManager.default.moveItem(at: directory, to: stagedDirectory)
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: directory,
       client: MockLifecycleInferenceClient(),
       installer: MockModelInstallerClient())
@@ -62,7 +62,7 @@ import TUFFRepackCore
     let initialDirectory = temporaryInstallPath("initial-location")
     let currentDirectory = try makeCompleteModelInstall("current-location")
     defer { try? FileManager.default.removeItem(at: currentDirectory) }
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: initialDirectory,
       client: MockLifecycleInferenceClient(),
       installer: MockModelInstallerClient())
@@ -94,7 +94,7 @@ import TUFFRepackCore
       requiredBytes: 100,
       availableBytes: 40)
     let installer = MockModelInstallerClient(requirement: requirement)
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: temporaryInstallPath("space"),
       client: MockLifecycleInferenceClient(),
       installer: installer)
@@ -115,7 +115,7 @@ import TUFFRepackCore
           downloadedThisRunBytes: 3,
           totalBytes: 10),
       ], holdOpen: true)
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: directory,
       client: MockLifecycleInferenceClient(),
       installer: installer)
@@ -142,7 +142,7 @@ import TUFFRepackCore
     defer { try? FileManager.default.removeItem(at: completedDirectory) }
     let client = MockLifecycleInferenceClient()
     let installer = MockModelInstallerClient(events: [.installed(completedDirectory)])
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: requestedDirectory,
       client: client,
       installer: installer)
@@ -164,7 +164,7 @@ import TUFFRepackCore
     struct SyntheticError: Error {}
     let client = MockLifecycleInferenceClient()
     let installer = MockModelInstallerClient(failure: SyntheticError())
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: temporaryInstallPath("failure"),
       client: client,
       installer: installer)
@@ -184,7 +184,7 @@ import TUFFRepackCore
     let directory = temporaryInstallPath("network-resume")
     let paths = try makeSavedDownload(at: directory)
     defer { cleanUpSavedDownload(paths) }
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: directory,
       client: MockLifecycleInferenceClient(),
       installer: MockModelInstallerClient(failure: NetworkFailure()))
@@ -208,7 +208,7 @@ import TUFFRepackCore
       path: "/volume",
       required: 120,
       available: 45)
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: directory,
       client: MockLifecycleInferenceClient(),
       installer: MockModelInstallerClient(failure: error))
@@ -249,7 +249,7 @@ import TUFFRepackCore
         try Data("{}".utf8).write(
           to: URL(fileURLWithPath: paths.checkpointFile))
       }
-      let model = AppModel(
+      let model = makeAppModel(
         modelDirectory: directory,
         client: MockLifecycleInferenceClient(),
         installer: RepackModelInstallerClient(descriptor: descriptor))
@@ -270,7 +270,7 @@ import TUFFRepackCore
       required: 120,
       available: 45)
     let installer = MockModelInstallerClient(failure: error)
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: temporaryInstallPath("disk-failure"),
       client: MockLifecycleInferenceClient(),
       installer: installer)
@@ -295,7 +295,7 @@ import TUFFRepackCore
       events: [.downloadingMetadata],
       holdOpen: true,
       delayCancellationAcknowledgement: true)
-    let model = AppModel(
+    let model = makeAppModel(
       modelDirectory: temporaryInstallPath("cancel"),
       client: MockLifecycleInferenceClient(),
       installer: installer)

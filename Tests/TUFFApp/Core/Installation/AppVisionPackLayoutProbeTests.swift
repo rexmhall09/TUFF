@@ -45,7 +45,7 @@ import Testing
         let model = root.appendingPathComponent("gemma4-model", isDirectory: true)
         try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
 
-        let app = AppModel(modelDirectory: model)
+        let app = makeAppModel(modelDirectory: model)
 
         #expect(app.visionInstallationStatus == .unsupportedLayout)
         #expect(!app.canInstallVisionPack,
@@ -58,11 +58,11 @@ import Testing
         let model = try makeCompleteModelInstall("unsupported-vision-hardware")
         defer { try? FileManager.default.removeItem(at: model) }
         let installer = MockVisionPackInstallerClient(events: [.checking])
-        let supported = AppModel(
+        let supported = makeAppModel(
             modelDirectory: model,
             visionInstaller: installer,
             visionRuntimeSupported: true)
-        let unsupported = AppModel(
+        let unsupported = makeAppModel(
             modelDirectory: model,
             visionInstaller: installer,
             visionRuntimeSupported: false)

@@ -19,7 +19,7 @@ import Testing
         let staging = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: staging) }
 
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             attachmentStore: AppImageAttachmentStore(directoryURL: staging))
         model.maxContextTokens = AppContextLengthOption.sixtyFourK.tokens
@@ -54,7 +54,7 @@ import Testing
         let staging = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: staging) }
 
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             attachmentStore: AppImageAttachmentStore(directoryURL: staging))
 
@@ -78,7 +78,7 @@ import Testing
         let staging = try Self.makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: staging) }
 
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             attachmentStore: AppImageAttachmentStore(directoryURL: staging))
         model.maxContextTokens = AppContextLengthOption.sixtyFourK.tokens

@@ -23,7 +23,7 @@ import Testing
             descriptor: .qwen36,
             directoryURL: missingDirectory("picker-absent"),
             client: MockModelInstallerClient(descriptor: .qwen36))
-        let model = AppModel(modelDirectory: installed, otherInstalls: [absent])
+        let model = makeAppModel(modelDirectory: installed, otherInstalls: [absent])
 
         #expect(model.installs.count == 2)
         #expect(model.selectedInstall.isInstalled)
@@ -42,7 +42,7 @@ import Testing
             descriptor: .qwen36,
             directoryURL: missingDirectory("picker-other"),
             client: MockModelInstallerClient(descriptor: .qwen36))
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: missingDirectory("picker-selected"),
             otherInstalls: [absent])
 

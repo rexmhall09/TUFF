@@ -101,7 +101,7 @@ import TUFFRepackCore
             descriptor: otherInstaller.descriptor,
             directoryURL: otherDirectory,
             client: otherInstaller)
-        return AppModel(
+        return makeAppModel(
             modelDirectory: selectedDirectory,
             client: MockLifecycleInferenceClient(),
             installer: selectedInstaller,
@@ -179,7 +179,7 @@ import TUFFRepackCore
             unifiedMemoryBytes: 8 * TUFFModelCatalog.oneGiB,
             macOSMajorVersion: 26,
             appleSiliconGeneration: 2)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: temporaryInstallPath("compatible-gemma"),
             client: MockLifecycleInferenceClient(),
             installer: MockModelInstallerClient(descriptor: .default),
@@ -211,7 +211,7 @@ import TUFFRepackCore
             unifiedMemoryBytes: 16 * TUFFModelCatalog.oneGiB,
             macOSMajorVersion: 26,
             appleSiliconGeneration: 2)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: temporaryInstallPath("selected-gemma"),
             client: MockLifecycleInferenceClient(),
             installer: MockModelInstallerClient(descriptor: .default),
@@ -317,7 +317,7 @@ import TUFFRepackCore
         let directory = try makeCompleteModelInstall(
             "vision-qwen", stampedAs: .qwen36)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             client: MockLifecycleInferenceClient(),
             installer: MockModelInstallerClient(descriptor: .qwen36),
@@ -355,7 +355,7 @@ import TUFFRepackCore
             directoryURL: qwenDirectory,
             client: MockModelInstallerClient(descriptor: .qwen36))
         let visionInstaller = MockVisionPackInstallerClient(holdOpen: true)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: gemmaDirectory,
             client: MockLifecycleInferenceClient(),
             installer: MockModelInstallerClient(descriptor: .default),
@@ -402,7 +402,7 @@ import TUFFRepackCore
             client: MockModelInstallerClient(descriptor: .qwen36))
         let preparedDirectory = qwenDirectory.deletingPathExtension()
             .appendingPathExtension("vision.gturbo")
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: gemmaDirectory,
             client: MockLifecycleInferenceClient(),
             installer: MockModelInstallerClient(descriptor: .default),
@@ -527,7 +527,7 @@ import TUFFRepackCore
                 downloadedThisRunBytes: 0,
                 totalBytes: vision.installedBytes)],
             holdOpen: true)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: gemmaDirectory,
             client: MockLifecycleInferenceClient(),
             installer: MockModelInstallerClient(descriptor: .default),
@@ -579,7 +579,7 @@ import TUFFRepackCore
             directoryURL: qwenDirectory,
             client: MockModelInstallerClient(descriptor: .qwen36))
         let visionInstaller = MockVisionPackInstallerClient()
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: gemmaDirectory,
             client: MockLifecycleInferenceClient(),
             installer: MockModelInstallerClient(descriptor: .default),
@@ -630,7 +630,7 @@ import TUFFRepackCore
             descriptor: .qwen36,
             directoryURL: qwenDirectory,
             client: other)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: temporaryInstallPath("finish-gemma"),
             client: MockLifecycleInferenceClient(),
             installer: selected,

@@ -70,7 +70,7 @@ import TUFFEngine
 
         let directory = try makeVisionReadyModelInstall("lifetime-failed-batch")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory, attachmentStore: store)
+        let model = makeAppModel(modelDirectory: directory, attachmentStore: store)
         await attach(model, [good, missing])
 
         #expect(model.imageAttachments.isEmpty)
@@ -116,7 +116,7 @@ import TUFFEngine
         let directory = try makeVisionReadyModelInstall("lifetime-clear")
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockInferenceClient(response: "answer", tokenDelayNanos: 1)
-        let model = AppModel(modelDirectory: directory, client: client,
+        let model = makeAppModel(modelDirectory: directory, client: client,
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
         model.setSentPromptBehavior(.clear)
@@ -159,7 +159,7 @@ import TUFFEngine
         let directory = try makeVisionReadyModelInstall("lifetime-clear-runs")
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockInferenceClient(response: "answer", tokenDelayNanos: 1)
-        let model = AppModel(modelDirectory: directory, client: client,
+        let model = makeAppModel(modelDirectory: directory, client: client,
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
         model.setSentPromptBehavior(.clear)
@@ -190,7 +190,7 @@ import TUFFEngine
         let directory = try makeVisionReadyModelInstall("lifetime-retain-fails")
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockInferenceClient(response: "answer", tokenDelayNanos: 1)
-        let model = AppModel(modelDirectory: directory, client: client,
+        let model = makeAppModel(modelDirectory: directory, client: client,
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
         await attach(model, [source])
@@ -227,7 +227,7 @@ import TUFFEngine
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockInferenceClient(response: "answer", tokenDelayNanos: 1)
         client.holdsDuringPrefill = true
-        let model = AppModel(modelDirectory: directory, client: client,
+        let model = makeAppModel(modelDirectory: directory, client: client,
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
         model.promptText = "hello"
@@ -258,7 +258,7 @@ import TUFFEngine
 
         let directory = try makeVisionReadyModelInstall("lifetime-staging-race")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory,
+        let model = makeAppModel(modelDirectory: directory,
                              client: MockInferenceClient(tokenDelayNanos: 1),
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
@@ -289,7 +289,7 @@ import TUFFEngine
 
         let directory = try makeVisionReadyModelInstall("lifetime-overlapping-adds")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory,
+        let model = makeAppModel(modelDirectory: directory,
                              client: MockInferenceClient(tokenDelayNanos: 1),
                              attachmentStore: store)
         let capacity = model.maximumImageAttachments
@@ -327,7 +327,7 @@ import TUFFEngine
         let directory = try makeVisionReadyModelInstall("lifetime-keep")
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = MockInferenceClient(response: "answer", tokenDelayNanos: 1)
-        let model = AppModel(modelDirectory: directory, client: client,
+        let model = makeAppModel(modelDirectory: directory, client: client,
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
         model.setSentPromptBehavior(.keep)
@@ -356,7 +356,7 @@ import TUFFEngine
         let source = try writeSource(root, "source.png", "fixture")
         let directory = try makeVisionReadyModelInstall("lifetime-release-all")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory, attachmentStore: store)
+        let model = makeAppModel(modelDirectory: directory, attachmentStore: store)
         await attach(model, [source, source])
         #expect(stagedFileCount(store) == 2)
 
@@ -450,7 +450,7 @@ import TUFFEngine
         defer { try? FileManager.default.removeItem(at: root) }
         let directory = try makeVisionReadyModelInstall("pasted-cap")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory, attachmentStore: store)
+        let model = makeAppModel(modelDirectory: directory, attachmentStore: store)
         // The smallest context the app offers, so the cap is reached without
         // staging dozens of files.
         model.maxContextTokens = AppContextLengthOption.fourK.tokens
@@ -497,7 +497,7 @@ import TUFFEngine
     @Test func imageInputNeedsTheCompanionAndNotJustTheFlag() throws {
         let directory = try makeCompleteModelInstall("image-availability")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
         #expect(model.isModelInstalled)
         #expect(!model.isVisionPackInstalled)
 
@@ -518,7 +518,7 @@ import TUFFEngine
     @Test func theAppAlwaysReleasesTheImageTower() throws {
         let directory = try makeVisionReadyModelInstall("residency")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory,
+        let model = makeAppModel(modelDirectory: directory,
                              client: MockLifecycleInferenceClient())
         #expect(model.runtimeOptions.visionResidencyPolicy == .onDemand)
         model.promptText = "go"
@@ -539,9 +539,9 @@ import TUFFEngine
         setenv("TUFF_VISION_RUNTIME", "1", 1)
         defer { unsetenv("TUFF_VISION_RUNTIME") }
 
-        #expect(AppModel(modelDirectory: withPack).isImageInputAvailable)
-        #expect(!AppModel(modelDirectory: withoutPack).isImageInputAvailable)
-        #expect(!AppModel(modelDirectory: withPack, visionRuntimeSupported: false)
+        #expect(makeAppModel(modelDirectory: withPack).isImageInputAvailable)
+        #expect(!makeAppModel(modelDirectory: withoutPack).isImageInputAvailable)
+        #expect(!makeAppModel(modelDirectory: withPack, visionRuntimeSupported: false)
             .isImageInputAvailable,
                 "an installed pack exposed image input on unsupported hardware")
     }

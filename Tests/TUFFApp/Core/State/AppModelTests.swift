@@ -5,7 +5,7 @@ import Testing
 @Suite struct AppModelTests {
     @MainActor
     @Test func runningServerPinsTheSelectedModel() throws {
-        let model = AppModel()
+        let model = makeAppModel()
         let originalID = model.selectedModelID
         let other = try #require(model.installs.first { $0.id != originalID })
         let record = AppConversationRecord(
@@ -31,7 +31,7 @@ import Testing
         store.recordCompletedTurn(
             AppChatTurn(prompt: "selected", response: "answer"),
             attachments: [], modelID: defaultKey)
-        let model = AppModel(conversationStore: store)
+        let model = makeAppModel(conversationStore: store)
         let selected = try #require(store.selectedConversation)
         let originalID = model.selectedModelID
 
@@ -46,7 +46,7 @@ import Testing
 
     @MainActor
     @Test func defaultsUseSampledRequest() throws {
-        let model = AppModel()
+        let model = makeAppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.promptText = "go"
 
@@ -66,7 +66,7 @@ import Testing
 
     @MainActor
     @Test func binaryThinkingControlReachesGenerationRequest() throws {
-        let model = AppModel()
+        let model = makeAppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.promptText = "think"
         model.reasoning = .on
@@ -77,14 +77,14 @@ import Testing
 
     @MainActor
     @Test func thinkingHistoryPreservationOnlyReachesQwenRequests() throws {
-        let qwen = AppModel(
+        let qwen = makeAppModel(
             modelDirectory: FileManager.default.temporaryDirectory,
             installer: MockModelInstallerClient(descriptor: .qwen36))
         qwen.promptText = "continue"
         qwen.preserveThinking = true
         #expect(try qwen.makeRequest().preserveThinking)
 
-        let gemma = AppModel()
+        let gemma = makeAppModel()
         gemma.modelPathText = FileManager.default.temporaryDirectory.path
         gemma.promptText = "continue"
         gemma.preserveThinking = true
@@ -93,7 +93,7 @@ import Testing
 
     @MainActor
     @Test func thinkingEventsNeverJoinVisibleAnswer() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.apply(.thinking(AppTokenEvent(
             index: 0,
             textDelta: "reasoning",
@@ -105,7 +105,7 @@ import Testing
 
     @MainActor
     @Test func runDisabledWhenPromptEmpty() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
         model.promptText = "   "
         #expect(!model.canRun)
@@ -113,14 +113,14 @@ import Testing
 
     @MainActor
     @Test func runDisabledUntilModelReady() {
-        let model = AppModel()
+        let model = makeAppModel()
         model.promptText = "go"
         #expect(!model.canRun)
     }
 
     @MainActor
     @Test func disablingTopKNeutralizesBothTruncationControls() throws {
-        let model = AppModel()
+        let model = makeAppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.promptText = "go"
         model.topKEnabled = false
@@ -133,7 +133,7 @@ import Testing
 
     @MainActor
     @Test func prefillToggleSurvivesRequestCreation() throws {
-        let model = AppModel()
+        let model = makeAppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.promptText = "go"
 
@@ -146,7 +146,7 @@ import Testing
 
     @MainActor
     @Test func adaptiveRDAdvicePolicySurvivesRequestCreation() throws {
-        let model = AppModel()
+        let model = makeAppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.promptText = "go"
         model.runtimeOptions.rdadvisePolicy = .adaptive
@@ -157,7 +157,7 @@ import Testing
 
     @MainActor
     @Test func loadAffectingRuntimeChangeMarksReadySessionStale() {
-        let model = AppModel(client: MockLifecycleInferenceClient())
+        let model = makeAppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
@@ -169,7 +169,7 @@ import Testing
 
     @MainActor
     @Test func contextChangeMarksReadySessionStale() {
-        let model = AppModel(client: MockLifecycleInferenceClient())
+        let model = makeAppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
@@ -183,7 +183,7 @@ import Testing
 
     @MainActor
     @Test func appResponseLimitUsesSelectedContext() throws {
-        let model = AppModel()
+        let model = makeAppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.promptText = "go"
         model.maxContextTokens = AppContextLengthOption.sixtyFourK.tokens
@@ -193,7 +193,7 @@ import Testing
 
     @MainActor
     @Test func requestTimePrefillChangeDoesNotMarkReadySessionStale() {
-        let model = AppModel(client: MockLifecycleInferenceClient())
+        let model = makeAppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
@@ -205,7 +205,7 @@ import Testing
 
     @MainActor
     @Test func newlineShortcutDoesNotMarkReadySessionStale() {
-        let model = AppModel(client: MockLifecycleInferenceClient())
+        let model = makeAppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
@@ -218,7 +218,7 @@ import Testing
 
     @MainActor
     @Test func promptExamplesPreferenceDoesNotMarkReadySessionStale() {
-        let model = AppModel(client: MockLifecycleInferenceClient())
+        let model = makeAppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
@@ -232,7 +232,7 @@ import Testing
     @MainActor
     @Test func mockRunUpdatesOutputAndDiagnostics() async throws {
         let client = MockInferenceClient(response: "alpha beta", tokenDelayNanos: 1)
-        let model = AppModel(client: client)
+        let model = makeAppModel(client: client)
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
         model.promptText = "go"
@@ -324,7 +324,7 @@ import Testing
         let client = MockLifecycleInferenceClient()
         let directory = try makeCompleteModelInstall("stale-runtime")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             client: client,
             installer: MockModelInstallerClient(descriptor: .default))
@@ -418,7 +418,7 @@ import Testing
 
     @MainActor
     @Test func changingModelPathInvalidatesLoadedStateAndDiagnostics() {
-        let model = AppModel(client: MockInferenceClient(),
+        let model = makeAppModel(client: MockInferenceClient(),
                              installer: MockModelInstallerClient())
         let testDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("app-model-path-\(UUID().uuidString)", isDirectory: true)
@@ -519,7 +519,7 @@ import Testing
 
     @MainActor
     private func readyModel(client: MockInferenceClient) -> AppModel {
-        let model = AppModel(client: client)
+        let model = makeAppModel(client: client)
         model.modelPathText = FileManager.default.temporaryDirectory.path
         model.loadState = .ready(modelDirectory: FileManager.default.temporaryDirectory, loadSeconds: 1)
         return model

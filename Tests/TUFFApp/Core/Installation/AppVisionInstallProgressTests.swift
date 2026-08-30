@@ -10,7 +10,7 @@ import Testing
     private func makeModel(_ events: [AppModelInstallEvent])
         throws -> (AppModel, URL) {
         let directory = try makeCompleteModelInstall("vision-progress")
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             client: MockLifecycleInferenceClient(),
             visionInstaller: MockVisionPackInstallerClient(

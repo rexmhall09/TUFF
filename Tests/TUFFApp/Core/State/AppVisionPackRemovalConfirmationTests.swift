@@ -15,7 +15,7 @@ import Testing
     @Test func requestingRemovalAsksRatherThanDeleting() throws {
         let directory = try makeVisionReadyModelInstall("removal-confirm")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
 
         try #require(model.canRemoveVisionPack)
         #expect(!model.isConfirmingVisionPackRemoval)
@@ -34,7 +34,7 @@ import Testing
     @Test func confirmingClearsTheRequestAndRemoves() throws {
         let directory = try makeVisionReadyModelInstall("removal-confirmed")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
 
         model.requestVisionPackRemoval()
         try #require(model.isConfirmingVisionPackRemoval)
@@ -51,7 +51,7 @@ import Testing
         // No companion beside the model, so there is nothing to remove.
         let directory = try makeCompleteModelInstall("removal-refused")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
 
         try #require(!model.canRemoveVisionPack)
         model.requestVisionPackRemoval()

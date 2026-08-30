@@ -165,7 +165,7 @@ struct ConversationStateTests {
     @MainActor
     private func loadedModel(_ tag: String) async throws -> (AppModel, URL) {
         let directory = try makeCompleteModelInstall("conversation-\(tag)")
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             client: FakeInferenceClient(eventDelay: .zero),
             installer: MockModelInstallerClient())
@@ -189,8 +189,11 @@ struct ConversationStateTests {
         try await ask(model, "First question")
 
         #expect(model.conversation.count == 1)
-        #expect(model.conversation[0].prompt == "First question")
-        #expect(!model.conversation[0].response.isEmpty)
+        // Required, not expected: an empty conversation here is a failure to
+        // report, not an index to trap on and take the rest of the run down.
+        let turn = try #require(model.conversation.first)
+        #expect(turn.prompt == "First question")
+        #expect(!turn.response.isEmpty)
     }
 
     @MainActor
@@ -240,7 +243,7 @@ struct ConversationStateTests {
     @Test func aStoppedExchangeBecomesHistory() async throws {
         let directory = try makeCompleteModelInstall("conversation-cancelled")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             client: FakeInferenceClient(eventDelay: .milliseconds(5)),
             installer: MockModelInstallerClient())
@@ -256,8 +259,9 @@ struct ConversationStateTests {
         // The exchange survives the stop: the message was saved when it was
         // sent, and the part of the answer that arrived is kept with it.
         #expect(model.conversation.count == 1)
-        #expect(model.conversation[0].prompt == "Cancel me")
-        #expect(!model.conversation[0].response.isEmpty)
+        let turn = try #require(model.conversation.first)
+        #expect(turn.prompt == "Cancel me")
+        #expect(!turn.response.isEmpty)
         // And it is context for what comes next, exactly as a finished turn is.
         model.promptText = "Go on"
         #expect(try model.makeRequest().history.count == 1)
@@ -270,7 +274,7 @@ struct ConversationStateTests {
     @Test func anUnansweredMessageIsNotSentAsContext() async throws {
         let directory = try makeCompleteModelInstall("conversation-unanswered")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: directory,
             client: FakeInferenceClient(eventDelay: .milliseconds(5)),
             installer: MockModelInstallerClient())

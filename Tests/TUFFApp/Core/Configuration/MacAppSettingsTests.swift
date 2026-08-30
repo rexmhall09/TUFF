@@ -293,13 +293,13 @@ import TUFFEngine
         let modelDirectory = root.appendingPathComponent(
             "gemma4.gturbo", isDirectory: true)
 
-        let first = AppModel(
+        let first = makeAppModel(
             modelDirectory: modelDirectory,
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
         first.modelSystemPrompt = "Persist this instruction."
 
-        let relaunched = AppModel(
+        let relaunched = makeAppModel(
             modelDirectory: modelDirectory,
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
@@ -336,7 +336,7 @@ import TUFFEngine
             descriptor: .qwen36,
             directoryURL: qwenDirectory,
             client: MockModelInstallerClient(descriptor: .qwen36))
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: gemmaDirectory,
             installer: MockModelInstallerClient(descriptor: .default),
             otherInstalls: [qwen],
@@ -370,7 +370,7 @@ import TUFFEngine
             descriptor: .qwen36,
             directoryURL: qwenDirectory,
             client: MockModelInstallerClient(descriptor: .qwen36))
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: gemmaDirectory,
             installer: MockModelInstallerClient(descriptor: .default),
             otherInstalls: [qwen],
@@ -477,7 +477,7 @@ import TUFFEngine
             sentPromptBehavior: .clear)
         try MacAppSettingsFileStore.save(initial, forModelDirectory: modelDirectory)
 
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: modelDirectory,
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
@@ -519,7 +519,7 @@ import TUFFEngine
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: modelDirectory,
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
@@ -536,7 +536,7 @@ import TUFFEngine
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: modelDirectory,
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
@@ -553,7 +553,7 @@ import TUFFEngine
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: modelDirectory,
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
@@ -577,7 +577,7 @@ import TUFFEngine
         try MacAppSettingsFileStore.save(
             MacAppSettings(newlineShortcut: .shiftReturn, showPromptExamples: false),
             forModelDirectory: second)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: first,
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
@@ -668,7 +668,7 @@ import TUFFEngine
         try MacAppSettingsFileStore.save(
             MacAppSettings(visionResidencyPolicy: .keepReady),
             forModelDirectory: second)
-        let model = AppModel(
+        let model = makeAppModel(
             modelDirectory: first,
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)

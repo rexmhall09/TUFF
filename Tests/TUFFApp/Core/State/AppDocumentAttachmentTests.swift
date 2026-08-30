@@ -26,7 +26,7 @@ import Testing
     @Test func attachingAFileLeavesThePromptBoxAlone() throws {
         let (root, url) = try writeDocument("notes.md", "# Notes\n\nSomething useful.")
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel()
+        let model = makeAppModel()
         model.promptText = "Summarise this"
 
         model.attachDocuments([url])
@@ -43,7 +43,7 @@ import Testing
     @Test func theModelSeesTheFileAheadOfTheTypedMessage() throws {
         let (root, url) = try writeDocument("data.csv", "a,b\n1,2")
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel()
+        let model = makeAppModel()
         model.promptText = "What is in column b?"
         model.attachDocuments([url])
 
@@ -57,7 +57,7 @@ import Testing
     @Test func aFileOnItsOwnIsEnoughToSend() throws {
         let (root, url) = try writeDocument("report.txt", "Quarterly results.")
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel()
+        let model = makeAppModel()
 
         #expect(!model.hasComposedInput)
         model.attachDocuments([url])
@@ -72,7 +72,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
         let second = root.appendingPathComponent("two.txt")
         try Data("second".utf8).write(to: second)
-        let model = AppModel()
+        let model = makeAppModel()
         model.attachDocuments([first, second])
         #expect(model.documentAttachments.count == 2)
 
@@ -91,7 +91,7 @@ import Testing
     @Test func anUnreadableFileIsRefusedRatherThanAttachedEmpty() throws {
         let (root, url) = try writeDocument("notes.rtf", "not supported")
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = AppModel()
+        let model = makeAppModel()
 
         model.attachDocuments([url])
 
@@ -112,7 +112,7 @@ import Testing
             try Data("contents \(index)".utf8).write(to: url)
             urls.append(url)
         }
-        let model = AppModel()
+        let model = makeAppModel()
 
         model.attachDocuments(urls)
 

@@ -6,7 +6,7 @@ import Testing
     @MainActor
     @Test func serviceMemoryAndCanonicalTranscriptOverrideUIProcessState() {
         let client = ReportingInferenceClient(memoryBytes: 2_100_000_000)
-        let model = AppModel(client: client)
+        let model = makeAppModel(client: client)
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
@@ -28,7 +28,7 @@ import Testing
     @MainActor
     @Test func startingAnotherRunClearsPreviousServiceTranscriptSynchronously() {
         let client = ReportingInferenceClient(memoryBytes: 2_100_000_000)
-        let model = AppModel(client: client)
+        let model = makeAppModel(client: client)
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))

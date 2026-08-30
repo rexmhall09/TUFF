@@ -5,7 +5,7 @@ import Testing
 @Suite struct AppStoresTests {
     @MainActor
     @Test func appModelProxiesConversationAndSettingsState() {
-        let model = AppModel(installer: MockModelInstallerClient(descriptor: .default))
+        let model = makeAppModel(installer: MockModelInstallerClient(descriptor: .default))
 
         model.promptText = "draft"
         model.temperature = 0.45
@@ -22,7 +22,7 @@ import Testing
 
     @MainActor
     @Test func appModelProxiesLibraryAndInferenceState() {
-        let model = AppModel(installer: MockModelInstallerClient(descriptor: .default))
+        let model = makeAppModel(installer: MockModelInstallerClient(descriptor: .default))
 
         model.modelLibraryStore.modelPathText = "/tmp/example.gturbo"
         model.inferenceStore.liveTokenCount = 12

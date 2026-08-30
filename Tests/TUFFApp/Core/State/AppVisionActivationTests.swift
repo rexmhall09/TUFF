@@ -9,7 +9,7 @@ import TUFFRepackCore
 @Suite struct AppVisionActivationTests {
     @MainActor
     private func model(_ installer: MockVisionPackInstallerClient) -> AppModel {
-        let model = AppModel(visionInstaller: installer)
+        let model = makeAppModel(visionInstaller: installer)
         model.visionInstallState = .readyToActivate(
             FileManager.default.temporaryDirectory)
         return model
@@ -89,7 +89,7 @@ import TUFFRepackCore
             at: partial, withIntermediateDirectories: true)
 
         let installer = MockVisionPackInstallerClient(preparedValid: true)
-        let model = AppModel(modelDirectory: text, visionInstaller: installer)
+        let model = makeAppModel(modelDirectory: text, visionInstaller: installer)
         #expect(model.hasPartialVisionPackDownload)
         model.finishVisionInstallFailure(
             RepackError.configurationInvalid(detail: "network died"),

@@ -16,7 +16,7 @@ import TUFFEngine
                         ModelVariant.gptOss_120B] {
             let descriptor = try #require(
                 AppModelInstallDescriptor.descriptor(for: variant))
-            let model = AppModel(
+            let model = makeAppModel(
                 modelDirectory: FileManager.default.temporaryDirectory
                     .appendingPathComponent("capacity-\(variant.rawValue).gturbo"),
                 installer: MockModelInstallerClient(descriptor: descriptor))
@@ -31,7 +31,7 @@ import TUFFEngine
     func capacityFollowsTheContext(option: AppContextLengthOption) throws {
         let directory = try makeVisionReadyModelInstall("capacity-\(option.tokens)")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
         model.maxContextTokens = option.tokens
 
         let expected = VisionImageTokenBudget.capacity(
@@ -46,7 +46,7 @@ import TUFFEngine
     @Test func alargerContextAllowsMoreImages() throws {
         let directory = try makeVisionReadyModelInstall("capacity-growth")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
 
         model.maxContextTokens = AppContextLengthOption.fourK.tokens
         let small = model.maximumImageAttachments
@@ -64,7 +64,7 @@ import TUFFEngine
     @Test func whatTheComposerAcceptsTheRequestAccepts() throws {
         let directory = try makeVisionReadyModelInstall("capacity-agreement")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory)
+        let model = makeAppModel(modelDirectory: directory)
         model.maxContextTokens = AppContextLengthOption.eightK.tokens
 
         let attachments = (0..<model.maximumImageAttachments).map { index in
@@ -121,7 +121,7 @@ import TUFFEngine
 
         let store = AppImageAttachmentStore(
             directoryURL: root.appendingPathComponent("staged", isDirectory: true))
-        let model = AppModel(modelDirectory: directory, attachmentStore: store)
+        let model = makeAppModel(modelDirectory: directory, attachmentStore: store)
         model.maxContextTokens = AppContextLengthOption.fourK.tokens
         let capacity = model.maximumImageAttachments
 
@@ -151,7 +151,7 @@ import TUFFEngine
     @Test func theComposerCapsOnTheContextARunWillActuallyUse() async throws {
         let directory = try makeVisionReadyModelInstall("review-capacity")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = AppModel(modelDirectory: directory,
+        let model = makeAppModel(modelDirectory: directory,
                              client: MockLifecycleInferenceClient())
         model.maxContextTokens = AppContextLengthOption.fourK.tokens
         model.loadModel()
@@ -187,7 +187,7 @@ import TUFFEngine
 
         let store = AppImageAttachmentStore(
             directoryURL: root.appendingPathComponent("staged", isDirectory: true))
-        let model = AppModel(modelDirectory: directory,
+        let model = makeAppModel(modelDirectory: directory,
                              client: MockLifecycleInferenceClient(),
                              attachmentStore: store)
         model.addImages([source])
