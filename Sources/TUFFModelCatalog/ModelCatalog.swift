@@ -471,7 +471,10 @@ public enum TUFFModelCatalog {
             "edb157dbf495e23f37377af4a628a9ad13c4ee7937f93ccb36ec9e9a19940f16",
         manifestModelID: "mlx-community/gemma-4-e2b-it-4bit",
         approximateDownloadBytes: 2_636_500_000,
-        installedBytes: 2_636_200_000,
+        // Measured from a completed install: 2,636,263,860 bytes on disk. The
+        // previous figure rounded *down* past that, so the free-space gate
+        // asked for less than the install actually needs.
+        installedBytes: 2_636_400_000,
         reserveBytes: oneGiB)
 
     private static let gemmaE4BSource = TUFFModelSource(
@@ -500,8 +503,12 @@ public enum TUFFModelCatalog {
         sourceIndexSHA256:
             "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea",
         manifestModelID: "qwen3.6-35b-a3b-4bit",
-        approximateDownloadBytes: 19_529_025_048,
-        installedBytes: 19_546_491_213,
+        // The planner's own totalSourceBytes for this exact revision. The
+        // previous figure understated the transfer by 617 MB.
+        approximateDownloadBytes: 20_146_183_200,
+        // Measured from a completed install: 19,551,402,438 bytes on disk,
+        // which the previous planned figure understated by 4.9 MB.
+        installedBytes: 19_551_500_000,
         reserveBytes: oneGiB)
 
     private static let gptOss20BSource = TUFFModelSource(
@@ -618,7 +625,11 @@ public enum TUFFModelCatalog {
                 revision: gemmaE4BSource.revision,
                 sourceIndexSHA256: gemmaE4BSource.sourceIndexSHA256,
                 manifestModelID: gemmaE4BSource.manifestModelID,
-                approximateDownloadBytes: 1_169_947_222,
+                // Coalesced range total for E4B's own layout, not E2B's plus
+                // the payload delta: the two checkpoints interleave their
+                // vision tensors differently, so E4B needs 31 requests where
+                // E2B needs 23 and pulls 143 MB more of the gaps between them.
+                approximateDownloadBytes: 1_313_596_274,
                 installedBytes: 337_376_704,
                 reserveBytes: oneGiB),
             hardware: TUFFModelHardwareRequirements(
@@ -740,7 +751,11 @@ public enum TUFFModelCatalog {
                 revision: qwenSource.revision,
                 sourceIndexSHA256: qwenSource.sourceIndexSHA256,
                 manifestModelID: qwenSource.manifestModelID,
-                approximateDownloadBytes: 893_142_496,
+                // The coalesced range total, not the vision payload sum. Qwen
+                // interleaves its 333 vision tensors through shard 1 across
+                // 129 gaps, so fetching them costs 245 MB more than the
+                // tensors themselves weigh.
+                approximateDownloadBytes: 1_137_999_008,
                 installedBytes: 900_808_704,
                 reserveBytes: oneGiB),
             hardware: TUFFModelHardwareRequirements(
