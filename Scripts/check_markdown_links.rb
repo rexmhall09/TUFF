@@ -4,6 +4,14 @@ require "pathname"
 require "set"
 require "uri"
 
+# Markdown is UTF-8 by definition, but Ruby picks its read encoding from the
+# ambient locale. A shell with no LANG set reads these files as US-ASCII, and
+# the first em dash in a doc aborts the whole check with an encoding error
+# rather than a link report. Pin the encoding so the result does not depend on
+# the environment the checker happens to run in.
+Encoding.default_external = Encoding::UTF_8
+Encoding.default_internal = Encoding::UTF_8
+
 ROOT = Pathname.new(File.expand_path("..", __dir__))
 
 def markdown_files(arguments)
