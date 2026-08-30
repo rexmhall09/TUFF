@@ -13,7 +13,8 @@ import Testing
 
     @Test func qualifiedModelsAcceptExistingMemoryTiers() {
         for memoryGiB: UInt64 in [8, 16, 24, 64] {
-            for model in [TUFFModelCatalog.gemma4_E4B,
+            for model in [TUFFModelCatalog.gemma4_E2B,
+                          TUFFModelCatalog.gemma4_E4B,
                           TUFFModelCatalog.gemma4_26B_A4B,
                           TUFFModelCatalog.qwen36_35B_A3B] {
                 #expect(model.compatibility(with: device(memoryGiB: memoryGiB))

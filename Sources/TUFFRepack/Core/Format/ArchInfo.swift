@@ -12,6 +12,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
 enum RepackModelVariant: String, Sendable, Equatable {
     case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
+    case gemma4_12B_QAT = "gemma4-12b-qat"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
@@ -28,8 +29,21 @@ enum RepackModelVariant: String, Sendable, Equatable {
 ///
 /// Keyed on two dimensions rather than one so a future dense Gemma that
 /// happens to share a hidden size cannot silently inherit a name.
-func denseGemmaVariant(hiddenSize: Int, numLayers: Int) -> RepackModelVariant {
-    hiddenSize == 1_536 && numLayers == 35 ? .gemma4_E2B : .gemma4_E4B
+func denseGemmaVariant(hiddenSize: Int, numLayers: Int) throws -> RepackModelVariant {
+    switch (hiddenSize, numLayers) {
+    case (1_536, 35): .gemma4_E2B
+    case (2_560, 42): .gemma4_E4B
+    case (3_840, 48): .gemma4_12B_QAT
+#if DEBUG
+    // The repacker's bounded synthetic fixture uses these dimensions so its
+    // complete dense-install path stays testable without materializing a
+    // multi-gigabyte checkpoint. Release builds still fail closed on it.
+    case (128, 4): .gemma4_E4B
+#endif
+    default:
+        throw RepackError.configurationInvalid(
+            detail: "unsupported dense Gemma architecture \(hiddenSize)x\(numLayers)")
+    }
 }
 
 enum RepackFeedForwardKind: String, Sendable, Equatable {
@@ -330,7 +344,7 @@ struct ArchInfo: Sendable, Equatable {
             fullAttentionLayerMask: mask,
             hiddenActivation: act,
             family: .gemma4,
-            variant: dense ? denseGemmaVariant(
+            variant: dense ? try denseGemmaVariant(
                 hiddenSize: try i("hidden_size"),
                 numLayers: try i("num_hidden_layers")) : .gemma4_26B_A4B,
             ffnDoubleWideFromLayer: doubleWideFrom,
@@ -356,6 +370,31 @@ struct ArchInfo: Sendable, Equatable {
 
     private static func crossCheckProductionGemma4(_ arch: ArchInfo,
                                                     configPath: String) throws {
+        if arch.variant == .gemma4_12B_QAT {
+            var expectedMask = [UInt8](repeating: 0, count: 48)
+            for layer in stride(from: 5, to: 48, by: 6) { expectedMask[layer] = 1 }
+            guard arch.hiddenSize == 3_840,
+                  arch.intermediateSize == 15_360,
+                  arch.moeIntermediateSize == 0,
+                  arch.numLayers == 48,
+                  arch.numHeads == 16,
+                  arch.numKVHeads == 8,
+                  arch.numFullKVHeads == 1,
+                  arch.headDim == 256,
+                  arch.fullHeadDim == 512,
+                  arch.vocabSize == 262_144,
+                  arch.slidingWindow == 1_024,
+                  arch.fullAttentionLayerMask == expectedMask,
+                  arch.hiddenSizePerLayerInput == 0,
+                  arch.numKVSharedLayers == 0,
+                  arch.tieWordEmbeddings,
+                  arch.attentionKEqV else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath,
+                    detail: "gemma4 dense config does not match the pinned 12B QAT architecture baseline")
+            }
+            return
+        }
         guard arch.variant == .gemma4_E4B,
               arch.hiddenSize == 2_560,
               arch.numLayers == 42 else { return }

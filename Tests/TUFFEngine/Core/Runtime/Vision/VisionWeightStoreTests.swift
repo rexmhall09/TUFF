@@ -23,7 +23,7 @@ import Testing
 
         let store = try VisionWeightStore.open(
             directoryURL: fixture.root,
-            compatibleTextSourceSnapshotHash: "text-snapshot",
+            compatibleTextSourceSnapshotHash: "sha256:\(zeroSHA)",
             compatibleTextManifestSha256: zeroSHA)
         #expect(store.manifest.modelID == "fixture/model")
         #expect(store.manifest.tensors.map(\.name) == ["vision.weight"])
@@ -49,7 +49,7 @@ import Testing
 
         let store = try VisionWeightStore.open(
             directoryURL: alias,
-            compatibleTextSourceSnapshotHash: "text-snapshot",
+            compatibleTextSourceSnapshotHash: "sha256:\(zeroSHA)",
             compatibleTextManifestSha256: zeroSHA
         )
         #expect(store.directoryURL.standardizedFileURL == alias.standardizedFileURL)
@@ -70,7 +70,7 @@ import Testing
         #expect(throws: VisionPackError.self) {
             try VisionWeightStore.open(
                 directoryURL: wrongPath.root,
-                compatibleTextSourceSnapshotHash: "text-snapshot",
+                compatibleTextSourceSnapshotHash: "sha256:\(zeroSHA)",
                 compatibleTextManifestSha256: zeroSHA)
         }
 
@@ -80,7 +80,7 @@ import Testing
         #expect(throws: VisionPackError.self) {
             try VisionWeightStore.open(
                 directoryURL: extra.root,
-                compatibleTextSourceSnapshotHash: "text-snapshot",
+                compatibleTextSourceSnapshotHash: "sha256:\(zeroSHA)",
                 compatibleTextManifestSha256: zeroSHA)
         }
     }
@@ -100,7 +100,7 @@ import Testing
             modelID: "fixture/model", sourceRevision: "fixture-revision",
             sourceIndexSha256: zeroSHA,
             processorConfigSha256: processorSHA,
-            compatibleTextSourceSnapshotHash: "text-snapshot",
+            compatibleTextSourceSnapshotHash: "sha256:\(zeroSHA)",
             compatibleTextManifestSha256: zeroSHA,
             files: [
                 GTurboVisionFormatV1.weightsFile: .init(

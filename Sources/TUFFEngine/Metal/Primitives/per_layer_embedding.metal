@@ -62,3 +62,14 @@ void residual_add_scale_fp16(
     if (tid >= count) return;
     hidden[tid] = half((float(hidden[tid]) + float(delta[tid])) * scale);
 }
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void scale_fp16(
+    device half* values              [[buffer(0)]],
+    constant uint& count             [[buffer(1)]],
+    constant float& scale            [[buffer(2)]],
+    uint tid                          [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    values[tid] = half(float(values[tid]) * scale);
+}

@@ -23,8 +23,8 @@ public enum ExpertStreamingMode: Sendable {
     case pread(slotCount: Int)
 }
 
-/// Loaded `.gturbo/` model. Resident weights live behind one mmap'd
-/// `MTLBuffer`; routed expert weights live behind per-layer streaming
+/// Loaded `.gturbo/` model. Resident weights live behind tensor-safe mmap'd
+/// `MTLBuffer` regions; routed expert weights live behind per-layer streaming
 /// backends opened lazily on first touch.
 public struct Model {
     public let device: MTLDevice
@@ -36,7 +36,7 @@ public struct Model {
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
 
-    let residentBuffer: ResidentBuffer
+    let residentBuffers: ResidentBufferSet
     let residentIndex: ResidentIndex
     let packedExpertsLayout: PackedExpertsLayout
     let manifest: Manifest
@@ -62,7 +62,7 @@ public struct Model {
          streamingMode: ExpertStreamingMode,
          expertCachePolicy: ExpertCachePolicy,
          integrityPolicy: ModelIntegrityPolicy,
-         residentBuffer: ResidentBuffer,
+         residentBuffers: ResidentBufferSet,
          residentIndex: ResidentIndex,
          packedExpertsLayout: PackedExpertsLayout,
          manifest: Manifest,
@@ -73,7 +73,7 @@ public struct Model {
         self.streamingMode = streamingMode
         self.expertCachePolicy = expertCachePolicy
         self.integrityPolicy = integrityPolicy
-        self.residentBuffer = residentBuffer
+        self.residentBuffers = residentBuffers
         self.residentIndex = residentIndex
         self.packedExpertsLayout = packedExpertsLayout
         self.manifest = manifest
@@ -300,15 +300,15 @@ public struct Model {
         try resident(name: "language_model.model.layers.\(L).linear_attn.norm.weight")
     }
 
-    /// Resolve a tensor name to a `TensorView` against the resident buffer.
-    /// `fileOffset` (absolute) is converted to a buffer-relative offset by
-    /// subtracting the resident region's file offset (which equals
-    /// `header.indexSize`).
+    /// Resolve a tensor name to a `TensorView` against its resident region.
+    /// Absolute file offsets are converted to offsets relative to that
+    /// region's `MTLBuffer`.
     func resident(name: String) throws -> TensorView {
         guard let entry = residentIndex.entries[name] else {
             throw ModelError.tensorNotFound(name: name)
         }
-        let residentFileOffset = residentIndex.header.indexSize
+        let resolved = try residentBuffers.resolve(tensorName: name)
+        let residentFileOffset = resolved.regionFileOffset
         func checkedRelativeOffset(_ absolute: UInt64,
                                    size: UInt64,
                                    field: String) throws -> UInt64 {
@@ -319,12 +319,12 @@ public struct Model {
                 return 0
             }
             guard absolute >= residentFileOffset else {
-                throw ModelError.indexCorrupt(detail: "\(name).\(field) precedes the resident payload")
+                throw ModelError.indexCorrupt(detail: "\(name).\(field) precedes its resident region")
             }
             let relative = absolute - residentFileOffset
-            guard relative <= residentIndex.header.residentSize,
-                  size <= residentIndex.header.residentSize - relative else {
-                throw ModelError.indexCorrupt(detail: "\(name).\(field) exceeds the resident payload")
+            guard relative <= UInt64(resolved.buffer.length),
+                  size <= UInt64(resolved.buffer.length) - relative else {
+                throw ModelError.indexCorrupt(detail: "\(name).\(field) exceeds its resident region")
             }
             return relative
         }
@@ -335,7 +335,7 @@ public struct Model {
         let biasRel = try checkedRelativeOffset(
             entry.biasOffset, size: entry.biasSize, field: "biases")
         return TensorView(
-            buffer: residentBuffer.buffer,
+            buffer: resolved.buffer,
             offset: relativeOffset,
             length: entry.sizeBytes,
             scaleOffset: scaleRel, scaleLength: entry.scaleSize,
@@ -599,10 +599,9 @@ extension Model {
                 """)
         }
 
-        let residentBuffer = try ResidentBuffer(
+        let residentBuffers = try ResidentBufferSet(
             fileURL: weightsURL,
-            fileOffset: residentIndex.header.indexSize,
-            residentSize: residentIndex.header.residentSize,
+            index: residentIndex,
             device: device,
             fileDescriptor: weightsFD)
 
@@ -612,7 +611,7 @@ extension Model {
             streamingMode: streamingMode,
             expertCachePolicy: expertCachePolicy,
             integrityPolicy: resolvedIntegrityPolicy,
-            residentBuffer: residentBuffer,
+            residentBuffers: residentBuffers,
             residentIndex: residentIndex,
             packedExpertsLayout: layout,
             manifest: manifest,
@@ -1032,14 +1031,16 @@ extension Model {
         requireAffine: (String, Int, Int, ManifestQuantSlot) throws -> Void,
         checkedIntMultiply: (Int, Int, String) throws -> Int
     ) throws {
-        let packedPLE = try checkedIntMultiply(
-            config.numLayers, config.hiddenSizePerLayerInput, "packed PLE width")
-        try requireAffine("language_model.model.embed_tokens_per_layer.weight",
-                          config.vocabSizePerLayerInput, packedPLE, quant.embedding)
-        try requireAffine("language_model.model.per_layer_model_projection.weight",
-                          packedPLE, config.hiddenSize, quant.sharedExpert)
-        try requireBF16("language_model.model.per_layer_projection_norm.weight",
-                        config.hiddenSizePerLayerInput)
+        if config.hasPerLayerInputs {
+            let packedPLE = try checkedIntMultiply(
+                config.numLayers, config.hiddenSizePerLayerInput, "packed PLE width")
+            try requireAffine("language_model.model.embed_tokens_per_layer.weight",
+                              config.vocabSizePerLayerInput, packedPLE, quant.embedding)
+            try requireAffine("language_model.model.per_layer_model_projection.weight",
+                              packedPLE, config.hiddenSize, quant.sharedExpert)
+            try requireBF16("language_model.model.per_layer_projection_norm.weight",
+                            config.hiddenSizePerLayerInput)
+        }
 
         for layer in 0..<config.numLayers {
             let prefix = "language_model.model.layers.\(layer)"
@@ -1051,13 +1052,16 @@ extension Model {
             let kvDimension = try checkedIntMultiply(
                 kvHeads, headDimension, "layer \(layer) key/value")
 
-            for name in [
+            var normNames = [
                 "input_layernorm.weight",
                 "post_attention_layernorm.weight",
                 "pre_feedforward_layernorm.weight",
                 "post_feedforward_layernorm.weight",
-                "post_per_layer_input_norm.weight",
-            ] {
+            ]
+            if config.hasPerLayerInputs {
+                normNames.append("post_per_layer_input_norm.weight")
+            }
+            for name in normNames {
                 try requireBF16("\(prefix).\(name)", config.hiddenSize)
             }
             try requireBF16("\(prefix).self_attn.q_norm.weight", headDimension)
@@ -1068,8 +1072,10 @@ extension Model {
             if !config.layerSharesKV(layer) {
                 try requireAffine("\(prefix).self_attn.k_proj.weight",
                                   kvDimension, config.hiddenSize, quant.attention)
-                try requireAffine("\(prefix).self_attn.v_proj.weight",
-                                  kvDimension, config.hiddenSize, quant.attention)
+                if !isFull || !config.attentionKEqV {
+                    try requireAffine("\(prefix).self_attn.v_proj.weight",
+                                      kvDimension, config.hiddenSize, quant.attention)
+                }
                 try requireBF16("\(prefix).self_attn.k_norm.weight", headDimension)
             }
             try requireAffine("\(prefix).self_attn.o_proj.weight",
@@ -1081,12 +1087,14 @@ extension Model {
                               ffn, config.hiddenSize, quant.sharedExpert)
             try requireAffine("\(prefix).mlp.down_proj.weight",
                               config.hiddenSize, ffn, quant.sharedExpert)
-            try requireAffine("\(prefix).per_layer_input_gate.weight",
-                              config.hiddenSizePerLayerInput, config.hiddenSize,
-                              quant.sharedExpert)
-            try requireAffine("\(prefix).per_layer_projection.weight",
-                              config.hiddenSize, config.hiddenSizePerLayerInput,
-                              quant.sharedExpert)
+            if config.hasPerLayerInputs {
+                try requireAffine("\(prefix).per_layer_input_gate.weight",
+                                  config.hiddenSizePerLayerInput, config.hiddenSize,
+                                  quant.sharedExpert)
+                try requireAffine("\(prefix).per_layer_projection.weight",
+                                  config.hiddenSize, config.hiddenSizePerLayerInput,
+                                  quant.sharedExpert)
+            }
         }
     }
 

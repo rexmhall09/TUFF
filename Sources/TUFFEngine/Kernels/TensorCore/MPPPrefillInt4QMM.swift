@@ -6,12 +6,15 @@ public final class MPPPrefillInt4QMM {
         case control
         case apple10V1 = "apple10-v1"
         case apple10BF16 = "apple10-bf16"
+        case apple10BF16Output = "apple10-bf16-output"
     }
 
     public enum Path: String, Sendable {
         case affineThreadgroupF16 = "affine-threadgroup-f16"
         case affineThreadgroupF16Apple10V1 = "affine-threadgroup-f16-apple10-v1"
         case affineThreadgroupBF16Apple10 = "affine-threadgroup-bf16-apple10"
+        case affineThreadgroupBF16OutputApple10 = "affine-threadgroup-bf16-output-apple10"
+        case affineThreadgroupF16InputBF16Output = "affine-threadgroup-f16-input-bf16-output"
         case fallback
     }
 
@@ -40,6 +43,8 @@ public final class MPPPrefillInt4QMM {
     private var controlPSO: MTLComputePipelineState?
     private var apple10PSO: MTLComputePipelineState?
     private var apple10BF16PSO: MTLComputePipelineState?
+    private var apple10BF16OutputPSO: MTLComputePipelineState?
+    private var controlBF16OutputPSO: MTLComputePipelineState?
     private let variant: Variant
     public let unavailableReason: String?
 
@@ -49,6 +54,8 @@ public final class MPPPrefillInt4QMM {
         var controlPSO: MTLComputePipelineState?
         var apple10PSO: MTLComputePipelineState?
         var apple10BF16PSO: MTLComputePipelineState?
+        var apple10BF16OutputPSO: MTLComputePipelineState?
+        var controlBF16OutputPSO: MTLComputePipelineState?
         var unavailableReason: String?
         let apple10FunctionName: String? = switch variant {
         case .control:
@@ -57,9 +64,11 @@ public final class MPPPrefillInt4QMM {
             "mpp_prefill_affine_threadgroup_f16_apple10_v1"
         case .apple10BF16:
             "mpp_prefill_affine_threadgroup_bf16_apple10_v1"
+        case .apple10BF16Output:
+            "mpp_prefill_affine_threadgroup_bf16_output_apple10_v1"
         }
         do {
-            if let apple10FunctionName {
+            if let apple10FunctionName, variant != .apple10BF16Output {
                 guard context.device.supportsFamily(.apple10) else {
                     throw NSError(
                         domain: "MPPPrefillInt4QMM",
@@ -79,25 +88,41 @@ public final class MPPPrefillInt4QMM {
             }
             controlPSO = try context.device.makeComputePipelineState(
                 function: controlFunction)
+            if variant == .apple10BF16Output {
+                guard let controlOutputFunction = library.makeFunction(
+                    name: "mpp_prefill_affine_threadgroup_f16_input_bf16_output") else {
+                    throw NSError(domain: "MPPPrefillInt4QMM", code: 2,
+                                  userInfo: [NSLocalizedDescriptionKey:
+                                    "BF16-output control projection symbol unavailable"])
+                }
+                controlBF16OutputPSO = try context.device.makeComputePipelineState(
+                    function: controlOutputFunction)
+            }
             if let apple10FunctionName {
                 // Name the function this variant actually needs, and say when
                 // the device is the reason. The BF16 (vision projector) variant
                 // used to report the f16 symbol as missing, blaming a symbol
                 // that is present and hiding the real cause.
-                guard let apple10Function = library.makeFunction(
-                    name: apple10FunctionName) else {
-                    throw NSError(
-                        domain: "MPPPrefillInt4QMM",
-                        code: 2,
-                        userInfo: [NSLocalizedDescriptionKey:
-                            "\(apple10FunctionName) symbol unavailable"])
-                }
-                if variant == .apple10BF16 {
-                    apple10BF16PSO = try context.device.makeComputePipelineState(
-                        function: apple10Function)
-                } else {
-                    apple10PSO = try context.device.makeComputePipelineState(
-                        function: apple10Function)
+                if variant != .apple10BF16Output
+                    || context.device.supportsFamily(.apple10) {
+                    guard let apple10Function = library.makeFunction(
+                        name: apple10FunctionName) else {
+                        throw NSError(
+                            domain: "MPPPrefillInt4QMM",
+                            code: 2,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "\(apple10FunctionName) symbol unavailable"])
+                    }
+                    if variant == .apple10BF16 {
+                        apple10BF16PSO = try context.device.makeComputePipelineState(
+                            function: apple10Function)
+                    } else if variant == .apple10BF16Output {
+                        apple10BF16OutputPSO = try context.device.makeComputePipelineState(
+                            function: apple10Function)
+                    } else {
+                        apple10PSO = try context.device.makeComputePipelineState(
+                            function: apple10Function)
+                    }
                 }
             }
         } catch {
@@ -106,6 +131,8 @@ public final class MPPPrefillInt4QMM {
         self.controlPSO = controlPSO
         self.apple10PSO = apple10PSO
         self.apple10BF16PSO = apple10BF16PSO
+        self.apple10BF16OutputPSO = apple10BF16OutputPSO
+        self.controlBF16OutputPSO = controlBF16OutputPSO
         self.unavailableReason = unavailableReason
     }
 
@@ -113,7 +140,8 @@ public final class MPPPrefillInt4QMM {
         controlPSO != nil && (
             variant == .control
                 || variant == .apple10V1 && apple10PSO != nil
-                || variant == .apple10BF16 && apple10BF16PSO != nil)
+                || variant == .apple10BF16 && apple10BF16PSO != nil
+                || variant == .apple10BF16Output && controlBF16OutputPSO != nil)
     }
 
     @discardableResult
@@ -129,6 +157,8 @@ public final class MPPPrefillInt4QMM {
         let supportedShape = m > 0 && n > 0 && k > 0
             && k.isMultiple(of: Self.tileK)
         let useBF16 = variant == .apple10BF16
+            || variant == .apple10BF16Output && apple10BF16OutputPSO != nil
+        let writesBF16 = variant == .apple10BF16Output
         // The BF16 variant is the vision projector and has no control kernel, so
         // a short output previously selected no pipeline at all and fell back
         // without projecting — a 3x3 patch grid pools to a single row. The
@@ -139,10 +169,12 @@ public final class MPPPrefillInt4QMM {
             && context.device.supportsFamily(.apple10)
             && (useBF16 || m >= 64)
             && k.isMultiple(of: 128)
-            && (useBF16 ? apple10BF16PSO != nil : apple10PSO != nil)
+            && (writesBF16 ? apple10BF16OutputPSO != nil
+                : useBF16 ? apple10BF16PSO != nil : apple10PSO != nil)
         let selectedPSO = useApple10
-            ? (useBF16 ? apple10BF16PSO : apple10PSO)
-            : useBF16 ? nil : controlPSO
+            ? (writesBF16 ? apple10BF16OutputPSO
+                : useBF16 ? apple10BF16PSO : apple10PSO)
+            : writesBF16 ? controlBF16OutputPSO : useBF16 ? nil : controlPSO
         guard supportedShape,
               weightsOffset >= 0,
               scalesOffset.isMultiple(of: MemoryLayout<UInt16>.stride),
@@ -177,8 +209,12 @@ public final class MPPPrefillInt4QMM {
                                            height: 1,
                                            depth: 1))
         encoder.endEncoding()
-        return metadata(path: useBF16 && useApple10
-                            ? .affineThreadgroupBF16Apple10
+        return metadata(path: writesBF16 && useApple10
+                            ? .affineThreadgroupBF16OutputApple10
+                            : useBF16 && useApple10
+                                ? .affineThreadgroupBF16Apple10
+                            : writesBF16
+                                ? .affineThreadgroupF16InputBF16Output
                             : useApple10
                                 ? .affineThreadgroupF16Apple10V1
                                 : .affineThreadgroupF16,
@@ -191,6 +227,7 @@ public final class MPPPrefillInt4QMM {
                           fallbackCount: Int) -> PathMetadata {
         let apple10 = path == .affineThreadgroupF16Apple10V1
             || path == .affineThreadgroupBF16Apple10
+            || path == .affineThreadgroupBF16OutputApple10
         return PathMetadata(
             path: path,
             tileM: Self.tileM,

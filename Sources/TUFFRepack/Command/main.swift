@@ -348,6 +348,10 @@ private func visionSource(
           let arch = root["arch"] as? [String: Any] else {
         throw ParseError.invalidMode("text manifest has no architecture")
     }
+    if let modelID = root["modelID"] as? String,
+       let exact = SupportedModelSource.all.first(where: { $0.modelID == modelID }) {
+        return exact
+    }
     return (arch["family"] as? String) == "qwen36" ? .qwen36 : .gemma4
 }
 

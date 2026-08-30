@@ -198,15 +198,14 @@ public struct MultimodalPrefillInput: Sendable {
             guard !range.isEmpty,
                   range.lowerBound >= previousUpperBound,
                   range.upperBound <= embeddingTokenIDs.count,
-                  range.count <= VisionConfig(family: family).maximumPooledTokens,
                   span.features.family == family else {
                 throw MultimodalPrefillInputError.invalidImageTokenRange
             }
             let featureBytes = range.count
-                * VisionConfig(family: family).textHiddenSize
+                * span.features.hiddenSize
                 * MemoryLayout<Float16>.stride
             guard span.features.tokenCount == range.count,
-                  span.features.hiddenSize == VisionConfig(family: family).textHiddenSize,
+                  span.features.hiddenSize > 0,
                   span.features.buffer.length >= featureBytes else {
                 throw MultimodalPrefillInputError.featureShapeMismatch
             }

@@ -227,6 +227,20 @@ private enum FormatFixture {
         if key == "bitWidthOverridesHonored" { #expect(decoded.bitWidthOverridesHonored == nil) }
     }
 
+    @Test func acceptsProductionGemmaMoEVocabularyWithoutPLE() throws {
+        let data = try GTurboManifestCodec.encode(FormatFixture.manifest())
+        var root = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var arch = try #require(root["arch"] as? [String: Any])
+        arch["hiddenSizePerLayerInput"] = 0
+        arch["vocabSizePerLayerInput"] = arch["vocabSize"]
+        arch["numKVSharedLayers"] = 0
+        root["arch"] = arch
+        let changed = try JSONSerialization.data(withJSONObject: root)
+        let decoded = try GTurboManifestCodec.decode(changed)
+        #expect(decoded.arch.hiddenSizePerLayerInput == 0)
+        #expect(decoded.arch.vocabSizePerLayerInput == decoded.arch.vocabSize)
+    }
+
     @Test func rejectsUnsafeManifestPaths() throws {
         var root = try #require(JSONSerialization.jsonObject(
             with: GTurboManifestCodec.encode(FormatFixture.manifest())) as? [String: Any])

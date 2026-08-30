@@ -12,6 +12,7 @@ final class Elementwise {
     private let splitQGatePSO: MTLComputePipelineState
     private let geluMulPSO: MTLComputePipelineState
     private let residualAddScalePSO: MTLComputePipelineState
+    private let scalePSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
@@ -21,6 +22,7 @@ final class Elementwise {
         self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
         self.geluMulPSO = try context.pipeline("gelu_mul_fp16")
         self.residualAddScalePSO = try context.pipeline("residual_add_scale_fp16")
+        self.scalePSO = try context.pipeline("scale_fp16")
     }
 
     /// packed [H, 2D] per-head [query ; gate] → q [H, D], gate [H, D].
@@ -139,6 +141,21 @@ final class Elementwise {
         encoder.setBytes(&elementCount, length: 4, index: 2)
         encoder.setBytes(&factor, length: 4, index: 3)
         dispatch(encoder, pipeline: residualAddScalePSO, threads: count)
+        encoder.endEncoding()
+    }
+
+    /// values[i] *= scale
+    func encodeScale(commandBuffer: MTLCommandBuffer,
+                     values: MTLBuffer, valuesOffset: Int = 0,
+                     count: Int, scale: Float) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(scalePSO)
+        encoder.setBuffer(values, offset: valuesOffset, index: 0)
+        var elementCount = UInt32(count)
+        var factor = scale
+        encoder.setBytes(&elementCount, length: 4, index: 1)
+        encoder.setBytes(&factor, length: 4, index: 2)
+        dispatch(encoder, pipeline: scalePSO, threads: count)
         encoder.endEncoding()
     }
 

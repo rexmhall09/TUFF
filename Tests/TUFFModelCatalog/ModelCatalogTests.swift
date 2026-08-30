@@ -4,13 +4,14 @@ import Testing
 @Suite struct ModelCatalogTests {
     @Test func currentCatalogOrderAndSelectorsAreStable() {
         #expect(TUFFModelCatalog.all.map(\.selector) == [
-            "gemma4-e2b", "gemma4-e4b", "gemma4", "qwen36",
+            "gemma4-e2b", "gemma4-e4b", "gemma4-12b-qat", "gemma4", "qwen36",
             "gpt-oss-20b", "gpt-oss-120b",
         ])
         #expect(TUFFModelCatalog.model(selector: "e2b")?.id == .gemma4_E2B)
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
         #expect(TUFFModelCatalog.model(selector: "gemma4")?.id == .gemma4_26B_A4B)
         #expect(TUFFModelCatalog.model(selector: "e4b")?.id == .gemma4_E4B)
+        #expect(TUFFModelCatalog.model(selector: "12b")?.id == .gemma4_12B_QAT)
         #expect(TUFFModelCatalog.model(selector: "qwen36")?.id == .qwen36_35B_A3B)
         #expect(TUFFModelCatalog.model(selector: "gpt-oss")?.id == .gptOss_20B)
         #expect(TUFFModelCatalog.model(selector: "gpt-oss-120b")?.id == .gptOss_120B)
@@ -32,11 +33,13 @@ import Testing
     }
 
     @Test func imageAddonsRemainSeparateAndM2Gated() {
-        // GPT-OSS ships no image add-on; the three Gemma and Qwen checkpoints
+        // GPT-OSS ships no image add-on; the Gemma and Qwen checkpoints
         // each carry a vision tower packaged separately.
         #expect(TUFFModelCatalog.gptOss_20B.addons.isEmpty)
         #expect(TUFFModelCatalog.gptOss_120B.addons.isEmpty)
-        for model in [TUFFModelCatalog.gemma4_E4B,
+        for model in [TUFFModelCatalog.gemma4_E2B,
+                      TUFFModelCatalog.gemma4_E4B,
+                      TUFFModelCatalog.gemma4_12B_QAT,
                       TUFFModelCatalog.gemma4_26B_A4B,
                       TUFFModelCatalog.qwen36_35B_A3B] {
             let addon = model.addons[0]

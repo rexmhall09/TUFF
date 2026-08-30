@@ -4,6 +4,7 @@ import Darwin
 public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
     case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
+    case gemma4_12B_QAT = "gemma4-12b-qat"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
@@ -19,6 +20,7 @@ public enum TUFFModelFamily: String, Codable, Sendable {
 public enum TUFFArchitectureID: String, Codable, Sendable {
     case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
+    case gemma4_12B_QAT = "gemma4-12b-qat"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
@@ -61,6 +63,12 @@ public extension TUFFArchitectureProfile {
 
     static let gemma4E4B = TUFFArchitectureProfile(
         id: .gemma4_E4B,
+        family: .gemma4,
+        feedForwardKind: .dense,
+        weightLayout: .affine)
+
+    static let gemma4_12B_QAT = TUFFArchitectureProfile(
+        id: .gemma4_12B_QAT,
         family: .gemma4,
         feedForwardKind: .dense,
         weightLayout: .affine)
@@ -476,6 +484,16 @@ public enum TUFFModelCatalog {
         installedBytes: 4_231_300_000,
         reserveBytes: oneGiB)
 
+    private static let gemma12BQATSource = TUFFModelSource(
+        repoID: "mlx-community/gemma-4-12B-it-qat-4bit",
+        revision: "e70c6b3ba0979b3357dcd2f223ad8bde7787a6b6",
+        sourceIndexSHA256:
+            "b87c93774de5d13ca9d0e21b045793e42e5df032fb5e7622212524f56f9695f2",
+        manifestModelID: "mlx-community/gemma-4-12B-it-qat-4bit",
+        approximateDownloadBytes: 10_947_021_920,
+        installedBytes: 10_978_056_429,
+        reserveBytes: oneGiB)
+
     private static let qwenSource = TUFFModelSource(
         repoID: "mlx-community/Qwen3.6-35B-A3B-4bit",
         revision: "38740b847e4cb78f352aba30aa41c76e08e6eb46",
@@ -515,21 +533,19 @@ public enum TUFFModelCatalog {
         apiModelID: "gemma-4-e2b-it",
         displayName: "Gemma 4 E2B IT 4-bit",
         shortName: "Gemma 4 E2B",
-        summary: "The smallest Gemma. Same shape as E4B — per-layer embeddings and shared KV projections — at roughly half the weights.",
+        summary: "The smallest Gemma. Same architecture as E4B — per-layer embeddings and shared KV projections — at roughly half the weights.",
         family: .gemma4,
         architecture: .gemma4E2B,
         installDirectoryName: "gemma4-e2b.gturbo",
         source: gemmaE2BSource,
         hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB),
-        // Deliberately E4B's measured profile, unchanged.
-        //
-        // E2B is strictly smaller than E4B in every dimension that feeds this —
-        // 35 layers against 42, one KV head against two, 62% of the weights —
-        // so E4B's figures are a guaranteed over-estimate, and over-estimating
-        // only makes TUFF more cautious about long contexts on a small Mac.
-        // Replace with a measured working set once E2B has completed a real
-        // install and generation run; inventing a precise-looking number here
-        // would be worse than being knowingly conservative.
+        // Retain E4B's measured profile as a conservative compatibility
+        // guardrail. E2B completed a pinned install and an 8K-context runtime
+        // generation on the audit machine, but that single short run is not a
+        // replacement for the cross-device qualification sweep that produced
+        // the catalogue figures. E2B has fewer layers, KV heads and weights,
+        // although its final 20 MLPs are wider than E4B's, so the old claim
+        // that it was smaller in every dimension was not true.
         memory: TUFFModelMemoryProfile(
             qualifiedDefaultWorkingSetBytes: 1_833_438_160,
             defaultExpertCacheSlots: 0,
@@ -544,11 +560,23 @@ public enum TUFFModelCatalog {
             temperature: 1.0,
             topK: 64,
             topP: 0.95),
-        // Text only for now. The checkpoint carries the same vision tower E4B
-        // has, but an image add-on needs its own verified fingerprint and a
-        // validated activation before it is offered.
-        capabilities: [.textGeneration, .reasoning],
-        reasoningControl: .toggle)
+        capabilities: [.textGeneration, .imageInput, .reasoning],
+        reasoningControl: .toggle,
+        addons: [TUFFModelAddonDescriptor(
+            id: "gemma4-e2b-image-input",
+            displayName: "Gemma 4 E2B Image Support",
+            kind: .imageInput,
+            source: TUFFModelSource(
+                repoID: gemmaE2BSource.repoID,
+                revision: gemmaE2BSource.revision,
+                sourceIndexSHA256: gemmaE2BSource.sourceIndexSHA256,
+                manifestModelID: gemmaE2BSource.manifestModelID,
+                approximateDownloadBytes: 1_169_504_854,
+                installedBytes: 336_950_725,
+                reserveBytes: oneGiB),
+            hardware: TUFFModelHardwareRequirements(
+                minimumUnifiedMemoryBytes: eightGiB,
+                minimumAppleSiliconGeneration: 2))])
 
     public static let gemma4_E4B = TUFFModelDescriptor(
         id: .gemma4_E4B,
@@ -590,11 +618,61 @@ public enum TUFFModelCatalog {
                 revision: gemmaE4BSource.revision,
                 sourceIndexSHA256: gemmaE4BSource.sourceIndexSHA256,
                 manifestModelID: gemmaE4BSource.manifestModelID,
-                approximateDownloadBytes: 1_503_238_553,
-                installedBytes: 1_144_374_564,
+                approximateDownloadBytes: 1_169_947_222,
+                installedBytes: 337_376_704,
                 reserveBytes: oneGiB),
             hardware: TUFFModelHardwareRequirements(
                 minimumUnifiedMemoryBytes: eightGiB,
+                minimumAppleSiliconGeneration: 2))])
+
+    public static let gemma4_12B_QAT = TUFFModelDescriptor(
+        id: .gemma4_12B_QAT,
+        selector: "gemma4-12b-qat",
+        aliases: ["12b", "12b-qat"],
+        apiModelID: "gemma-4-12b-it-qat",
+        displayName: "Gemma 4 12B IT QAT 4-bit",
+        shortName: "Gemma 4 12B QAT",
+        summary: "Dense Gemma 4 Unified with 8-bit QAT MLPs and optional image input.",
+        family: .gemma4,
+        architecture: .gemma4_12B_QAT,
+        installDirectoryName: "gemma4-12b-qat.gturbo",
+        source: gemma12BQATSource,
+        hardware: TUFFModelHardwareRequirements(
+            minimumUnifiedMemoryBytes: 16 * oneGiB),
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 6_000_000_000,
+            defaultExpertCacheSlots: 0,
+            expertCacheBytesPerSlot: 0,
+            kvCache: TUFFKVCacheProfile(
+                fullAttentionBytesPerToken: 16_384,
+                slidingAttentionBytesPerToken: 327_680,
+                slidingWindowCapacityTokens: 1_024)),
+        // Qualified with a complete pinned install plus real text and image
+        // generation on a 16 GB Apple-silicon Mac. Keep the 6 GB catalog
+        // estimate conservative: file-backed Metal mappings are not fully
+        // represented by the process RSS reported by `time`.
+        runtimeDefaults: TUFFModelRuntimeDefaults(
+            contextTokens: 8_192,
+            expertCacheSlots: 16,
+            temperature: 1.0,
+            topK: 64,
+            topP: 0.95),
+        capabilities: [.textGeneration, .imageInput, .reasoning],
+        reasoningControl: .toggle,
+        addons: [TUFFModelAddonDescriptor(
+            id: "gemma4-12b-qat-image-input",
+            displayName: "Gemma 4 12B QAT Image Support",
+            kind: .imageInput,
+            source: TUFFModelSource(
+                repoID: gemma12BQATSource.repoID,
+                revision: gemma12BQATSource.revision,
+                sourceIndexSHA256: gemma12BQATSource.sourceIndexSHA256,
+                manifestModelID: gemma12BQATSource.manifestModelID,
+                approximateDownloadBytes: 102_556_672,
+                installedBytes: 40_581_222,
+                reserveBytes: oneGiB),
+            hardware: TUFFModelHardwareRequirements(
+                minimumUnifiedMemoryBytes: 16 * oneGiB,
                 minimumAppleSiliconGeneration: 2))])
 
     public static let gemma4_26B_A4B = TUFFModelDescriptor(
@@ -739,6 +817,7 @@ public enum TUFFModelCatalog {
     public static let all: [TUFFModelDescriptor] = [
         gemma4_E2B,
         gemma4_E4B,
+        gemma4_12B_QAT,
         gemma4_26B_A4B,
         qwen36_35B_A3B,
         gptOss_20B,

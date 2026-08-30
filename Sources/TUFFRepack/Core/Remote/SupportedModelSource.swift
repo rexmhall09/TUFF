@@ -49,7 +49,10 @@ public struct SupportedModelSource: Sendable, Equatable {
     }
 
     public static let gemma4 = SupportedModelSource(catalog: TUFFModelCatalog.gemma4_26B_A4B)
+    public static let gemma4E2B = SupportedModelSource(catalog: TUFFModelCatalog.gemma4_E2B)
     public static let gemma4E4B = SupportedModelSource(catalog: TUFFModelCatalog.gemma4_E4B)
+    public static let gemma4_12B_QAT = SupportedModelSource(
+        catalog: TUFFModelCatalog.gemma4_12B_QAT)
 
     /// Download estimate covers the `language_model.*` tensors plus tokenizer
     /// and metadata sidecars; the vision tower is never fetched. Installed

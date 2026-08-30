@@ -74,12 +74,13 @@ final class PrefillAttention {
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
                              layerKind: PrefillAttentionLayerKind = .full,
+                             allowsBidirectionalFullAttention: Bool = false,
                              path: RuntimePrefillAttentionPath = .causalTiled) {
         var effectiveParams = params
         // Only sliding-window layers make an image block bidirectional;
         // full-attention layers stay causal. Zeroed here as well as at the
         // call site so a caller cannot widen visibility by mistake.
-        if layerKind == .full {
+        if layerKind == .full && !allowsBidirectionalFullAttention {
             effectiveParams.bidirectionalBlockStart = 0
             effectiveParams.bidirectionalBlockEnd = 0
         }

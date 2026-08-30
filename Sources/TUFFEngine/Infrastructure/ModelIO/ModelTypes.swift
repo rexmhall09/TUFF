@@ -14,6 +14,7 @@ public enum ModelFamily: String, Sendable, Equatable {
 public enum ModelVariant: String, Sendable, Equatable {
     case gemma4_E2B = "gemma4-e2b"
     case gemma4_E4B = "gemma4-e4b"
+    case gemma4_12B_QAT = "gemma4-12b-qat"
     case gemma4_26B_A4B = "gemma4-26b-a4b"
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
@@ -338,6 +339,40 @@ public struct ArchConfig: Sendable, Equatable {
         variant: .gemma4_E2B,
         feedForwardKind: .dense)
 
+    /// Gemma 4 12B Unified QAT. Unlike E2B/E4B this dense model has no PLE or
+    /// shared-KV tail; all MLP projections use the checkpoint's 8-bit affine
+    /// overrides while attention and embeddings remain 4-bit.
+    public static let gemma4_12B_QAT = ArchConfig(
+        hiddenSize: 3_840,
+        intermediateSize: 15_360,
+        moeIntermediateSize: 0,
+        numHeads: 16,
+        numKVHeads: 8,
+        numFullKVHeads: 1,
+        headDim: 256,
+        fullHeadDim: 512,
+        vocabSize: 262_144,
+        slidingWindow: 1_024,
+        finalLogitSoftcap: 30.0,
+        ropeTheta: 10_000.0,
+        fullRopeTheta: 1_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 48,
+        numExperts: 0,
+        topKExperts: 0,
+        tieWordEmbeddings: true,
+        attentionKEqV: true,
+        fullAttentionLayerMask: Self.gemma4_12BLayerMask(),
+        hiddenActivation: "gelu_pytorch_tanh",
+        variant: .gemma4_12B_QAT,
+        feedForwardKind: .dense)
+
+    private static func gemma4_12BLayerMask() -> [UInt8] {
+        var mask = [UInt8](repeating: 0, count: 48)
+        for i in stride(from: 5, to: 48, by: 6) { mask[i] = 1 }
+        return mask
+    }
+
     private static func gemma4E2BLayerMask() -> [UInt8] {
         // `layer_types` in the checkpoint marks full attention every fifth
         // layer: indices 4, 9, 14, 19, 24, 29, 34.
@@ -503,6 +538,7 @@ public struct ArchConfig: Sendable, Equatable {
     public static let registeredArchitectures: [ModelVariant: ArchConfig] = [
         .gemma4_E2B: .gemma4_E2B,
         .gemma4_E4B: .gemma4_E4B,
+        .gemma4_12B_QAT: .gemma4_12B_QAT,
         .gemma4_26B_A4B: .gemma4_26B_A4B,
         .qwen36_35B_A3B: .qwen36_35B_A3B,
         .gptOss_20B: .gptOss_20B,

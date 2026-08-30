@@ -6,6 +6,52 @@ import Darwin
 
 @Suite struct ResidentBufferTests {
 
+    private static func entry(
+        _ name: String,
+        weights: (UInt64, UInt64),
+        scales: (UInt64, UInt64) = (0, 0),
+        biases: (UInt64, UInt64) = (0, 0)
+    ) -> ResidentIndexEntry {
+        ResidentIndexEntry(
+            name: name, dtype: 0,
+            fileOffset: weights.0, sizeBytes: weights.1,
+            shape: (1, 1, 1, 1),
+            scaleOffset: scales.0, scaleSize: scales.1,
+            biasOffset: biases.0, biasSize: biases.1)
+    }
+
+    @Test func regionPlannerSplitsOnlyBetweenCompleteTensors() throws {
+        let plans = try ResidentBufferSet.planRegions(
+            entries: [
+                Self.entry("a", weights: (100, 40),
+                           scales: (140, 8), biases: (148, 8)),
+                Self.entry("b", weights: (160, 50)),
+                Self.entry("c", weights: (214, 20),
+                           scales: (234, 4), biases: (238, 4)),
+            ],
+            payloadOffset: 100,
+            payloadSize: 300,
+            maximumLength: 90)
+
+        #expect(plans == [
+            .init(fileOffset: 100, size: 56, tensorNames: ["a"]),
+            .init(fileOffset: 160, size: 82, tensorNames: ["b", "c"]),
+        ])
+    }
+
+    @Test func regionPlannerRejectsTensorWhoseRelatedFieldsExceedOneBuffer() {
+        #expect(throws: ModelError.self) {
+            try ResidentBufferSet.planRegions(
+                entries: [
+                    Self.entry("split-tensor", weights: (100, 20),
+                               scales: (190, 10), biases: (200, 10)),
+                ],
+                payloadOffset: 100,
+                payloadSize: 200,
+                maximumLength: 64)
+        }
+    }
+
     @Test func wrapsResidentRegionAndReadsBytes() throws {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let url = FileManager.default.temporaryDirectory

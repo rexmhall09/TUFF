@@ -442,15 +442,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             self.pleGate = nil
         }
 
-        func sharedProj(_ view: TensorView, rows: UInt32, cols: UInt32) -> SharedExpertProjection {
+        // The validated tensor is authoritative for each projection's shape.
+        // Scratch uses the model-wide maximum, but E2B's first 15 MLPs are
+        // narrower than its final 20; stamping the maximum onto every view
+        // makes those early GEMVs read into the next packed tensor.
+        func sharedProj(_ view: TensorView) -> SharedExpertProjection {
             SharedExpertProjection(weights: view.buffer,
                                  scales: view.buffer,
                                  biases: view.buffer,
                                  weightsOffset: Int(view.offset),
                                  scalesOffset: Int(view.scaleOffset),
                                  biasesOffset: Int(view.biasOffset),
-                                 rows: rows,
-                                 cols: cols)
+                                 rows: view.shape.0,
+                                 cols: view.shape.1)
         }
         var sharedViews: [LayerSharedExpertProjections] = []
         sharedViews.reserveCapacity(cfg.numLayers)
@@ -459,9 +463,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let up = try model.sharedExpertUp(layer: L)
             let down = try model.sharedExpertDown(layer: L)
             sharedViews.append(LayerSharedExpertProjections(
-                gate: sharedProj(gate, rows: UInt32(F), cols: UInt32(D)),
-                up: sharedProj(up, rows: UInt32(F), cols: UInt32(D)),
-                down: sharedProj(down, rows: UInt32(D), cols: UInt32(F)),
+                gate: sharedProj(gate),
+                up: sharedProj(up),
+                down: sharedProj(down),
                 postF1: cfg.feedForwardKind == .dense
                     ? try model.postFFN(layer: L)
                     : (cfg.ffnSandwichNorms ? try model.postFFN1(layer: L) : nil),
@@ -662,7 +666,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
         }
-
         let scratch = try ensurePrefillScratch(config: config)
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
                                               startPosition: startPosition,
@@ -715,6 +718,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+        }
+        guard input.imageSpans.allSatisfy({
+            $0.features.hiddenSize == cfg.hiddenSize
+                && $0.features.tokenCount == $0.tokenRange.count
+        }) else {
+            throw PrefillError.chunkedUnsupported(
+                "image features do not match the loaded model architecture")
         }
 
         // The planner applies the same clamp the scratch layout does. Cutting at
@@ -906,9 +916,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 layerScalar: (sandwich || dense) ? try model.layerScalar(layer: L) : nil,
                 routerPerExpertScale: cfg.routerScaled
                     && !dense ? try model.routerPerExpertScale(layer: L) : nil,
-                perLayerInputGate: dense ? try model.perLayerInputGate(layer: L) : nil,
-                perLayerProjection: dense ? try model.perLayerProjection(layer: L) : nil,
-                postPerLayerInputNorm: dense
+                perLayerInputGate: dense && cfg.hasPerLayerInputs
+                    ? try model.perLayerInputGate(layer: L) : nil,
+                perLayerProjection: dense && cfg.hasPerLayerInputs
+                    ? try model.perLayerProjection(layer: L) : nil,
+                postPerLayerInputNorm: dense && cfg.hasPerLayerInputs
                     ? try model.postPerLayerInputNorm(layer: L) : nil,
                 linQKV: isLinear ? try model.linearInProjQKV(layer: L) : nil,
                 linZ: isLinear ? try model.linearInProjZ(layer: L) : nil,
@@ -1422,9 +1434,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         oTokenStrideElements: UInt32(qDim),
                         scale: Float(cfg.attentionScale),
                         bidirectionalBlockStart: UInt32(
-                            isFull ? 0 : bidirectionalBlock?.lowerBound ?? 0),
+                            bidirectionalBlock?.lowerBound ?? 0),
                         bidirectionalBlockEnd: UInt32(
-                            isFull ? 0 : bidirectionalBlock?.upperBound ?? 0))
+                            bidirectionalBlock?.upperBound ?? 0))
                 if let kv {
                         let kvLayer = cfg.kvSourceLayer(for: L) ?? L
                         let keyBuffer = kv.keyBuffer(layer: kvLayer, validTokenCount: startPosition + t)
@@ -1441,6 +1453,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                       params: params,
                                                       kvRingCapacity: activeRingCapacity,
                                                       layerKind: isFull ? .full : .slidingWindow,
+                                                      allowsBidirectionalFullAttention:
+                                                          cfg.variant == .gemma4_12B_QAT,
                                                       path: prefillAttentionPath)
                 } else {
                     throw PrefillError.chunkedUnsupported(
@@ -1512,6 +1526,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                delta: scratch.h1,
                                                count: t * D)
 
+                let scalarView = views.layerScalar!
+                let scalarBits = scalarView.buffer.contents()
+                    .advanced(by: Int(scalarView.offset))
+                    .assumingMemoryBound(to: UInt16.self)[0]
+                let layerScale = Quantization.bf16ToFloat(scalarBits)
+                guard cfg.hasPerLayerInputs else {
+                    elementwise!.encodeScale(
+                        commandBuffer: cb,
+                        values: scratch.hidden,
+                        count: t * D,
+                        scale: layerScale)
+                    continue
+                }
+
                 let plePlan = PerLayerEmbeddingPlan(config: cfg)
                 let pleNorm = model.perLayerProjectionNorm
                 perLayerEmbeddingKernel!.encodePrepareLayer(
@@ -1563,16 +1591,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     weightOffset: Int(views.postPerLayerInputNorm!.offset),
                     out: scratch.h1,
                     t: UInt32(t), d: UInt32(D), eps: eps)
-                let scalarView = views.layerScalar!
-                let scalarBits = scalarView.buffer.contents()
-                    .advanced(by: Int(scalarView.offset))
-                    .assumingMemoryBound(to: UInt16.self)[0]
                 elementwise!.encodeResidualAddScale(
                     commandBuffer: cb,
                     hidden: scratch.hidden,
                     delta: scratch.h1,
                     count: t * D,
-                    scale: Quantization.bf16ToFloat(scalarBits))
+                    scale: layerScale)
                 continue
             }
             if cfg.ffnSandwichNorms {
@@ -2659,9 +2683,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         d: UInt32,
         eps: Float
     ) throws {
-        guard let elementwise, let perLayerEmbeddingKernel,
-              let pleIdentity, let pleContext, let pleLayer, let pleGate else {
-            preconditionFailure("dense Gemma layer requires PLE kernels and scratch")
+        guard let elementwise else {
+            preconditionFailure("dense Gemma layer requires elementwise kernels")
         }
         let preFFN = try model.preFFN(layer: layer)
         rms.encodeBF16W(commandBuffer: cb,
@@ -2695,6 +2718,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         elementwise.encodeResidualAdd(commandBuffer: cb,
                                       hidden: hidden, delta: h1Buf,
                                       count: cfg.hiddenSize)
+
+        let layerScalar = try model.layerScalar(layer: layer)
+        let scalarBits = layerScalar.buffer.contents()
+            .advanced(by: Int(layerScalar.offset))
+            .assumingMemoryBound(to: UInt16.self)[0]
+        let layerScale = Quantization.bf16ToFloat(scalarBits)
+        guard cfg.hasPerLayerInputs else {
+            elementwise.encodeScale(commandBuffer: cb, values: hidden,
+                                    count: cfg.hiddenSize, scale: layerScale)
+            return
+        }
+        guard let perLayerEmbeddingKernel,
+              let pleIdentity, let pleContext, let pleLayer, let pleGate else {
+            preconditionFailure("PLE architecture requires PLE kernels and scratch")
+        }
 
         let plan = PerLayerEmbeddingPlan(config: cfg)
         let pleNorm = model.perLayerProjectionNorm
@@ -2735,16 +2773,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         weight: postPLE.buffer,
                         weightOffset: Int(postPLE.offset),
                         out: h2Buf, d: d, eps: eps)
-        let layerScalar = try model.layerScalar(layer: layer)
-        let scalarBits = layerScalar.buffer.contents()
-            .advanced(by: Int(layerScalar.offset))
-            .assumingMemoryBound(to: UInt16.self)[0]
         elementwise.encodeResidualAddScale(
             commandBuffer: cb,
             hidden: hidden,
             delta: h2Buf,
             count: cfg.hiddenSize,
-            scale: Quantization.bf16ToFloat(scalarBits))
+            scale: layerScale)
     }
 
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step.

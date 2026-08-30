@@ -103,6 +103,8 @@ final class VisionWeightStore {
         }
         guard manifest.compatibleTextSourceSnapshotHash
                 == compatibleTextSourceSnapshotHash,
+              compatibleTextSourceSnapshotHash
+                == "sha256:\(manifest.sourceIndexSha256)",
               manifest.compatibleTextManifestSha256.lowercased()
                 == compatibleTextManifestSha256.lowercased() else {
             throw VisionPackError.incompatibleTextArtifact

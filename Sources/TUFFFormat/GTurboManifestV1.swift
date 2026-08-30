@@ -323,8 +323,16 @@ package enum GTurboManifestCodec {
         let perLayerHidden = arch.hiddenSizePerLayerInput ?? 0
         let perLayerVocab = arch.vocabSizePerLayerInput ?? 0
         let sharedKVLayers = arch.numKVSharedLayers ?? 0
+        // `vocabSizePerLayerInput` is also present (and equal to the normal
+        // vocabulary) in the production 26B MoE config even though that model
+        // has no PLE stream. PLE is enabled by a non-zero hidden width; when it
+        // is disabled, accept the upstream informational vocabulary value as
+        // well as the legacy zero/absent spelling.
+        let validPLE = perLayerHidden > 0
+            ? perLayerVocab > 0
+            : (perLayerVocab == 0 || perLayerVocab == arch.vocabSize)
         guard perLayerHidden >= 0, perLayerVocab >= 0,
-              (perLayerHidden == 0) == (perLayerVocab == 0),
+              validPLE,
               sharedKVLayers >= 0, sharedKVLayers < arch.numLayers else {
             throw GTurboFormatError.invalid(
                 field: "manifest.arch", reason: "invalid PLE or shared-KV values")

@@ -42,7 +42,7 @@ kernel void vision_unpad_heads_80_to_72(
     output[index] = input[(head * rows + row) * 80u + dimension];
 }
 
-template <uint ComputeDim, uint QueryTile>
+template <uint LogicalDim, uint ComputeDim, uint QueryTile>
 inline void vision_attention_online_impl(
     device const bfloat* q,
     device const bfloat* k,
@@ -66,16 +66,16 @@ inline void vision_attention_online_impl(
     const uint queryBase = group.x * QueryTile;
     if (head >= numHeads) return;
 
-    for (uint index = tid; index < QueryTile * kVisionHeadDim;
+    for (uint index = tid; index < QueryTile * LogicalDim;
          index += kVisionThreads) {
-        const uint localQuery = index / kVisionHeadDim;
-        const uint dimension = index % kVisionHeadDim;
+        const uint localQuery = index / LogicalDim;
+        const uint dimension = index % LogicalDim;
         const uint query = queryBase + localQuery;
         qTile[index] = query < sequenceLength
-            ? q[(query * numHeads + head) * kVisionHeadDim + dimension]
+            ? q[(query * numHeads + head) * LogicalDim + dimension]
             : bfloat(0.0f);
     }
-    for (uint index = tid; index < QueryTile * kVisionPaddedHeadDim;
+    for (uint index = tid; index < QueryTile * ComputeDim;
          index += kVisionThreads) {
         accumulator[index] = 0.0f;
     }
@@ -86,12 +86,12 @@ inline void vision_attention_online_impl(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     for (uint keyBase = 0; keyBase < sequenceLength; keyBase += kVisionKeyTile) {
-        for (uint index = tid; index < kVisionKeyTile * kVisionHeadDim;
+        for (uint index = tid; index < kVisionKeyTile * LogicalDim;
              index += kVisionThreads) {
-            const uint localKey = index / kVisionHeadDim;
-            const uint dimension = index % kVisionHeadDim;
+            const uint localKey = index / LogicalDim;
+            const uint dimension = index % LogicalDim;
             const uint keyIndex = keyBase + localKey;
-            const uint source = (keyIndex * numHeads + head) * kVisionHeadDim + dimension;
+            const uint source = (keyIndex * numHeads + head) * LogicalDim + dimension;
             kTile[index] = keyIndex < sequenceLength ? k[source] : bfloat(0.0f);
             vTile[index] = keyIndex < sequenceLength ? v[source] : bfloat(0.0f);
         }
@@ -107,10 +107,10 @@ inline void vision_attention_online_impl(
             if (query < sequenceLength && keyIndex < sequenceLength) {
                 score = 0.0f;
                 for (uint dimension = 0; dimension < ComputeDim; ++dimension) {
-                    const float qValue = dimension < kVisionHeadDim
-                        ? float(qTile[localQuery * kVisionHeadDim + dimension]) : 0.0f;
-                    const float kValue = dimension < kVisionHeadDim
-                        ? float(kTile[localKey * kVisionHeadDim + dimension]) : 0.0f;
+                    const float qValue = dimension < LogicalDim
+                        ? float(qTile[localQuery * LogicalDim + dimension]) : 0.0f;
+                    const float kValue = dimension < LogicalDim
+                        ? float(kTile[localKey * LogicalDim + dimension]) : 0.0f;
                     score = fma(qValue, kValue, score);
                 }
             }
@@ -142,16 +142,16 @@ inline void vision_attention_online_impl(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint index = tid; index < QueryTile * kVisionPaddedHeadDim;
+        for (uint index = tid; index < QueryTile * ComputeDim;
              index += kVisionThreads) {
-            const uint localQuery = index / kVisionPaddedHeadDim;
-            const uint dimension = index % kVisionPaddedHeadDim;
+            const uint localQuery = index / ComputeDim;
+            const uint dimension = index % ComputeDim;
             float value = accumulator[index] * oldScale[localQuery];
-            if (dimension < kVisionHeadDim) {
+            if (dimension < LogicalDim) {
                 for (uint localKey = 0; localKey < kVisionKeyTile; ++localKey) {
                     value = fma(
                         probabilities[localQuery * kVisionKeyTile + localKey],
-                        float(vTile[localKey * kVisionHeadDim + dimension]), value);
+                        float(vTile[localKey * LogicalDim + dimension]), value);
                 }
             }
             accumulator[index] = value;
@@ -159,14 +159,14 @@ inline void vision_attention_online_impl(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    for (uint index = tid; index < QueryTile * kVisionHeadDim;
+    for (uint index = tid; index < QueryTile * LogicalDim;
          index += kVisionThreads) {
-        const uint localQuery = index / kVisionHeadDim;
-        const uint dimension = index % kVisionHeadDim;
+        const uint localQuery = index / LogicalDim;
+        const uint dimension = index % LogicalDim;
         const uint query = queryBase + localQuery;
         if (query < sequenceLength) {
-            output[(query * numHeads + head) * kVisionHeadDim + dimension] =
-                bfloat(accumulator[localQuery * kVisionPaddedHeadDim + dimension]
+            output[(query * numHeads + head) * LogicalDim + dimension] =
+                bfloat(accumulator[localQuery * ComputeDim + dimension]
                        / rowSum[localQuery]);
         }
     }
@@ -190,7 +190,32 @@ kernel void vision_attention_online_72(
     threadgroup float oldScale[kVisionMaxQueryTile];
     threadgroup float rowSum[kVisionMaxQueryTile];
     threadgroup float rowMax[kVisionMaxQueryTile];
-    vision_attention_online_impl<kVisionHeadDim, 8>(
+    vision_attention_online_impl<kVisionHeadDim, kVisionHeadDim, 8>(
+        q, k, v, output, sequenceLength, numHeads, scoreScale,
+        group.xy, threadPosition.x,
+        qTile, kTile, vTile, probabilities, accumulator,
+        oldScale, rowSum, rowMax);
+}
+
+kernel void vision_attention_online_64(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* k [[buffer(1)]],
+    device const bfloat* v [[buffer(2)]],
+    device bfloat* output [[buffer(3)]],
+    constant uint& sequenceLength [[buffer(4)]],
+    constant uint& numHeads [[buffer(5)]],
+    constant float& scoreScale [[buffer(6)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 threadPosition [[thread_position_in_threadgroup]]) {
+    threadgroup bfloat qTile[kVisionMaxQueryTile * kVisionHeadDim];
+    threadgroup bfloat kTile[kVisionKeyTile * kVisionHeadDim];
+    threadgroup bfloat vTile[kVisionKeyTile * kVisionHeadDim];
+    threadgroup float probabilities[kVisionMaxQueryTile * kVisionKeyTile];
+    threadgroup float accumulator[kVisionMaxQueryTile * kVisionPaddedHeadDim];
+    threadgroup float oldScale[kVisionMaxQueryTile];
+    threadgroup float rowSum[kVisionMaxQueryTile];
+    threadgroup float rowMax[kVisionMaxQueryTile];
+    vision_attention_online_impl<64, 64, 8>(
         q, k, v, output, sequenceLength, numHeads, scoreScale,
         group.xy, threadPosition.x,
         qTile, kTile, vTile, probabilities, accumulator,
@@ -215,7 +240,7 @@ kernel void vision_attention_online_80(
     threadgroup float oldScale[kVisionMaxQueryTile];
     threadgroup float rowSum[kVisionMaxQueryTile];
     threadgroup float rowMax[kVisionMaxQueryTile];
-    vision_attention_online_impl<kVisionPaddedHeadDim, 8>(
+    vision_attention_online_impl<kVisionHeadDim, kVisionPaddedHeadDim, 8>(
         q, k, v, output, sequenceLength, numHeads, scoreScale,
         group.xy, threadPosition.x,
         qTile, kTile, vTile, probabilities, accumulator,
@@ -240,7 +265,7 @@ kernel void vision_attention_online_72_q16(
     threadgroup float oldScale[kVisionMaxQueryTile];
     threadgroup float rowSum[kVisionMaxQueryTile];
     threadgroup float rowMax[kVisionMaxQueryTile];
-    vision_attention_online_impl<kVisionHeadDim, 16>(
+    vision_attention_online_impl<kVisionHeadDim, kVisionHeadDim, 16>(
         q, k, v, output, sequenceLength, numHeads, scoreScale,
         group.xy, threadPosition.x,
         qTile, kTile, vTile, probabilities, accumulator,
@@ -252,10 +277,11 @@ kernel void vision_normalize_patches(
     device bfloat* output [[buffer(1)]],
     constant uint& realRows [[buffer(2)]],
     constant uint& paddedRows [[buffer(3)]],
+    constant uint& patchDimension [[buffer(4)]],
     uint index [[thread_position_in_grid]]) {
-    const uint count = paddedRows * 768u;
+    const uint count = paddedRows * patchDimension;
     if (index >= count) return;
-    output[index] = index < realRows * 768u
+    output[index] = index < realRows * patchDimension
         ? bfloat(2.0f * (float(input[index]) - 0.5f))
         : bfloat(0.0f);
 }
@@ -265,14 +291,16 @@ kernel void vision_add_position(
     device const bfloat* table [[buffer(1)]],
     device const int2* positions [[buffer(2)]],
     constant uint& rows [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    constant uint& positionSize [[buffer(5)]],
     uint index [[thread_position_in_grid]]) {
-    const uint count = rows * 1152u;
+    const uint count = rows * width;
     if (index >= count) return;
-    const uint row = index / 1152u;
-    const uint dimension = index % 1152u;
+    const uint row = index / width;
+    const uint dimension = index % width;
     const int2 position = positions[row];
-    const uint xIndex = uint(position.x) * 1152u + dimension;
-    const uint yIndex = (10240u + uint(position.y)) * 1152u + dimension;
+    const uint xIndex = uint(position.x) * width + dimension;
+    const uint yIndex = (positionSize + uint(position.y)) * width + dimension;
     hidden[index] = bfloat(float(hidden[index])
                            + float(table[xIndex]) + float(table[yIndex]));
 }
@@ -443,6 +471,61 @@ kernel void vision_qkv_norm_rope(
     }
 }
 
+kernel void vision_qkv_norm_rope_64(
+    device bfloat* q [[buffer(0)]],
+    device bfloat* k [[buffer(1)]],
+    device bfloat* v [[buffer(2)]],
+    device const bfloat* qWeight [[buffer(3)]],
+    device const bfloat* kWeight [[buffer(4)]],
+    device const int2* positions [[buffer(5)]],
+    constant uint& rows [[buffer(6)]],
+    constant uint& heads [[buffer(7)]],
+    uint vectorIndex [[thread_position_in_grid]]) {
+    if (vectorIndex >= rows * heads) return;
+    constexpr uint headDim = 64u;
+    constexpr uint axisDim = 32u;
+    constexpr uint pairsPerAxis = 16u;
+    const uint base = vectorIndex * headDim;
+    float qSquares = 0.0f;
+    float kSquares = 0.0f;
+    float vSquares = 0.0f;
+    for (uint dimension = 0; dimension < headDim; ++dimension) {
+        const float qValue = float(q[base + dimension]);
+        const float kValue = float(k[base + dimension]);
+        const float vValue = float(v[base + dimension]);
+        qSquares = fma(qValue, qValue, qSquares);
+        kSquares = fma(kValue, kValue, kSquares);
+        vSquares = fma(vValue, vValue, vSquares);
+    }
+    const float qInverse = rsqrt(qSquares / float(headDim) + 1e-6f);
+    const float kInverse = rsqrt(kSquares / float(headDim) + 1e-6f);
+    const float vInverse = rsqrt(vSquares / float(headDim) + 1e-6f);
+    const int2 position = positions[vectorIndex / heads];
+    for (uint axis = 0; axis < 2u; ++axis) {
+        const uint axisBase = axis * axisDim;
+        const int coordinate = axis == 0u ? position.x : position.y;
+        for (uint pair = 0; pair < pairsPerAxis; ++pair) {
+            const uint first = base + axisBase + pair;
+            const uint second = first + pairsPerAxis;
+            float2 qPair = float2(float(q[first]) * qInverse * float(qWeight[axisBase + pair]),
+                                  float(q[second]) * qInverse * float(qWeight[axisBase + pair + pairsPerAxis]));
+            float2 kPair = float2(float(k[first]) * kInverse * float(kWeight[axisBase + pair]),
+                                  float(k[second]) * kInverse * float(kWeight[axisBase + pair + pairsPerAxis]));
+            const float exponent = (2.0f / float(axisDim)) * float(pair);
+            const float angle = float(coordinate) / powr(100.0f, exponent);
+            const float cosine = cos(angle);
+            const float sine = sin(angle);
+            q[first] = bfloat(qPair.x * cosine - qPair.y * sine);
+            q[second] = bfloat(qPair.y * cosine + qPair.x * sine);
+            k[first] = bfloat(kPair.x * cosine - kPair.y * sine);
+            k[second] = bfloat(kPair.y * cosine + kPair.x * sine);
+        }
+    }
+    for (uint dimension = 0; dimension < headDim; ++dimension) {
+        v[base + dimension] = bfloat(float(v[base + dimension]) * vInverse);
+    }
+}
+
 /// Same arithmetic as `vision_qkv_norm_rope` on the head-major padded layout the
 /// QKV projections now write: vector `(head, row)` starts at
 /// `(head * rowStride + row) * 80`. Threads walk rows within a head so the
@@ -554,12 +637,109 @@ kernel void vision_pool_standardize_norm(
     }
 }
 
+kernel void vision_pool_norm(
+    device const bfloat* input [[buffer(0)]],
+    device bfloat* output [[buffer(1)]],
+    constant uint& patchWidth [[buffer(2)]],
+    constant uint& patchHeight [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    constant uint& poolSize [[buffer(5)]],
+    uint outputRow [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]]) {
+    const uint outputWidth = patchWidth / poolSize;
+    const uint outputHeight = patchHeight / poolSize;
+    if (outputRow >= outputWidth * outputHeight) return;
+    const uint outputX = outputRow % outputWidth;
+    const uint outputY = outputRow / outputWidth;
+    threadgroup float partials[8];
+    float squares = 0.0f;
+    const float factor = sqrt(float(width)) / float(poolSize * poolSize);
+    for (uint dimension = tid; dimension < width; dimension += 256u) {
+        float pooled = 0.0f;
+        for (uint dy = 0; dy < poolSize; ++dy) {
+            for (uint dx = 0; dx < poolSize; ++dx) {
+                const uint inputRow = (outputY * poolSize + dy) * patchWidth
+                    + outputX * poolSize + dx;
+                pooled += float(input[inputRow * width + dimension]);
+            }
+        }
+        pooled *= factor;
+        output[outputRow * width + dimension] = bfloat(pooled);
+        squares = fma(pooled, pooled, squares);
+    }
+    const float total = vision_simdgroup_sum(squares, lane, simdgroup, partials);
+    const float inverse = rsqrt(total / float(width) + 1e-6f);
+    for (uint dimension = tid; dimension < width; dimension += 256u) {
+        const uint index = outputRow * width + dimension;
+        output[index] = bfloat(float(output[index]) * inverse);
+    }
+}
+
 kernel void vision_bfloat_to_half(
     device const bfloat* input [[buffer(0)]],
     device half* output [[buffer(1)]],
     constant uint& count [[buffer(2)]],
     uint index [[thread_position_in_grid]]) {
     if (index < count) output[index] = half(input[index]);
+}
+
+kernel void vision_half_to_bfloat(
+    device const half* input [[buffer(0)]],
+    device bfloat* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index < count) output[index] = bfloat(input[index]);
+}
+
+kernel void vision_unified_add_position(
+    device bfloat* hidden [[buffer(0)]],
+    device const bfloat* table [[buffer(1)]],
+    device const int2* positions [[buffer(2)]],
+    constant uint& rows [[buffer(3)]],
+    constant uint& width [[buffer(4)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= rows * width) return;
+    const uint row = index / width;
+    const uint dimension = index % width;
+    const int2 position = positions[row];
+    const uint xIndex = (uint(position.x) * 2u) * width + dimension;
+    const uint yIndex = (uint(position.y) * 2u + 1u) * width + dimension;
+    hidden[index] = bfloat(float(hidden[index])
+                           + float(table[xIndex]) + float(table[yIndex]));
+}
+
+kernel void vision_rmsnorm_no_scale_rows(
+    device const bfloat* input [[buffer(0)]],
+    device bfloat* output [[buffer(1)]],
+    constant uint& rows [[buffer(2)]],
+    constant uint& width [[buffer(3)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simdgroup [[simdgroup_index_in_threadgroup]]) {
+    if (row >= rows) return;
+    threadgroup float partials[32];
+    threadgroup float inverseRMS[1];
+    float sum = 0.0f;
+    for (uint d = tid; d < width; d += 288u) {
+        const float value = float(input[row * width + d]);
+        sum = fma(value, value, sum);
+    }
+    sum = simd_sum(sum);
+    if (simdgroup == 0u) partials[lane] = 0.0f;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) partials[simdgroup] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdgroup == 0u) {
+        const float total = simd_sum(partials[lane]);
+        if (lane == 0u) inverseRMS[0] = rsqrt(total / float(width) + 1e-6f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint d = tid; d < width; d += 288u) {
+        output[row * width + d] = bfloat(float(input[row * width + d]) * inverseRMS[0]);
+    }
 }
 
 // MARK: - Qwen3.6 vision
@@ -621,13 +801,9 @@ kernel void vision_qwen_layernorm_rows(
     threadgroup float partials[32];
     threadgroup float sharedMean[1];
     threadgroup float sharedInverse[1];
-    float values[4];
     float sum = 0.0f;
-    const uint base = tid * 4u;
-    for (uint i = 0; i < 4u; ++i) {
-        const uint d = base + i;
-        values[i] = d < width ? float(input[row * width + d]) : 0.0f;
-        sum += values[i];
+    for (uint d = tid; d < width; d += 288u) {
+        sum += float(input[row * width + d]);
     }
     sum = simd_sum(sum);
     if (simdgroup == 0u) partials[lane] = 0.0f;
@@ -640,12 +816,9 @@ kernel void vision_qwen_layernorm_rows(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float squares = 0.0f;
-    for (uint i = 0; i < 4u; ++i) {
-        const uint d = base + i;
-        if (d < width) {
-            const float centered = values[i] - sharedMean[0];
-            squares = fma(centered, centered, squares);
-        }
+    for (uint d = tid; d < width; d += 288u) {
+        const float centered = float(input[row * width + d]) - sharedMean[0];
+        squares = fma(centered, centered, squares);
     }
     squares = simd_sum(squares);
     if (simdgroup == 0u) partials[lane] = 0.0f;
@@ -659,13 +832,11 @@ kernel void vision_qwen_layernorm_rows(
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = 0; i < 4u; ++i) {
-        const uint d = base + i;
-        if (d < width) {
-            const float normalized = (values[i] - sharedMean[0]) * sharedInverse[0];
-            output[row * width + d] = bfloat(
-                normalized * float(weight[d]) + float(bias[d]));
-        }
+    for (uint d = tid; d < width; d += 288u) {
+        const float normalized = (float(input[row * width + d]) - sharedMean[0])
+            * sharedInverse[0];
+        output[row * width + d] = bfloat(
+            normalized * float(weight[d]) + float(bias[d]));
     }
 }
 

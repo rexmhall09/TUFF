@@ -449,6 +449,36 @@ import Darwin
         #expect(manifest.arch.numKVSharedLayers == 2)
     }
 
+    /// The pinned 26B MoE checkpoint's `config.json` sets
+    /// `vocab_size_per_layer_input` to the ordinary vocabulary even though the
+    /// model has no PLE stream, and the repacker copies it faithfully.
+    /// Comparing it strictly against the registered architecture rejected every
+    /// completed 26B install with
+    /// `vocabSizePerLayerInput = 262144; expected 0`.
+    @Test func perLayerVocabIsInformationalWhenPLEIsOff() throws {
+        let toy = ArchConfig.gemma4Toy()
+        #expect(toy.hiddenSizePerLayerInput == 0)
+        let (dir, config) = try Self.writeToyManifest(
+            archOverrides: ["vocabSizePerLayerInput": toy.vocabSize])
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
+        #expect(manifest.arch.vocabSizePerLayerInput == toy.vocabSize)
+    }
+
+    /// The tolerance above is exactly one value wide: only the vocabulary the
+    /// upstream config actually carries. Any other per-layer vocabulary on a
+    /// model without PLE is still rejected -- here by the format validator,
+    /// which screens PLE coherence before the architecture comparison runs.
+    @Test func aWrongPerLayerVocabIsStillRejectedWhenPLEIsOff() throws {
+        let (dir, config) = try Self.writeToyManifest(
+            archOverrides: ["vocabSizePerLayerInput": 999])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(throws: (any Error).self) {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: config)
+        }
+    }
+
     @Test func nonPageAlignedExpertStrideThrows() throws {
         let (dir, toy) = try Self.writeToyManifest(["expertStride": 1024])
         defer { try? FileManager.default.removeItem(at: dir) }

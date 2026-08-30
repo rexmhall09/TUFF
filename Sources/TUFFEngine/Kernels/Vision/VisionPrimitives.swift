@@ -9,7 +9,11 @@ package final class VisionPrimitives {
     private let qkvNormRoPEPadded: MTLComputePipelineState
     private let geglu: MTLComputePipelineState
     private let pool: MTLComputePipelineState
+    private let poolNorm: MTLComputePipelineState
     private let bfloatToHalf: MTLComputePipelineState
+    private let halfToBfloat: MTLComputePipelineState
+    private let unifiedAddPosition: MTLComputePipelineState
+    private let rmsnormNoScale: MTLComputePipelineState
     private let qwenCopyPadded: MTLComputePipelineState
     private let qwenAddPosition: MTLComputePipelineState
     private let qwenLayerNorm: MTLComputePipelineState
@@ -20,6 +24,7 @@ package final class VisionPrimitives {
     private let qwenGELUErfBias: MTLComputePipelineState
 
     package init(context: MetalContext,
+                 headDimension: Int = 72,
                  environment: [String: String] = ProcessInfo.processInfo.environment) throws {
         normalize = try context.pipeline("vision_normalize_patches")
         addPosition = try context.pipeline("vision_add_position")
@@ -38,11 +43,16 @@ package final class VisionPrimitives {
             rmsnorm = try context.pipeline("vision_rmsnorm_rows")
             postnormResidual = try context.pipeline("vision_postnorm_residual")
         }
-        qkvNormRoPE = try context.pipeline("vision_qkv_norm_rope")
+        qkvNormRoPE = try context.pipeline(
+            headDimension == 64 ? "vision_qkv_norm_rope_64" : "vision_qkv_norm_rope")
         qkvNormRoPEPadded = try context.pipeline("vision_qkv_norm_rope_padded")
         geglu = try context.pipeline("vision_geglu")
         pool = try context.pipeline("vision_pool_standardize_norm")
+        poolNorm = try context.pipeline("vision_pool_norm")
         bfloatToHalf = try context.pipeline("vision_bfloat_to_half")
+        halfToBfloat = try context.pipeline("vision_half_to_bfloat")
+        unifiedAddPosition = try context.pipeline("vision_unified_add_position")
+        rmsnormNoScale = try context.pipeline("vision_rmsnorm_no_scale_rows")
         qwenCopyPadded = try context.pipeline("vision_qwen_copy_padded")
         qwenAddPosition = try context.pipeline("vision_qwen_add_interpolated_position")
         qwenLayerNorm = try context.pipeline("vision_qwen_layernorm_rows")
@@ -55,7 +65,8 @@ package final class VisionPrimitives {
 
     package func encodeNormalize(commandBuffer: MTLCommandBuffer,
                                  input: MTLBuffer, output: MTLBuffer,
-                                 rows: Int, paddedRows: Int) {
+                                 rows: Int, paddedRows: Int,
+                                 patchDimension: Int = 768) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(normalize)
         encoder.setBuffer(input, offset: 0, index: 0)
@@ -63,13 +74,17 @@ package final class VisionPrimitives {
         var real = UInt32(rows), padded = UInt32(paddedRows)
         encoder.setBytes(&real, length: 4, index: 2)
         encoder.setBytes(&padded, length: 4, index: 3)
-        dispatch1D(encoder, count: paddedRows * 768, pipeline: normalize)
+        var dimension = UInt32(patchDimension)
+        encoder.setBytes(&dimension, length: 4, index: 4)
+        dispatch1D(encoder, count: paddedRows * patchDimension, pipeline: normalize)
     }
 
     package func encodeAddPosition(commandBuffer: MTLCommandBuffer,
                                    hidden: MTLBuffer,
                                    table: MTLBuffer, tableOffset: Int,
-                                   positions: MTLBuffer, rows: Int) {
+                                   positions: MTLBuffer, rows: Int,
+                                   width: Int = 1_152,
+                                   positionSize: Int = 10_240) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(addPosition)
         encoder.setBuffer(hidden, offset: 0, index: 0)
@@ -77,7 +92,10 @@ package final class VisionPrimitives {
         encoder.setBuffer(positions, offset: 0, index: 2)
         var count = UInt32(rows)
         encoder.setBytes(&count, length: 4, index: 3)
-        dispatch1D(encoder, count: rows * 1_152, pipeline: addPosition)
+        var dimension = UInt32(width), tableSize = UInt32(positionSize)
+        encoder.setBytes(&dimension, length: 4, index: 4)
+        encoder.setBytes(&tableSize, length: 4, index: 5)
+        dispatch1D(encoder, count: rows * width, pipeline: addPosition)
     }
 
     package func encodeRMSNorm(commandBuffer: MTLCommandBuffer,
@@ -100,14 +118,15 @@ package final class VisionPrimitives {
     package func encodePostnormResidual(commandBuffer: MTLCommandBuffer,
                                         residual: MTLBuffer, branch: MTLBuffer,
                                         weightBuffer: MTLBuffer, weightOffset: Int,
-                                        output: MTLBuffer, rows: Int) {
+                                        output: MTLBuffer, rows: Int,
+                                        width: Int = 1_152) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(postnormResidual)
         encoder.setBuffer(residual, offset: 0, index: 0)
         encoder.setBuffer(branch, offset: 0, index: 1)
         encoder.setBuffer(weightBuffer, offset: weightOffset, index: 2)
         encoder.setBuffer(output, offset: 0, index: 3)
-        var rowCount = UInt32(rows), width: UInt32 = 1_152
+        var rowCount = UInt32(rows), width = UInt32(width)
         encoder.setBytes(&rowCount, length: 4, index: 4)
         encoder.setBytes(&width, length: 4, index: 5)
         encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
@@ -172,6 +191,26 @@ package final class VisionPrimitives {
         encoder.endEncoding()
     }
 
+    package func encodePoolNorm(commandBuffer: MTLCommandBuffer,
+                                input: MTLBuffer, output: MTLBuffer,
+                                patchWidth: Int, patchHeight: Int,
+                                width: Int, kernel: Int) {
+        let rows = (patchWidth / kernel) * (patchHeight / kernel)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(poolNorm)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        var patchW = UInt32(patchWidth), patchH = UInt32(patchHeight)
+        var dimension = UInt32(width), poolSize = UInt32(kernel)
+        encoder.setBytes(&patchW, length: 4, index: 2)
+        encoder.setBytes(&patchH, length: 4, index: 3)
+        encoder.setBytes(&dimension, length: 4, index: 4)
+        encoder.setBytes(&poolSize, length: 4, index: 5)
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
     package func encodeBFloatToHalf(commandBuffer: MTLCommandBuffer,
                                     input: MTLBuffer, output: MTLBuffer,
                                     count: Int) {
@@ -182,6 +221,49 @@ package final class VisionPrimitives {
         var value = UInt32(count)
         encoder.setBytes(&value, length: 4, index: 2)
         dispatch1D(encoder, count: count, pipeline: bfloatToHalf)
+    }
+
+    package func encodeHalfToBFloat(commandBuffer: MTLCommandBuffer,
+                                    input: MTLBuffer, output: MTLBuffer,
+                                    count: Int) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(halfToBfloat)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        var value = UInt32(count)
+        encoder.setBytes(&value, length: 4, index: 2)
+        dispatch1D(encoder, count: count, pipeline: halfToBfloat)
+    }
+
+    package func encodeUnifiedAddPosition(
+        commandBuffer: MTLCommandBuffer,
+        hidden: MTLBuffer, table: MTLBuffer, tableOffset: Int,
+        positions: MTLBuffer, rows: Int, width: Int
+    ) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(unifiedAddPosition)
+        encoder.setBuffer(hidden, offset: 0, index: 0)
+        encoder.setBuffer(table, offset: tableOffset, index: 1)
+        encoder.setBuffer(positions, offset: 0, index: 2)
+        var rowCount = UInt32(rows), dimension = UInt32(width)
+        encoder.setBytes(&rowCount, length: 4, index: 3)
+        encoder.setBytes(&dimension, length: 4, index: 4)
+        dispatch1D(encoder, count: rows * width, pipeline: unifiedAddPosition)
+    }
+
+    package func encodeRMSNormNoScale(commandBuffer: MTLCommandBuffer,
+                                      input: MTLBuffer, output: MTLBuffer,
+                                      rows: Int, width: Int) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(rmsnormNoScale)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        var rowCount = UInt32(rows), dimension = UInt32(width)
+        encoder.setBytes(&rowCount, length: 4, index: 2)
+        encoder.setBytes(&dimension, length: 4, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 288, height: 1, depth: 1))
+        encoder.endEncoding()
     }
 
     package func encodeQwenCopyPadded(

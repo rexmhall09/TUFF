@@ -5,6 +5,7 @@ public final class VisionAttention {
     public enum Variant: String, Sendable {
         case native72
         case native72Q16
+        case native64
         case mppTensorOps72
         case mlxPadded80
         case mlxSteel80
@@ -80,10 +81,26 @@ public final class VisionAttention {
     public init(context: MetalContext,
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 scoreScale: Float = 1,
+                headDimension: Int = VisionAttention.headDimension,
                 allowFusedPaddedLayout: Bool = true) throws {
         precondition(scoreScale.isFinite && scoreScale > 0)
         self.scoreScale = scoreScale
-        if let path = environment["TUFF_VISION_MLX_METALLIB"] {
+        if headDimension == 64 {
+            variant = .native64
+            queryTile = 8
+            pipeline = try context.pipeline("vision_attention_online_64")
+            nativeQueryTile = 8
+            mlxPipeline = nil
+            padPipeline = nil
+            unpadPipeline = nil
+            mlxQ = nil
+            mlxK = nil
+            mlxV = nil
+            mlxOutput = nil
+            mppPadded = false
+            usesFusedPaddedLayout = false
+            softmaxPhase = .serial
+        } else if let path = environment["TUFF_VISION_MLX_METALLIB"] {
             variant = .mlxSteel80
             queryTile = 32
             pipeline = try context.pipeline("vision_attention_online_72")

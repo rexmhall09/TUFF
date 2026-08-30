@@ -134,6 +134,7 @@ public final class VisionRuntime {
     private let usesBF16Projector: Bool
     private let splitsStagesForProfile: Bool
     private let fusesGeGLU: Bool
+    private let unifiedPatchProjectorKernel: MPPPrefillInt4QMM
     public private(set) var lastStageProfile: VisionStageProfile?
     /// Mapped weight regions retained across images under `.keepReady`. Mapping
     /// and first-touching the 1.08 GB the tower reads costs the same every image
@@ -156,6 +157,15 @@ public final class VisionRuntime {
     /// costs mappings and page-cache residency, not process footprint.
     @discardableResult
     public func prewarmWeightRegions() throws -> Int {
+        if config.architecture == .gemma4Unified12B {
+            for names in [Self.unifiedPatchTensorNames, Self.unifiedProjectorTensorNames] {
+                let key = names.first ?? ""
+                guard cachedRegions[key] == nil else { continue }
+                cachedRegions[key] = try store.mapRegion(
+                    tensorNames: names, device: context.device)
+            }
+            return retainedWeightBytes
+        }
         for layer in 0..<config.numLayers {
             let prefix = config.family == .gemma4
                 ? "vision_tower.encoder.layers.\(layer)."
@@ -175,8 +185,11 @@ public final class VisionRuntime {
         // in this pack, and an `embed_vision.` group whose key differed from the
         // projector's: the patch embedder was never prewarmed and the projector
         // was mapped a second time and then held for the life of the runtime.
+        let gemmaProjector = config.usesESeriesVisionTower
+            ? Array(Self.projectorTensorNames.suffix(3))
+            : Self.projectorTensorNames
         let fixedGroups = config.family == .gemma4
-            ? [Self.patchEmbedderTensorNames, Self.projectorTensorNames]
+            ? [Self.patchEmbedderTensorNames, gemmaProjector]
             : [Self.qwenPatchTensorNames, Self.qwenMergerTensorNames]
         for names in fixedGroups {
             let key = names.first ?? ""
@@ -252,6 +265,7 @@ public final class VisionRuntime {
             store: store,
             useLease: useLease,
             family: textFamily,
+            modelVariant: baseline.variant,
             environment: runtimeEnvironment)
     }
 
@@ -310,24 +324,35 @@ public final class VisionRuntime {
     init(context: MetalContext, store: VisionWeightStore,
                  useLease: VisionPackUseLease,
                  family: ModelFamily = .gemma4,
+                 modelVariant: ModelVariant? = nil,
                  environment: [String: String]) throws {
         self.context = context
         self.store = store
         self.useLease = useLease
-        self.config = VisionConfig(family: family)
+        self.config = VisionConfig(family: family, modelVariant: modelVariant)
+        let shape = config
         let linear = try VisionLinearBF16(context: context, environment: environment)
         self.linear = linear
-        self.primitives = try VisionPrimitives(context: context, environment: environment)
+        self.primitives = try VisionPrimitives(
+            context: context,
+            headDimension: shape.headDimension > 0 ? shape.headDimension : 72,
+            environment: environment)
         // The fused-padded-layout decision has one owner: the attention object,
         // told here whether the linear path can write the padded head-major
         // store. Re-deriving the AND at encode time let the two sides disagree
         // and run a different kernel than the one diagnostics reported.
-        let shape = config
+        var attentionEnvironment = environment
+        if shape.architecture == .gemma4Unified12B {
+            attentionEnvironment["TUFF_VISION_ATTENTION_Q8"] = "1"
+            attentionEnvironment.removeValue(forKey: "TUFF_VISION_ATTENTION_MPP")
+        }
         self.attention = try VisionAttention(
-            context: context, environment: environment,
-            scoreScale: shape.attentionScale,
+            context: context, environment: attentionEnvironment,
+            scoreScale: max(shape.attentionScale, 1),
+            headDimension: max(shape.headDimension, 64),
             allowFusedPaddedLayout: linear.supportsPaddedHeadStore(
-                n: shape.hiddenSize, k: shape.hiddenSize))
+                n: shape.hiddenSize, k: shape.hiddenSize)
+                && shape.headDimension == VisionAttention.headDimension)
         self.usesBF16Projector = context.device.supportsFamily(.apple10)
             && environment["TUFF_VISION_FP16_PROJECTOR"] != "1"
         self.splitsStagesForProfile =
@@ -350,6 +375,8 @@ public final class VisionRuntime {
             variant: usesBF16Projector
                 ? .apple10BF16
                 : context.device.supportsFamily(.apple10) ? .apple10V1 : .control)
+        self.unifiedPatchProjectorKernel = MPPPrefillInt4QMM(
+            context: context, variant: .apple10BF16Output)
     }
 
     private let projectorKernel: MPPPrefillInt4QMM
@@ -380,6 +407,24 @@ public final class VisionRuntime {
         "vision_tower.merger.linear_fc1.bias",
         "vision_tower.merger.linear_fc2.weight",
         "vision_tower.merger.linear_fc2.bias",
+    ]
+    static let unifiedPatchTensorNames = [
+        "vision_embedder.patch_ln1.weight",
+        "vision_embedder.patch_ln1.bias",
+        "vision_embedder.patch_dense.weight",
+        "vision_embedder.patch_dense.scales",
+        "vision_embedder.patch_dense.biases",
+        "vision_embedder.patch_dense.bias",
+        "vision_embedder.patch_ln2.weight",
+        "vision_embedder.patch_ln2.bias",
+        "vision_embedder.pos_embedding",
+        "vision_embedder.pos_norm.weight",
+        "vision_embedder.pos_norm.bias",
+    ]
+    static let unifiedProjectorTensorNames = [
+        "embed_vision.embedding_projection.weight",
+        "embed_vision.embedding_projection.scales",
+        "embed_vision.embedding_projection.biases",
     ]
 
     public func preprocessImage(at fileURL: URL) throws -> VisionPixelBuffer {
@@ -529,6 +574,17 @@ public final class VisionRuntime {
                 retainsWeightRegions: retainsWeightRegions,
                 checkCancellation: checkCancellation)
         }
+        if config.architecture == .gemma4Unified12B {
+            return try encodeUnified12BPreparedPatches(
+                patchesBF16: patchesBF16,
+                positionsInt32x2: positionsInt32x2,
+                patchGridWidth: patchGridWidth,
+                patchGridHeight: patchGridHeight,
+                expertResidencyTransition: expertResidencyTransition,
+                preprocessing: preprocessing,
+                retainsWeightRegions: retainsWeightRegions,
+                checkCancellation: checkCancellation)
+        }
 
         let wallStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         // The QKV projections write the padded head-major layout directly when the
@@ -658,7 +714,8 @@ public final class VisionRuntime {
                 primitives.encodeNormalize(commandBuffer: commandBuffer,
                                            input: patchesBF16,
                                            output: scratch.normalizedPatches,
-                                           rows: rows, paddedRows: scratch.paddedRows)
+                                           rows: rows, paddedRows: scratch.paddedRows,
+                                           patchDimension: config.patchDimension)
                 linear.encode(
                     commandBuffer: commandBuffer,
                     input: scratch.normalizedPatches,
@@ -669,7 +726,9 @@ public final class VisionRuntime {
                     commandBuffer: commandBuffer,
                     hidden: scratch.hiddenA,
                     table: fixed.buffer, tableOffset: try fixed.offset(of: positionTable),
-                    positions: positionsInt32x2, rows: rows)
+                    positions: positionsInt32x2, rows: rows,
+                    width: config.hiddenSize,
+                    positionSize: config.positionEmbeddingSize)
             }
             if let shared {
                 try commitPipelined(shared, retaining: fixed)
@@ -695,7 +754,8 @@ public final class VisionRuntime {
                     commandBuffer: commandBuffer,
                     input: scratch.hiddenA, output: scratch.hiddenB,
                     weightBuffer: weights.buffer,
-                    weightOffset: try offset("input_layernorm.weight"), rows: rows)
+                    weightOffset: try offset("input_layernorm.weight"), rows: rows,
+                    width: config.hiddenSize)
             }
             try stage(.linear, on: shared) { commandBuffer in
                 for (suffix, output) in [
@@ -769,12 +829,14 @@ public final class VisionRuntime {
                     residual: scratch.hiddenA, branch: scratch.q,
                     weightBuffer: weights.buffer,
                     weightOffset: try offset("post_attention_layernorm.weight"),
-                    output: scratch.hiddenB, rows: rows)
+                    output: scratch.hiddenB, rows: rows,
+                    width: config.hiddenSize)
                 primitives.encodeRMSNorm(
                     commandBuffer: commandBuffer,
                     input: scratch.hiddenB, output: scratch.q,
                     weightBuffer: weights.buffer,
-                    weightOffset: try offset("pre_feedforward_layernorm.weight"), rows: rows)
+                    weightOffset: try offset("pre_feedforward_layernorm.weight"), rows: rows,
+                    width: config.hiddenSize)
             }
             try stage(.linear, on: shared) { commandBuffer in
                 linear.encode(
@@ -817,7 +879,8 @@ public final class VisionRuntime {
                     residual: scratch.hiddenB, branch: scratch.q,
                     weightBuffer: weights.buffer,
                     weightOffset: try offset("post_feedforward_layernorm.weight"),
-                    output: scratch.hiddenA, rows: rows)
+                    output: scratch.hiddenA, rows: rows,
+                    width: config.hiddenSize)
             }
             if let shared {
                 try commitPipelined(shared, retaining: weights)
@@ -827,7 +890,9 @@ public final class VisionRuntime {
         let outputRows = (patchGridWidth / config.poolingKernel)
             * (patchGridHeight / config.poolingKernel)
         try checkCancellation()
-        let projectorNames = Self.projectorTensorNames
+        let projectorNames = config.usesESeriesVisionTower
+            ? Array(Self.projectorTensorNames.suffix(3))
+            : Self.projectorTensorNames
         let projector = try mapRegion(projectorNames)
         guard let features = context.device.makeBuffer(
             length: outputRows * config.textHiddenSize * MemoryLayout<Float16>.stride,
@@ -841,14 +906,25 @@ public final class VisionRuntime {
         let shared = splitsStagesForProfile ? nil : try makeCommandBuffer()
         var projectorMetadata: MPPPrefillInt4QMM.PathMetadata?
         try stage(.poolProjector, on: shared) { commandBuffer in
-            primitives.encodePool(
-                commandBuffer: commandBuffer,
-                input: scratch.hiddenA,
-                weights: projector.buffer,
-                stdBiasOffset: try projector.offset(of: "vision_tower.std_bias"),
-                stdScaleOffset: try projector.offset(of: "vision_tower.std_scale"),
-                output: scratch.attention,
-                patchWidth: patchGridWidth, patchHeight: patchGridHeight)
+            if config.usesESeriesVisionTower {
+                primitives.encodePoolNorm(
+                    commandBuffer: commandBuffer,
+                    input: scratch.hiddenA,
+                    output: scratch.attention,
+                    patchWidth: patchGridWidth,
+                    patchHeight: patchGridHeight,
+                    width: config.hiddenSize,
+                    kernel: config.poolingKernel)
+            } else {
+                primitives.encodePool(
+                    commandBuffer: commandBuffer,
+                    input: scratch.hiddenA,
+                    weights: projector.buffer,
+                    stdBiasOffset: try projector.offset(of: "vision_tower.std_bias"),
+                    stdScaleOffset: try projector.offset(of: "vision_tower.std_scale"),
+                    output: scratch.attention,
+                    patchWidth: patchGridWidth, patchHeight: patchGridHeight)
+            }
             if !usesBF16Projector {
                 primitives.encodeBFloatToHalf(
                     commandBuffer: commandBuffer,
@@ -910,6 +986,175 @@ public final class VisionRuntime {
                                   gpuWaitNanoseconds: gpuWaitNanoseconds,
                                   totalNanoseconds: clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                                       - wallStarted))
+    }
+
+    /// Gemma 4 Unified folds the entire image encoder into two quantized
+    /// projections around normalization and factorized 2-D position stages.
+    /// It deliberately bypasses the legacy SigLIP tower: the two formats share
+    /// a family name but no layer graph or tensor naming contract.
+    private func encodeUnified12BPreparedPatches(
+        patchesBF16: MTLBuffer,
+        positionsInt32x2: MTLBuffer,
+        patchGridWidth: Int,
+        patchGridHeight: Int,
+        expertResidencyTransition: VisionExpertResidencyTransition?,
+        preprocessing: VisionPreprocessingReport?,
+        retainsWeightRegions: Bool,
+        checkCancellation: () throws -> Void
+    ) throws -> VisionFeatures {
+        let wallStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let rows = patchGridWidth * patchGridHeight
+        func buffer(_ elements: Int, shared: Bool = false) throws -> MTLBuffer {
+            guard let value = context.device.makeBuffer(
+                length: elements * MemoryLayout<UInt16>.stride,
+                options: shared ? .storageModeShared : .storageModePrivate) else {
+                throw MetalError.noDevice
+            }
+            return value
+        }
+        let patchNormalized = try buffer(rows * config.patchDimension)
+        let qmmInput = try buffer(rows * config.patchDimension)
+        let denseBF16 = try buffer(rows * config.hiddenSize)
+        let hiddenA = try buffer(rows * config.hiddenSize)
+        let hiddenB = try buffer(rows * config.hiddenSize)
+        let features = try buffer(rows * config.textHiddenSize, shared: true)
+        let allocationFinished = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+
+        var mapNanoseconds: UInt64 = 0
+        func map(_ names: [String]) throws -> VisionMappedWeightRegion {
+            let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            defer { mapNanoseconds += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started }
+            let key = names.first ?? ""
+            if retainsWeightRegions, let cached = cachedRegions[key] { return cached }
+            let region = try store.mapRegion(tensorNames: names, device: context.device)
+            if retainsWeightRegions { cachedRegions[key] = region }
+            return region
+        }
+
+        try checkCancellation()
+        let patch = try map(Self.unifiedPatchTensorNames)
+        let projector = try map(Self.unifiedProjectorTensorNames)
+        guard projectorKernel.isAvailable, unifiedPatchProjectorKernel.isAvailable else {
+            throw VisionRuntimeError.unsupportedKernel(
+                unifiedPatchProjectorKernel.unavailableReason
+                    ?? projectorKernel.unavailableReason
+                    ?? "INT4 image projection unavailable")
+        }
+        let commandBuffer = try makeCommandBuffer()
+        primitives.encodeQwenLayerNorm(
+            commandBuffer: commandBuffer,
+            input: patchesBF16, output: patchNormalized,
+            weights: patch.buffer,
+            weightOffset: try patch.offset(of: "vision_embedder.patch_ln1.weight"),
+            biasOffset: try patch.offset(of: "vision_embedder.patch_ln1.bias"),
+            rows: rows, width: config.patchDimension)
+        if !context.device.supportsFamily(.apple10) {
+            primitives.encodeBFloatToHalf(
+                commandBuffer: commandBuffer,
+                input: patchNormalized, output: qmmInput,
+                count: rows * config.patchDimension)
+        }
+        let patchMetadata = unifiedPatchProjectorKernel.encode(
+            commandBuffer: commandBuffer,
+            weights: patch.buffer,
+            weightsOffset: try patch.offset(of: "vision_embedder.patch_dense.weight"),
+            scales: patch.buffer,
+            scalesOffset: try patch.offset(of: "vision_embedder.patch_dense.scales"),
+            biases: patch.buffer,
+            biasesOffset: try patch.offset(of: "vision_embedder.patch_dense.biases"),
+            x: context.device.supportsFamily(.apple10) ? patchNormalized : qmmInput,
+            y: denseBF16,
+            m: rows, n: config.hiddenSize, k: config.patchDimension)
+        guard patchMetadata.path != .fallback else {
+            throw VisionRuntimeError.unsupportedKernel("unified patch projection fell back")
+        }
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+            throw VisionRuntimeError.unsupportedKernel("unified BF16 copy unavailable")
+        }
+        blit.copy(from: denseBF16, sourceOffset: 0, to: hiddenA,
+                  destinationOffset: 0, size: denseBF16.length)
+        blit.endEncoding()
+        primitives.encodeQwenAddBias(
+            commandBuffer: commandBuffer,
+            values: hiddenA, weights: patch.buffer,
+            biasOffset: try patch.offset(of: "vision_embedder.patch_dense.bias"),
+            count: rows * config.hiddenSize, width: config.hiddenSize)
+        primitives.encodeQwenLayerNorm(
+            commandBuffer: commandBuffer,
+            input: hiddenA, output: hiddenB,
+            weights: patch.buffer,
+            weightOffset: try patch.offset(of: "vision_embedder.patch_ln2.weight"),
+            biasOffset: try patch.offset(of: "vision_embedder.patch_ln2.bias"),
+            rows: rows, width: config.hiddenSize)
+        primitives.encodeUnifiedAddPosition(
+            commandBuffer: commandBuffer,
+            hidden: hiddenB, table: patch.buffer,
+            tableOffset: try patch.offset(of: "vision_embedder.pos_embedding"),
+            positions: positionsInt32x2, rows: rows, width: config.hiddenSize)
+        primitives.encodeQwenLayerNorm(
+            commandBuffer: commandBuffer,
+            input: hiddenB, output: hiddenA,
+            weights: patch.buffer,
+            weightOffset: try patch.offset(of: "vision_embedder.pos_norm.weight"),
+            biasOffset: try patch.offset(of: "vision_embedder.pos_norm.bias"),
+            rows: rows, width: config.hiddenSize)
+        primitives.encodeRMSNormNoScale(
+            commandBuffer: commandBuffer,
+            input: hiddenA, output: hiddenB,
+            rows: rows, width: config.hiddenSize)
+        if !usesBF16Projector {
+            primitives.encodeBFloatToHalf(
+                commandBuffer: commandBuffer,
+                input: hiddenB, output: qmmInput,
+                count: rows * config.hiddenSize)
+        }
+        let projectorMetadata = projectorKernel.encode(
+            commandBuffer: commandBuffer,
+            weights: projector.buffer,
+            weightsOffset: try projector.offset(
+                of: "embed_vision.embedding_projection.weight"),
+            scales: projector.buffer,
+            scalesOffset: try projector.offset(
+                of: "embed_vision.embedding_projection.scales"),
+            biases: projector.buffer,
+            biasesOffset: try projector.offset(
+                of: "embed_vision.embedding_projection.biases"),
+            x: usesBF16Projector ? hiddenB : qmmInput,
+            y: features,
+            m: rows, n: config.textHiddenSize, k: config.hiddenSize)
+        guard projectorMetadata.path != .fallback else {
+            throw VisionRuntimeError.unsupportedKernel("unified embedding projection fell back")
+        }
+        let waitStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        let waitNanoseconds = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - waitStarted
+        if let error = commandBuffer.error {
+            throw VisionRuntimeError.commandFailed(String(describing: error))
+        }
+        let gpuNanoseconds = UInt64(
+            max(0, commandBuffer.gpuEndTime - commandBuffer.gpuStartTime)
+                * 1_000_000_000)
+        let scratchBytes = patchNormalized.length + qmmInput.length
+            + denseBF16.length + hiddenA.length + hiddenB.length
+        return VisionFeatures(
+            buffer: features,
+            tokenCount: rows,
+            hiddenSize: config.textHiddenSize,
+            family: config.family,
+            patchGridWidth: patchGridWidth,
+            patchGridHeight: patchGridHeight,
+            gpuNanoseconds: gpuNanoseconds,
+            scratchBytes: scratchBytes,
+            attentionVariant: attention.variant,
+            projectorPath: projectorMetadata.path,
+            expertResidencyTransition: expertResidencyTransition,
+            preprocessing: preprocessing,
+            wall: VisionWallBreakdown(
+                scratchAllocationNanoseconds: allocationFinished - wallStarted,
+                weightMapNanoseconds: mapNanoseconds,
+                gpuWaitNanoseconds: waitNanoseconds,
+                totalNanoseconds: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - wallStarted))
     }
 
     /// Qwen3.6's tower shares the Gemma allocation, GEMM, attention and pack

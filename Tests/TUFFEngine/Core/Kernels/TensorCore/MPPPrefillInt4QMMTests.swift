@@ -309,6 +309,57 @@ private let mppTensorOpsAvailable: Bool = {
 
     @Test(.enabled(if: mppTensorOpsAvailable,
                    "Requires runtime MPP TensorOps support"))
+    func bf16OutputProjectorPreservesValuesAboveFP16Range() throws {
+        let context = try MetalContext()
+        let m = 1, n = 32, k = 64
+        let packed = [UInt8](repeating: 0xff, count: n * k / 2)
+        let scales = [UInt16](repeating: Quantization.bf16Bits(1),
+                              count: n * k / Quantization.groupSize)
+        let biases = [UInt16](repeating: Quantization.bf16Bits(0),
+                              count: scales.count)
+        let apple10 = context.device.supportsFamily(.apple10)
+        let activationBits = [UInt16](
+            repeating: apple10
+                ? Quantization.bf16Bits(100)
+                : Float16(100).bitPattern,
+            count: m * k)
+        guard let weights = Self.makeBuffer(device: context.device, values: packed),
+              let scaleBuffer = Self.makeBuffer(device: context.device, values: scales),
+              let biasBuffer = Self.makeBuffer(device: context.device, values: biases),
+              let x = Self.makeBuffer(device: context.device, values: activationBits),
+              let y = context.device.makeBuffer(length: m * n * 2,
+                                                 options: .storageModeShared),
+              let commandBuffer = context.queue.makeCommandBuffer() else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+        let candidate = MPPPrefillInt4QMM(
+            context: context, variant: .apple10BF16Output)
+        #expect(candidate.isAvailable, "\(candidate.unavailableReason ?? "unknown error")")
+        let metadata = candidate.encode(
+            commandBuffer: commandBuffer,
+            weights: weights, scales: scaleBuffer, biases: biasBuffer,
+            x: x, y: y, m: m, n: n, k: k)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        #expect(commandBuffer.error == nil)
+        #expect(metadata.path == (apple10
+            ? .affineThreadgroupBF16OutputApple10
+            : .affineThreadgroupF16InputBF16Output))
+        let output = y.contents().assumingMemoryBound(to: UInt16.self)
+        for index in 0..<(m * n) {
+            let value = Quantization.bf16ToFloat(output[index])
+            #expect(value.isFinite)
+            #expect(value > Float(Float16.greatestFiniteMagnitude),
+                    "output \(index) was clipped to FP16: \(value)")
+            #expect(abs(value - 96_000) <= 1_000,
+                    "output \(index) expected about 96,000, got \(value)")
+        }
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"))
     func selectedProductionAttentionShapesMatchCurrentPolicy() throws {
         let context = try MetalContext()
         let candidate = MPPPrefillInt4QMM(context: context)

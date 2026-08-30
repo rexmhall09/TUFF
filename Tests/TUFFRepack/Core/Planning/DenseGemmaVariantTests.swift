@@ -9,18 +9,27 @@ import Testing
 /// E4B's architecture and a complete, correct download was rejected as
 /// "completed install did not pass metadata validation".
 @Suite struct DenseGemmaVariantTests {
-    @Test func e2bShapesAreNotLabelledE4B() {
-        #expect(denseGemmaVariant(hiddenSize: 1_536, numLayers: 35) == .gemma4_E2B)
+    @Test func e2bShapesAreNotLabelledE4B() throws {
+        #expect(try denseGemmaVariant(hiddenSize: 1_536, numLayers: 35) == .gemma4_E2B)
     }
 
-    @Test func e4bKeepsItsName() {
-        #expect(denseGemmaVariant(hiddenSize: 2_560, numLayers: 42) == .gemma4_E4B)
+    @Test func e4bKeepsItsName() throws {
+        #expect(try denseGemmaVariant(hiddenSize: 2_560, numLayers: 42) == .gemma4_E4B)
     }
 
-    /// Both dimensions have to agree before a checkpoint is called E2B, so a
-    /// future dense Gemma sharing one of them cannot inherit the name.
-    @Test func aPartialShapeMatchDoesNotClaimE2B() {
-        #expect(denseGemmaVariant(hiddenSize: 1_536, numLayers: 42) == .gemma4_E4B)
-        #expect(denseGemmaVariant(hiddenSize: 2_560, numLayers: 35) == .gemma4_E4B)
+    @Test func qat12BHasAnExplicitIdentity() throws {
+        #expect(try denseGemmaVariant(hiddenSize: 3_840, numLayers: 48)
+                == .gemma4_12B_QAT)
+    }
+
+    /// Shape typos and future variants fail closed instead of silently
+    /// inheriting another dense architecture's runtime contract.
+    @Test func partialOrUnknownShapeMatchesAreRejected() {
+        #expect(throws: RepackError.self) {
+            try denseGemmaVariant(hiddenSize: 1_536, numLayers: 42)
+        }
+        #expect(throws: RepackError.self) {
+            try denseGemmaVariant(hiddenSize: 2_560, numLayers: 35)
+        }
     }
 }
