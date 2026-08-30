@@ -263,8 +263,18 @@ public enum ManifestReader {
         try check("hiddenActivation",    a.hiddenActivation,    e.hiddenActivation)
         try check("hiddenSizePerLayerInput",
                   a.hiddenSizePerLayerInput ?? 0, e.hiddenSizePerLayerInput)
-        try check("vocabSizePerLayerInput",
-                  a.vocabSizePerLayerInput ?? 0, e.vocabSizePerLayerInput)
+        // The production 26B MoE config carries `vocab_size_per_layer_input`
+        // equal to the ordinary vocabulary even though that model has no PLE
+        // stream, and GTurboManifestV1.validate deliberately accepts that
+        // spelling. PLE is switched on by a non-zero *hidden* width, so when it
+        // is off this value is informational and both spellings describe the
+        // same architecture. Comparing it strictly rejected every completed 26B
+        // install with `vocabSizePerLayerInput = 262144; expected 0`.
+        let actualPerLayerVocab = a.vocabSizePerLayerInput ?? 0
+        if e.hiddenSizePerLayerInput > 0 || actualPerLayerVocab != e.vocabSize {
+            try check("vocabSizePerLayerInput",
+                      actualPerLayerVocab, e.vocabSizePerLayerInput)
+        }
         try check("ffnDoubleWideFromLayer",
                   a.ffnDoubleWideFromLayer ?? -1, e.ffnDoubleWideFromLayer)
         try check("numKVSharedLayers",
