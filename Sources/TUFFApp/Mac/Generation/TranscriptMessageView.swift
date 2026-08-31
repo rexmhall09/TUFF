@@ -38,7 +38,9 @@ struct TranscriptMessageView: View {
     @State private var promptHeight: CGFloat = 0
     @State private var responseHeight: CGFloat = 0
     @State private var liveHeight: CGFloat = 0
-    @State private var copied = false
+    /// Which of the two copy buttons last fired, so only that one shows the
+    /// checkmark. A single flag lit both.
+    @State private var copied: AnswerCopyFormat?
 
     struct LiveResponse {
         let mailbox: GenerationTranscriptMailbox?
@@ -105,16 +107,24 @@ struct TranscriptMessageView: View {
         }
     }
 
-    /// Copy, regenerate and continue, beside the name of whoever produced the
-    /// answer. They used to sit under it and appear only on hover, which meant
-    /// the reader had to know they were there before they would show.
+    /// Copy, copy as Markdown, regenerate and continue, beside the name of
+    /// whoever produced the answer. They used to sit under it and appear only
+    /// on hover, which meant the reader had to know they were there before
+    /// they would show.
     private var answerActions: some View {
         HStack(spacing: 6) {
             MessageActionButton(
-                symbol: copied ? "checkmark" : "doc.on.doc",
-                help: copied ? "Copied" : "Copy this answer",
-                tint: copied ? TUFFMacTheme.accentColor : nil,
-                action: copyResponse)
+                symbol: copied == .text ? "checkmark" : "doc.on.doc",
+                help: copied == .text ? "Copied" : "Copy this answer",
+                tint: copied == .text ? TUFFMacTheme.accentColor : nil,
+                action: { copyResponse(.text) })
+            MessageActionButton(
+                symbol: copied == .markdown
+                    ? "checkmark" : "chevron.left.forwardslash.chevron.right",
+                help: copied == .markdown
+                    ? "Copied" : "Copy this answer as Markdown",
+                tint: copied == .markdown ? TUFFMacTheme.accentColor : nil,
+                action: { copyResponse(.markdown) })
             if let actions {
                 MessageActionButton(
                     symbol: "arrow.clockwise",
@@ -130,10 +140,10 @@ struct TranscriptMessageView: View {
             }
         }
         .task(id: copied) {
-            guard copied else { return }
+            guard copied != nil else { return }
             try? await Task.sleep(for: .seconds(1.5))
             guard !Task.isCancelled else { return }
-            copied = false
+            copied = nil
         }
     }
 
@@ -159,11 +169,12 @@ struct TranscriptMessageView: View {
         }
     }
 
-    private func copyResponse() {
-        let plain = renderer.plainText(response)
+    private func copyResponse(_ format: AnswerCopyFormat) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(plain, forType: .string)
-        copied = true
+        NSPasteboard.general.setString(
+            format.pasteboardText(for: response, renderer: renderer),
+            forType: .string)
+        copied = format
     }
 }
 
