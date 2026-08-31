@@ -12,7 +12,7 @@ import Testing
     }
 
     @Test func cloneBuildFallsBackToTheCompiledVersion() {
-        #expect(AboutPanelPresentation.fallbackShortVersion == "3.0.0")
+        #expect(AboutPanelPresentation.fallbackShortVersion == "3.0.1")
         #expect(AboutPanelPresentation.shortVersion(infoDictionary: nil)
             == AboutPanelPresentation.fallbackShortVersion)
         #expect(AboutPanelPresentation.shortVersion(infoDictionary: [:])
