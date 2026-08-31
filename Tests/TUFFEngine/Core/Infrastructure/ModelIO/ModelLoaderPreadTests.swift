@@ -6,6 +6,30 @@ import Metal
 /// `Model.load(streamingMode:)` integration for the bounded pread cache.
 @Suite struct ModelLoaderPreadTests {
 
+    @Test func cachedFetchOverloadsPreserveRequestedOrderAndBuffers() async throws {
+        let dir = try ModelLoaderTests.writeToySynthetic()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let model = try Model.load(directoryURL: dir, device: device,
+                                   expecting: .gemma4Toy(),
+                                   streamingMode: .pread(slotCount: 3))
+        let warmed = try await model.fetchRoutedExperts(layer: 1, experts: [4, 2])
+        let hits = try await model.fetchRoutedExperts(layer: 1, experts: [2, 4])
+        #expect(hits[0].buffer === warmed[1].buffer)
+        #expect(hits[1].buffer === warmed[0].buffer)
+        let plan = try #require(try model.planRoutedExperts(layer: 1, experts: [4, 2]))
+        #expect(plan.misses.isEmpty)
+        let plannedHits = try await model.fetchRoutedExperts(plan: plan)
+        for index in warmed.indices {
+            #expect(plannedHits[index].buffer === warmed[index].buffer)
+            #expect(Self.readBytes(plannedHits[index]) == Self.readBytes(warmed[index]))
+        }
+        let mixed = try await model.fetchRoutedExperts(layer: 1, experts: [4, 5])
+        #expect(mixed[0].buffer === warmed[0].buffer)
+        #expect(Self.readBytes(mixed[1])[1] == 5)
+        #expect(try await model.fetchRoutedExperts(layer: 1, experts: []).isEmpty)
+    }
+
     private static func readBytes(_ view: TensorView) -> [UInt8] {
         let base = view.buffer.contents().advanced(by: Int(view.offset))
         return [UInt8](UnsafeRawBufferPointer(start: base, count: Int(view.length)))

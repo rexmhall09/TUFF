@@ -99,6 +99,9 @@ final class Sampler {
     private let topK64Kernel: SampleTopK64
     let vocab: Int
     private let logitSoftcap: Float
+    // One bit per vocabulary entry: 32 KiB at the largest supported vocab.
+    // Reused on every penalty pass instead of allocating and hashing a Set.
+    private var penaltySeenWords: [UInt64]
 
     init(context: MetalContext, vocab: Int = 262_144,
                 logitSoftcap: Float = 30.0) throws {
@@ -107,6 +110,7 @@ final class Sampler {
         self.topK64Kernel = try SampleTopK64(context: context, vocab: vocab)
         self.vocab = vocab
         self.logitSoftcap = logitSoftcap
+        self.penaltySeenWords = [UInt64](repeating: 0, count: (vocab + 63) / 64)
     }
 
     /// Encode the sampler onto `commandBuffer`. `logits` is FP16 [vocab],
@@ -177,26 +181,32 @@ final class Sampler {
                                                history: [Int32],
                                                penalty: Float) {
         let ptr = logits.contents().bindMemory(to: Float16.self, capacity: vocab)
-        var seen = Set<Int32>()
-        seen.reserveCapacity(history.count)
-        for id in history {
-            guard id >= 0 && Int(id) < vocab, seen.insert(id).inserted else { continue }
-            let i = Int(id)
-            let z = Float(ptr[i])
-            let penalized: Float
-            if logitSoftcap > 0 {
-                let capped = logitSoftcap * tanhf(z / logitSoftcap)
-                let cappedPenalized = capped > 0 ? capped / penalty : capped * penalty
-                // A saturated negative logit times the penalty can leave the
-                // softcap's open interval; clamp inside it so atanh stays
-                // finite.
-                let limit = logitSoftcap * 0.9999
-                let clamped = max(min(cappedPenalized, limit), -limit)
-                penalized = logitSoftcap * atanhf(clamped / logitSoftcap)
-            } else {
-                penalized = z > 0 ? z / penalty : z * penalty
+        penaltySeenWords.withUnsafeMutableBufferPointer { seen in
+            // Histories can shrink or change between calls; no prefix is assumed.
+            seen.initialize(repeating: 0)
+            for id in history {
+                guard id >= 0 && Int(id) < vocab else { continue }
+                let i = Int(id)
+                let word = i >> 6
+                let mask = UInt64(1) << (i & 63)
+                guard seen[word] & mask == 0 else { continue }
+                seen[word] |= mask
+                let z = Float(ptr[i])
+                let penalized: Float
+                if logitSoftcap > 0 {
+                    let capped = logitSoftcap * tanhf(z / logitSoftcap)
+                    let cappedPenalized = capped > 0 ? capped / penalty : capped * penalty
+                    // A saturated negative logit times the penalty can leave the
+                    // softcap's open interval; clamp inside it so atanh stays
+                    // finite.
+                    let limit = logitSoftcap * 0.9999
+                    let clamped = max(min(cappedPenalized, limit), -limit)
+                    penalized = logitSoftcap * atanhf(clamped / logitSoftcap)
+                } else {
+                    penalized = z > 0 ? z / penalty : z * penalty
+                }
+                ptr[i] = Float16(penalized)
             }
-            ptr[i] = Float16(penalized)
         }
     }
 

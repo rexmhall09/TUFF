@@ -242,7 +242,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let misses = experts.indices.filter { assignedSlots[$0] == -1 }
-        let evictable = (0..<slotCount)
+        // Warm decode steps need no eviction candidates, but must still
+        // update the use counts and timestamps below for LFU/LRU.
+        let evictable = misses.isEmpty ? [] : (0..<slotCount)
             .filter { !reserved[$0] }
             .sorted { shouldEvictSlot($0, before: $1) }
         guard misses.count <= evictable.count else { return nil }
@@ -276,6 +278,28 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
 
+        guard !plan.misses.isEmpty else { return expertCachePlanBuffers(plan) }
+
+        // A single read already runs on the caller's I/O worker. Only fan
+        // out when there is more than one independent SSD read to perform.
+        if plan.misses.count == 1 {
+            let index = plan.misses[0]
+            _ = try loadExpert(layer: 0, expert: plan.experts[index],
+                               slot: plan.assignedSlots[index])
+        } else {
+            try loadCacheMissesConcurrently(plan)
+        }
+
+        cacheLock.lock()
+        for index in plan.misses {
+            slotExpert[plan.assignedSlots[index]] = plan.experts[index]
+        }
+        cacheLock.unlock()
+
+        return expertCachePlanBuffers(plan)
+    }
+
+    private func loadCacheMissesConcurrently(_ plan: ExpertCachePlan) throws {
         let errorLock = NSLock()
         nonisolated(unsafe) var firstError: Error?
         DispatchQueue.concurrentPerform(iterations: plan.misses.count) { missOffset in
@@ -292,14 +316,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
         }
         if let firstError { throw firstError }
-
-        cacheLock.lock()
-        for index in plan.misses {
-            slotExpert[plan.assignedSlots[index]] = plan.experts[index]
-        }
-        cacheLock.unlock()
-
-        return expertCachePlanBuffers(plan)
     }
 
     public func expertCachePlanBuffers(_ plan: ExpertCachePlan)

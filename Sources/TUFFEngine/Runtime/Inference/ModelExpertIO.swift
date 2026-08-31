@@ -142,32 +142,36 @@ extension Model {
     public func fetchRoutedExperts(plan: RoutedExpertFetchPlan) async throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let buffers = try streamer.executeExpertCachePlan(plan.cachePlan)
-                    continuation.resume(returning: Self.makeExpertViews(
-                        buffers,
-                        layer: plan.layer,
-                        experts: plan.experts))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        return try await fetchRoutedExperts(
+            streamer: streamer, layer: plan.layer, cachePlan: plan.cachePlan)
     }
 
     public func fetchRoutedExperts(layer: Int, experts: [Int]) async throws -> [TensorView] {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        let cachePlan = streamer.planExpertsCached(experts: experts)
+        return try await fetchRoutedExperts(
+            streamer: streamer, layer: layer, cachePlan: cachePlan)
+    }
+
+    private func fetchRoutedExperts(streamer: PreadExpertStreamer,
+                                    layer: Int,
+                                    cachePlan: ExpertCachePlan) async throws -> [TensorView] {
+        // Cache hits are already GPU-visible. Avoid suspending the runner
+        // and dispatching an I/O worker when there is nothing to read.
+        if cachePlan.misses.isEmpty {
+            return Self.makeExpertViews(
+                streamer.expertCachePlanBuffers(cachePlan),
+                layer: layer, experts: cachePlan.experts)
+        }
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    let buffers = try streamer.loadExpertsCached(experts: experts)
+                    let buffers = try streamer.executeExpertCachePlan(cachePlan)
                     continuation.resume(returning: Self.makeExpertViews(
                         buffers,
                         layer: layer,
-                        experts: experts))
+                        experts: cachePlan.experts))
                 } catch {
                     continuation.resume(throwing: error)
                 }

@@ -11,6 +11,9 @@ public struct StreamingStopMatcher: Sendable {
 
     public mutating func push(_ text: String) -> String {
         guard !isStopped else { return "" }
+        // Normal app requests have no stop strings. Pass their deltas
+        // through without building and slicing a temporary pending string.
+        guard !stops.isEmpty else { return text }
         pending += text
         if let match = earliestMatch(in: pending) {
             let output = String(pending[..<match])

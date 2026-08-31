@@ -21,9 +21,9 @@ import TUFFValidationSupport
         let probs: MTLBuffer
         let outToken: MTLBuffer
 
-        init(vocab: Int) throws {
+        init(vocab: Int, logitSoftcap: Float = 30) throws {
             self.ctx = try MetalContext()
-            self.sampler = try Sampler(context: ctx, vocab: vocab)
+            self.sampler = try Sampler(context: ctx, vocab: vocab, logitSoftcap: logitSoftcap)
             self.vocab = vocab
             guard let l = ctx.device.makeBuffer(length: vocab * MemoryLayout<Float16>.size,
                                                 options: .storageModeShared),
@@ -169,6 +169,46 @@ import TUFFValidationSupport
         // ~23, ~e^-7 of the others — it should essentially never win. The raw
         // pre-fix math left id 5 the argmax favorite at >half the draws.
         #expect(count5 < trials / 8, "saturated id 5 drawn \(count5)/\(trials) despite penalty")
+    }
+
+    @Test func repetitionPenalty_matchesReferenceAcrossChangingHistories() throws {
+        // Cross bitmap-word boundaries and reuse the sampler with unrelated,
+        // empty, and shorter histories, as when a chat resets or continues.
+        let vocab = 131
+        let histories: [[Int32]] = [
+            [0, 63, 64, 64, 127, 128, 130, -1, 131, .max],
+            [64, 64, 1], [], [130], [0, 63, 64, 127, 128, 130],
+        ]
+        let values = (0..<vocab).map { Float(($0 % 17) - 8) * 50 }
+        for cap: Float in [0, 30] {
+            let rig = try Rig(vocab: vocab, logitSoftcap: cap)
+            for penalty: Float in [1.3, 0.8, 1] {
+                for history in histories {
+                    rig.draw(values,
+                             config: GenerationConfig(temperature: 0, repetitionPenalty: penalty),
+                             history: history)
+                    var expected = values.map(Float16.init)
+                    if penalty != 1 {
+                        for id in Set(history) where id >= 0 && Int(id) < vocab {
+                            let index = Int(id)
+                            let z = Float(expected[index])
+                            if cap > 0 {
+                                let capped = cap * tanhf(z / cap)
+                                let penalized = capped > 0 ? capped / penalty : capped * penalty
+                                let limit = cap * 0.9999
+                                expected[index] = Float16(cap * atanhf(max(min(penalized, limit), -limit) / cap))
+                            } else {
+                                expected[index] = Float16(z > 0 ? z / penalty : z * penalty)
+                            }
+                        }
+                    }
+                    let actual = UnsafeBufferPointer(
+                        start: rig.logits.contents().assumingMemoryBound(to: Float16.self),
+                        count: vocab)
+                    #expect(Array(actual) == expected)
+                }
+            }
+        }
     }
 
     /// Temperature spread: a logit sharp enough that greedy would always pick

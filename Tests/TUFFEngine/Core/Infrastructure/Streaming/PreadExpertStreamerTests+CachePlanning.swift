@@ -6,6 +6,46 @@ import Testing
 @testable import TUFFEngine
 
 extension PreadExpertStreamerTests {
+  @Test(arguments: [ExpertCachePolicy.lru, .lfu])
+  func allHitPlanPreservesBytesAndUpdatesEvictionPolicy(policy: ExpertCachePolicy) throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: MetalContext().device,
+      slotCount: 2, cachePolicy: policy)
+    let warmed = try streamer.loadExpertsCached(experts: [0, 1])
+    let hit = streamer.planExpertsCached(experts: [0], avoidingSlots: [0, 1])
+    #expect(hit.hits == 1)
+    #expect(hit.misses.isEmpty)
+    let cached = try streamer.executeExpertCachePlan(hit)
+    #expect(cached[0].buffer === warmed[0].buffer)
+    #expect(Self.bytes(of: cached[0].buffer, offset: 0, count: Self.expertStride)
+      .allSatisfy { $0 == Self.tagByte(0) })
+
+    // The hit must still count as a use under both LRU and LFU.
+    let replacement = streamer.planExpertsCached(experts: [2])
+    #expect(replacement.assignedSlots == [1])
+    _ = try streamer.executeExpertCachePlan(replacement)
+    #expect(streamer.planExpertsCached(experts: [0, 2]).hits == 2)
+  }
+
+  @Test func failedSingleMissIsNotPublishedAsACacheHit() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: MetalContext().device, slotCount: 2)
+    _ = try streamer.loadExpertsCached(experts: [0])
+    #expect(truncate(url.path, off_t(Self.streamOffset + UInt64(Self.expertStride))) == 0)
+    let plan = streamer.planExpertsCached(experts: [0, 1])
+    #expect(plan.misses == [1])
+    #expect(throws: StreamerError.self) {
+      _ = try streamer.executeExpertCachePlan(plan)
+    }
+    let retry = streamer.planExpertsCached(experts: [0, 1])
+    #expect(retry.hits == 1)
+    #expect(retry.misses == [1])
+  }
+
   @Test func cachedBatchWithoutExecutorLoadsTaggedBytes() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
