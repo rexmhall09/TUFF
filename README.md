@@ -31,7 +31,7 @@ resident, reads the experts it needs from SSD, and reuses them through a bounded
 cache. That is how I can run the 61 GiB GPT-OSS 120B checkpoint on my 16 GB M2
 MacBook Air without swap.
 
-Version 3 is a much bigger project than the original app. It has five models,
+Version 3 is a much bigger project than the original app. It has seven models,
 persistent and continuous chats, Markdown and native LaTeX rendering on both
 sides of the conversation, image and file attachments, per-model settings, a
 shared local server, hardware eligibility checks, and signed binary updates.
@@ -62,7 +62,7 @@ TUFF is aimed at the case where the model does not fit at all.
 
 ✅ yes · ◐ partly · ❌ no
 
-TUFF ships five models rather than a library, but each one is pinned to a
+TUFF ships seven models rather than a library, but each one is pinned to a
 revision, checksum-verified on install, and qualified on real hardware before it
 appears. LM Studio and Ollama reach Apple Silicon through MLX and Metal backends;
 TUFF and turbo-fieldfare are written for it and run nowhere else. LM Studio's
@@ -128,7 +128,7 @@ The interface has four places:
   labelled with the model that produced it, so a chat that switched models
   mid-way still says which answer came from where. The model picker in the
   message box offers the models that are on this Mac; downloads live in Models.
-- **Models** shows all five checkpoints and their real disk and memory
+- **Models** shows all seven checkpoints and their real disk and memory
   requirements. Image support lives inside the model card as a separate,
   optional download.
 - **Server** runs an OpenAI-compatible endpoint on `127.0.0.1`. Chat and Server
@@ -271,7 +271,7 @@ swift build -c release
 To build the complete app bundle, embedded updater, ZIP, and checksum:
 
 ```bash
-Scripts/package_app.sh 3.0.0
+Scripts/package_app.sh 3.0.1
 open dist/TUFF.app
 ```
 
