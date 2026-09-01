@@ -22,16 +22,17 @@ def png_header(relative_path)
   { width: width, height: height, depth: depth, color_type: color_type }
 end
 
+hex_color = read("Sources/TUFFApp/Core/Configuration/AppHexColor.swift")
 theme = read("Sources/TUFFApp/MacPresentation/TUFFMacTheme.swift")
 [
-  "srgbRed: 111.0 / 255.0",
-  "green: 77.0 / 255.0",
-  "blue: 255.0 / 255.0",
-  "srgbRed: 167.0 / 255.0",
-  "green: 139.0 / 255.0",
-  "blue: 250.0 / 255.0",
-].each do |component|
-  fail_check("the two-violet mark palette changed") unless theme.include?(component)
+  [hex_color, "red: 111.0 / 255.0"],
+  [hex_color, "green: 77.0 / 255.0"],
+  [hex_color, "blue: 255.0 / 255.0"],
+  [theme, "red: 167.0 / 255.0"],
+  [theme, "green: 139.0 / 255.0"],
+  [theme, "blue: 250.0 / 255.0"],
+].each do |source, component|
+  fail_check("the two-violet mark palette changed") unless source.include?(component)
 end
 
 logo = read("Brand/TUFFLogo.svg")
