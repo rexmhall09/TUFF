@@ -434,6 +434,8 @@ public final class AppSettingsStore {
     public var showPromptExamples = true
     public var sentPromptBehavior: AppSentPromptBehavior = .keep
     public var loadModelOnLaunch = false
+    public var accentColorMode: AppAccentColorMode = .appDefault
+    public var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
     /// The selected model's system prompt, loaded from its profile.
     public var systemPrompt = ""
 

@@ -85,6 +85,14 @@ public final class AppUpdateController {
                 automaticallyDownloadsUpdates =
                     controller.updater.automaticallyDownloadsUpdates
                 allowsAutomaticUpdates = controller.updater.allowsAutomaticUpdates
+                // Sparkle's own scheduler only checks once its interval has
+                // elapsed since the last check, so a launch shortly after the
+                // previous one would otherwise check for nothing. Sparkle's
+                // header docs recommend calling this once, right after
+                // starting, to force a check on every launch instead.
+                if automaticallyChecksForUpdates {
+                    controller.updater.checkForUpdatesInBackground()
+                }
             } catch {
                 unavailableReason = "The updater could not start: \(error)"
             }

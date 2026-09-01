@@ -136,6 +136,14 @@ public final class AppModel {
         get { settingsStore.loadModelOnLaunch }
         set { settingsStore.loadModelOnLaunch = newValue }
     }
+    public private(set) var accentColorMode: AppAccentColorMode {
+        get { settingsStore.accentColorMode }
+        set { settingsStore.accentColorMode = newValue }
+    }
+    public private(set) var customAccentColorHex: String {
+        get { settingsStore.customAccentColorHex }
+        set { settingsStore.customAccentColorHex = newValue }
+    }
     /// Whether launching the app should load the model straight away. Off by
     /// default, because loading takes minutes and holds gigabytes.
     public var diagnostics: AppDiagnostics? {
@@ -358,6 +366,8 @@ public final class AppModel {
         self.showPromptExamples = settings.showPromptExamples
         self.sentPromptBehavior = settings.sentPromptBehavior
         self.loadModelOnLaunch = settings.loadModelOnLaunch
+        self.accentColorMode = settings.accentColorMode
+        self.customAccentColorHex = settings.customAccentColorHex
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
 
         // The injected installer owns the passed-in directory and becomes the
@@ -1257,6 +1267,20 @@ public final class AppModel {
         persistSettings()
     }
 
+    public func setAccentColorMode(_ mode: AppAccentColorMode) {
+        guard accentColorMode != mode else { return }
+        accentColorMode = mode
+        persistSettings()
+    }
+
+    /// Ignores a hex string that fails to parse, so a malformed value typed
+    /// into the settings field never reaches disk or the shared theme.
+    public func setCustomAccentColorHex(_ hex: String) {
+        guard AppHexColor(hexString: hex) != nil, customAccentColorHex != hex else { return }
+        customAccentColorHex = hex
+        persistSettings()
+    }
+
     public func settingsProfile(
         for coordinator: ModelInstallCoordinator
     ) -> AppModelSettingsProfile {
@@ -2150,6 +2174,8 @@ public final class AppModel {
         showPromptExamples = settings.showPromptExamples
         sentPromptBehavior = settings.sentPromptBehavior
         loadModelOnLaunch = settings.loadModelOnLaunch
+        accentColorMode = settings.accentColorMode
+        customAccentColorHex = settings.customAccentColorHex
     }
 
     private var currentSettingsProfile: AppModelSettingsProfile {
@@ -2204,6 +2230,8 @@ public final class AppModel {
         settings.showPromptExamples = showPromptExamples
         settings.sentPromptBehavior = sentPromptBehavior
         settings.loadModelOnLaunch = loadModelOnLaunch
+        settings.accentColorMode = accentColorMode
+        settings.customAccentColorHex = customAccentColorHex
         try? MacAppSettingsFileStore.save(
             settings,
             forModelDirectory: modelDirectory)

@@ -1,22 +1,100 @@
 import AppKit
 import SwiftUI
+import TUFFAppCore
+
+/// The app's live accent color, driven by the user's appearance setting
+/// (default purple, synced with the system accent color, or a custom hex
+/// value). `TUFFMacTheme` reads through this singleton so every call site
+/// that already references `TUFFMacTheme.accentColor` stays reactive without
+/// threading `AppModel` through the view hierarchy.
+///
+/// `RootView` pushes the persisted setting in with `update(mode:customHex:)`
+/// whenever it changes. While the mode is `.system`, this also listens for
+/// `NSColor.systemColorsDidChangeNotification` so a live change to the
+/// macOS accent color in System Settings is picked up immediately.
+@MainActor
+@Observable
+public final class TUFFAccentThemeStore {
+    public static let shared = TUFFAccentThemeStore()
+
+    public private(set) var mode: AppAccentColorMode = .appDefault
+    public private(set) var customHex: String = AppHexColor.defaultPurple.hexString
+
+    /// Bumped on `NSColor.systemColorsDidChangeNotification` purely so
+    /// `nsColor` has a tracked stored property to read while in `.system`
+    /// mode — the actual color comes from `NSColor.controlAccentColor`,
+    /// which Observation cannot see change on its own.
+    private var systemColorTick = 0
+
+    // `shared` outlives the app, so the observer is never torn down — there is
+    // no deinit that would need to remove it.
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: NSColor.systemColorsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.systemColorTick += 1
+            }
+        }
+    }
+
+    public func update(mode: AppAccentColorMode, customHex: String) {
+        guard self.mode != mode || self.customHex != customHex else { return }
+        self.mode = mode
+        self.customHex = customHex
+    }
+
+    public var nsColor: NSColor {
+        switch mode {
+        case .appDefault:
+            return Self.nsColor(for: .defaultPurple)
+        case .system:
+            _ = systemColorTick
+            return NSColor.controlAccentColor
+        case .custom:
+            let hex = AppHexColor(hexString: customHex) ?? .defaultPurple
+            return Self.nsColor(for: hex)
+        }
+    }
+
+    public var markWingNSColor: NSColor {
+        switch mode {
+        case .appDefault:
+            return Self.nsColor(for: AppHexColor(
+                red: 167.0 / 255.0, green: 139.0 / 255.0, blue: 250.0 / 255.0))
+        case .system, .custom:
+            return Self.lightened(nsColor, by: 0.35)
+        }
+    }
+
+    private static func nsColor(for hex: AppHexColor) -> NSColor {
+        NSColor(srgbRed: hex.red, green: hex.green, blue: hex.blue, alpha: 1)
+    }
+
+    private static func lightened(_ color: NSColor, by fraction: CGFloat) -> NSColor {
+        guard let rgb = color.usingColorSpace(.deviceRGB) else { return color }
+        return NSColor(
+            red: rgb.redComponent + (1 - rgb.redComponent) * fraction,
+            green: rgb.greenComponent + (1 - rgb.greenComponent) * fraction,
+            blue: rgb.blueComponent + (1 - rgb.blueComponent) * fraction,
+            alpha: 1)
+    }
+}
 
 public enum TUFFMacTheme {
-    public static let accentNSColor = NSColor(
-        srgbRed: 111.0 / 255.0,
-        green: 77.0 / 255.0,
-        blue: 255.0 / 255.0,
-        alpha: 1)
+    @MainActor
+    public static var accentNSColor: NSColor { TUFFAccentThemeStore.shared.nsColor }
 
-    public static let accentColor = Color(nsColor: accentNSColor)
+    @MainActor
+    public static var accentColor: Color { Color(nsColor: accentNSColor) }
 
-    public static let markWingNSColor = NSColor(
-        srgbRed: 167.0 / 255.0,
-        green: 139.0 / 255.0,
-        blue: 250.0 / 255.0,
-        alpha: 1)
+    @MainActor
+    public static var markWingNSColor: NSColor { TUFFAccentThemeStore.shared.markWingNSColor }
 
-    public static let markWingColor = Color(nsColor: markWingNSColor)
+    @MainActor
+    public static var markWingColor: Color { Color(nsColor: markWingNSColor) }
 
     public static func surfaceStyle(
         reduceTransparency: Bool,

@@ -1,3 +1,4 @@
+import AppKit
 import TUFFEngine
 import TUFFAppCore
 import TUFFAppUpdater
@@ -9,6 +10,10 @@ struct AppSettingsView: View {
     let updateController: AppUpdateController
     @State private var section: AppSettingsSection = .general
     @State private var profileModelID = ""
+    /// Holds text the user is mid-typing into the hex field until it parses,
+    /// so an incomplete value (e.g. "6F4") isn't snapped back to the last
+    /// valid one on every keystroke.
+    @State private var pendingAccentHex: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,6 +62,27 @@ struct AppSettingsView: View {
                     }
                 }
                 Toggle("Show prompt examples", isOn: showPromptExamplesBinding)
+            }
+            Section("Appearance") {
+                Picker("Accent color", selection: accentColorModeBinding) {
+                    ForEach(AppAccentColorMode.allCases) { mode in
+                        Text(mode.settingsLabel).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                if model.accentColorMode == .custom {
+                    ColorPicker("Custom color", selection: customAccentColorBinding, supportsOpacity: false)
+                    LabeledContent("Hex value") {
+                        TextField("6F4DFF", text: customAccentColorHexFieldBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                            .multilineTextAlignment(.trailing)
+                    }
+                } else if model.accentColorMode == .system {
+                    Text("Follows the accent color set in System Settings.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("Startup") {
                 Toggle("Load the selected model at launch",
@@ -396,5 +422,39 @@ struct AppSettingsView: View {
 
     private var loadModelOnLaunchBinding: Binding<Bool> {
         Binding { model.loadModelOnLaunch } set: { model.setLoadModelOnLaunch($0) }
+    }
+
+    private var accentColorModeBinding: Binding<AppAccentColorMode> {
+        Binding { model.accentColorMode } set: { model.setAccentColorMode($0) }
+    }
+
+    private var customAccentColorBinding: Binding<Color> {
+        Binding {
+            let hex = AppHexColor(hexString: model.customAccentColorHex) ?? .defaultPurple
+            return Color(red: hex.red, green: hex.green, blue: hex.blue)
+        } set: { newColor in
+            guard let hex = Self.hexColor(from: newColor) else { return }
+            pendingAccentHex = nil
+            model.setCustomAccentColorHex(hex.hexString)
+        }
+    }
+
+    private var customAccentColorHexFieldBinding: Binding<String> {
+        Binding {
+            pendingAccentHex
+                ?? model.customAccentColorHex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        } set: { newValue in
+            pendingAccentHex = newValue
+            let candidate = "#" + newValue.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+            guard AppHexColor(hexString: candidate) != nil else { return }
+            model.setCustomAccentColorHex(candidate)
+            pendingAccentHex = nil
+        }
+    }
+
+    private static func hexColor(from color: Color) -> AppHexColor? {
+        guard let rgb = NSColor(color).usingColorSpace(.deviceRGB) else { return nil }
+        return AppHexColor(
+            red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent)
     }
 }

@@ -136,6 +136,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var showPromptExamples: Bool = false
     var sentPromptBehavior: AppSentPromptBehavior = .clear
     var loadModelOnLaunch: Bool = false
+    var accentColorMode: AppAccentColorMode = .appDefault
+    var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
 
     // Source compatibility for the v1 app and focused tests. These map only to
     // Gemma's stable profile; app code uses `profile(for:)` explicitly.
@@ -187,6 +189,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case showPromptExamples
         case sentPromptBehavior
         case loadModelOnLaunch
+        case accentColorMode
+        case customAccentColorHex
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -205,6 +209,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case visionResidencyPolicy
         case rdadvisePolicy
         case loadModelOnLaunch
+        case accentColorMode
+        case customAccentColorHex
     }
 
     init(version: Int = currentVersion,
@@ -222,6 +228,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
          rdadvisePolicy: AppRDAdvicePolicy = .off,
          loadModelOnLaunch: Bool = false,
+         accentColorMode: AppAccentColorMode = .appDefault,
+         customAccentColorHex: String = AppHexColor.defaultPurple.hexString,
          modelProfiles: [String: AppModelSettingsProfile]? = nil) {
         self.version = version
         self.modelProfiles = modelProfiles ?? [Self.defaultProfileKey: AppModelSettingsProfile(
@@ -239,6 +247,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.showPromptExamples = showPromptExamples
         self.sentPromptBehavior = sentPromptBehavior
         self.loadModelOnLaunch = loadModelOnLaunch
+        self.accentColorMode = accentColorMode
+        self.customAccentColorHex = customAccentColorHex
     }
 
     init(from decoder: Decoder) throws {
@@ -256,6 +266,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
                 AppSentPromptBehavior.self, forKey: .sentPromptBehavior) ?? .clear
             loadModelOnLaunch = try container.decodeIfPresent(
                 Bool.self, forKey: .loadModelOnLaunch) ?? false
+            accentColorMode = try container.decodeIfPresent(
+                AppAccentColorMode.self, forKey: .accentColorMode) ?? .appDefault
+            customAccentColorHex = try container.decodeIfPresent(
+                String.self, forKey: .customAccentColorHex)
+                ?? AppHexColor.defaultPurple.hexString
             return
         }
 
@@ -280,6 +295,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             AppSentPromptBehavior.self, forKey: .sentPromptBehavior) ?? .clear
         loadModelOnLaunch = try stamp.decodeIfPresent(
             Bool.self, forKey: .loadModelOnLaunch) ?? false
+        accentColorMode = try stamp.decodeIfPresent(
+            AppAccentColorMode.self, forKey: .accentColorMode) ?? .appDefault
+        customAccentColorHex = try stamp.decodeIfPresent(
+            String.self, forKey: .customAccentColorHex) ?? AppHexColor.defaultPurple.hexString
     }
 
     func profile(for key: String) -> AppModelSettingsProfile {
@@ -295,6 +314,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             && !modelProfiles.isEmpty
             && modelProfiles.keys.allSatisfy { !$0.isEmpty }
             && modelProfiles.values.allSatisfy { $0.isValid() }
+            && AppHexColor(hexString: customAccentColorHex) != nil
     }
 
     private mutating func updateDefaultProfile(

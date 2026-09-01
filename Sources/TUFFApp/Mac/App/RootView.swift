@@ -21,6 +21,13 @@ extension EnvironmentValues {
     }
 }
 
+/// Identity for `.task(id:)` below: re-runs the sync into
+/// `TUFFAccentThemeStore` whenever either persisted accent setting changes.
+private struct AccentSettingsKey: Equatable {
+    let mode: AppAccentColorMode
+    let hex: String
+}
+
 struct RootView: View {
     let model: AppModel
     let serverController: AppServerController
@@ -33,6 +40,10 @@ struct RootView: View {
 
     var body: some View {
         splitView
+        .task(id: AccentSettingsKey(mode: model.accentColorMode, hex: model.customAccentColorHex)) {
+            TUFFAccentThemeStore.shared.update(
+                mode: model.accentColorMode, customHex: model.customAccentColorHex)
+        }
         .environment(\.windowIsFullScreen, isFullScreen)
         .background {
             WindowFullScreenReader(isFullScreen: $isFullScreen)
