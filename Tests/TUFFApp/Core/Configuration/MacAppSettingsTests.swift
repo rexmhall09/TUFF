@@ -652,9 +652,11 @@ import TUFFModelCatalog
             model.installs.first { $0.id == model.selectedModelID })
 
         #expect(model.automaticMemory)
-        // Auto overrode the saved 32K and 24 slots with its own plan.
+        // Auto overrode the saved 32K and 24 slots with its own plan: the
+        // checkpoint's qualified slot count, and a context it chose.
         #expect(model.maxContextTokens != 32_768)
-        #expect(model.runtimeOptions.expertCacheSlots == 128)
+        #expect(model.runtimeOptions.expertCacheSlots
+            == TUFFModelCatalog.gemma4_26B_A4B.runtimeDefaults.expertCacheSlots)
         #expect(model.runtimeOptions.prefillEnabled)
 
         var effective = model.settingsProfile(for: selected)

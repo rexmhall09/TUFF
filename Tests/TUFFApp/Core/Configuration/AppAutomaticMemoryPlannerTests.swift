@@ -27,28 +27,33 @@ import TUFFModelCatalog
         #expect(plan.estimatedWorkingSetBytes <= plan.safeBudgetBytes)
     }
 
-    @Test func speedSpendsAdditionalSafeRAMOnExpertResidency() throws {
+    /// Auto does not buy expert-cache slots with spare memory. Measured on
+    /// Gemma 4 26B-A4B: 16 slots gave 7.69 tokens per second at 1.93 GB peak,
+    /// 128 slots gave 6.28 at 2.99 GB. More slots is slower and larger, so a
+    /// roomier Mac gets the same cache and a longer context instead.
+    @Test func aRoomierMacDoesNotGetMoreExpertSlots() throws {
         let plan16 = try #require(AppAutomaticMemoryPlanner.plan(
             for: .minimaxM27, on: device(16), profile: .speed))
         let plan64 = try #require(AppAutomaticMemoryPlanner.plan(
             for: .minimaxM27, on: device(64), profile: .speed))
 
-        #expect(plan64.contextTokens == plan16.contextTokens)
-        #expect(plan64.expertCacheSlots > plan16.expertCacheSlots)
+        #expect(plan64.expertCacheSlots == plan16.expertCacheSlots)
         #expect(plan64.estimatedWorkingSetBytes <= plan64.safeBudgetBytes)
     }
 
-    @Test func cacheGrowthStopsAtAUsefulModelAndRuntimeLimit() throws {
-        let gpt20 = try #require(AppModelInstallDescriptor.descriptor(
-            for: ModelVariant.gptOss_20B))
-        let gptPlan = try #require(AppAutomaticMemoryPlanner.plan(
-            for: gpt20, on: device(128), profile: .speed))
-        let miniMaxPlan = try #require(AppAutomaticMemoryPlanner.plan(
-            for: .minimaxM27, on: device(128), profile: .speed))
-
-        #expect(gpt20.usefulExpertCacheSlotCounts.last == 32)
-        #expect(gptPlan.expertCacheSlots == 32)
-        #expect(miniMaxPlan.expertCacheSlots == 128)
+    /// Models already qualified at or above the chunked-prefill floor keep
+    /// exactly their qualified count, whatever the Mac.
+    @Test func autoKeepsEachModelsQualifiedSlotCount() throws {
+        for descriptor in [AppModelInstallDescriptor.minimaxM27, .gemma4E4B] {
+            let qualified = try #require(descriptor.catalogID
+                .flatMap(TUFFModelCatalog.model(id:)))
+                .runtimeDefaults.expertCacheSlots
+            for gibibytes in [16 as UInt64, 128] {
+                let plan = try #require(AppAutomaticMemoryPlanner.plan(
+                    for: descriptor, on: device(gibibytes), profile: .speed))
+                #expect(plan.expertCacheSlots == qualified)
+            }
+        }
     }
 
     // MARK: - Profiles
@@ -119,7 +124,7 @@ import TUFFModelCatalog
         #expect(plan.contextTokens
             == TUFFModelCatalog.minimaxM27.runtimeDefaults.contextTokens)
         #expect(plan.expertCacheSlots
-            == AppModelInstallDescriptor.minimaxM27.usefulExpertCacheSlotCounts.first)
+            == TUFFModelCatalog.minimaxM27.runtimeDefaults.expertCacheSlots)
     }
 
     @Test func denseModelsGainContextRatherThanCacheSlots() throws {
@@ -174,7 +179,10 @@ import TUFFModelCatalog
             for: descriptor,
             on: device(128))
 
-        #expect(resolved.expertCacheSlots == 32)
+        // Raised to the chunked-prefill floor, not to the 32 Auto used to
+        // grow to and not left at the 4 the checkpoint is qualified with.
+        #expect(resolved.expertCacheSlots
+            == RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
         #expect(resolved.prefillEnabled)
     }
 

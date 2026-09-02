@@ -25,11 +25,21 @@ public struct AppAutomaticMemoryPlan: Equatable, Sendable {
 /// Resolves a per-model memory profile from the Mac's detected unified memory
 /// and the checkpoint's measured working-set profile.
 ///
-/// Every profile ends by spending whatever budget is left on routed-expert
-/// slots, because that is the only memory that reduces work during
-/// generation; they differ in how much context they take first. A dense model
-/// has no expert cache, so for it the profiles differ in context alone — which
-/// is the honest answer, since extra memory cannot make a dense model faster.
+/// The profiles differ in context length and nothing else, because context is
+/// the only thing measurement says is worth buying. On Gemma 4 26B-A4B, a
+/// 16 GB Mac, 24 generated tokens:
+///
+///     8K context, 16 slots   7.69 tok/s   1.93 GB peak
+///     8K context, 128 slots  6.28 tok/s   2.99 GB peak
+///     16K context, 16 slots  7.67 tok/s   1.93 GB peak
+///
+/// Doubling the context is free. Filling the budget with routed-expert slots
+/// costs 18% of throughput and a gigabyte of memory: each slot is its own
+/// Metal buffer, and a command buffer that references hundreds of them pays
+/// for all of them. Auto therefore keeps the checkpoint's qualified slot
+/// count, which is the count it was validated at, and spends nothing else.
+/// Raising it stays available by hand for anyone who wants to trade that
+/// throughput for fewer SSD reads.
 public enum AppAutomaticMemoryPlanner {
     public static func plan(
         for descriptor: AppModelInstallDescriptor,
@@ -42,16 +52,37 @@ public enum AppAutomaticMemoryPlanner {
         let budget = device.safeAppMemoryBudgetBytes
         let memory = catalog.memory
         let qualifiedContext = catalog.runtimeDefaults.contextTokens
-        let slotOptions = descriptor.usesExpertCache
-            ? descriptor.usefulExpertCacheSlotCounts.sorted()
-            : [catalog.runtimeDefaults.expertCacheSlots]
-        // Always leave a runnable answer: hardware eligibility, not Auto, is
-        // the gate on a model this Mac cannot host at all.
-        let smallestSlots = slotOptions.first ?? catalog.runtimeDefaults.expertCacheSlots
-
         func fits(context: Int, slots: Int) -> Bool {
             memory.estimatedWorkingSetBytes(contextTokens: context,
                                             expertCacheSlots: slots) <= budget
+        }
+
+        // The qualified slot count, clamped to what this model can use, then
+        // raised just far enough to reach chunked prefill. GPT-OSS 20B is
+        // qualified at four slots, and the chunked prefill path needs sixteen;
+        // leaving it at four would trade a much slower prompt for memory Auto
+        // is not otherwise spending. Nothing grows past that — see the note
+        // above for why filling the budget with slots is a loss.
+        let slots: Int
+        if descriptor.usesExpertCache {
+            let options = descriptor.usefulExpertCacheSlotCounts.sorted()
+            let qualified = catalog.runtimeDefaults.expertCacheSlots
+            let clamped = options.contains(qualified)
+                ? qualified
+                : (options.last(where: { $0 <= qualified })
+                    ?? options.first
+                    ?? qualified)
+            let prefillFloor = options.first {
+                $0 >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
+            }
+            if let prefillFloor, prefillFloor > clamped,
+               fits(context: qualifiedContext, slots: prefillFloor) {
+                slots = prefillFloor
+            } else {
+                slots = clamped
+            }
+        } else {
+            slots = catalog.runtimeDefaults.expertCacheSlots
         }
 
         // Context ceiling for this profile, expressed in tokens.
@@ -63,20 +94,14 @@ public enum AppAutomaticMemoryPlanner {
             .filter { $0 <= contextCeiling }
             .sorted()
 
-        // Longest context this profile allows that still fits beside the
-        // model's minimum cache. Never drop below the qualified default: that
-        // is the length the checkpoint was validated at.
+        // Longest context this profile allows that still fits. Never drop below
+        // the qualified default: that is the length the checkpoint was
+        // validated at, and hardware eligibility — not Auto — is the gate on a
+        // model this Mac cannot host at all.
         var context = qualifiedContext
         for candidate in contextOptions where candidate > context {
-            guard fits(context: candidate, slots: smallestSlots) else { break }
+            guard fits(context: candidate, slots: slots) else { break }
             context = candidate
-        }
-
-        // Spend the remaining budget on resident experts.
-        var slots = smallestSlots
-        for candidate in slotOptions where candidate > slots {
-            guard fits(context: context, slots: candidate) else { break }
-            slots = candidate
         }
 
         return AppAutomaticMemoryPlan(

@@ -187,12 +187,23 @@ tokens buy a longer conversation and make nothing faster.
 | Balanced | Up to twice that length | Resident experts |
 | Context | The longest that fits | Resident experts |
 
-Balanced is the default. A dense model has no expert cache, so for it the
-profiles differ in context alone, which is the honest answer: extra memory
-cannot make a dense model generate faster. Each profile is labelled in Settings
-with the context it would actually resolve on this Mac. The manual context,
-cache, and prefill controls stay visible but disabled until Auto is turned off,
-and turning it off restores that model's saved choices.
+Balanced is the default. The profiles differ in context and nothing else,
+because context is the only thing measurement says is worth buying. On Gemma 4
+26B-A4B, on a 16 GB Mac: 8K context with 16 cache slots gave 7.69 tok/s at
+1.93 GB peak, 16K context with 16 slots gave 7.67 at 1.93 GB, and 8K context
+with 128 slots gave 6.28 at 2.99 GB. Doubling the context is free; filling the
+budget with expert slots costs throughput and a gigabyte of memory, because
+each slot is its own Metal buffer and a command buffer referencing hundreds of
+them pays for all of them.
+
+So Auto keeps each checkpoint's qualified cache size, raising it only to the
+sixteen slots chunked prefill needs. v4.0.0 and v4.0.1 spent spare memory on
+slots instead, which is why this is worded as a correction. Raising the cache
+by hand stays available for anyone who would rather trade throughput for fewer
+SSD reads. Each profile is labelled in Settings with the context it would
+actually resolve on this Mac. The manual context, cache, and prefill controls
+stay visible but disabled until Auto is turned off, and turning it off restores
+that model's saved choices.
 
 ### Running past the limits
 
@@ -236,10 +247,10 @@ individual run is recorded alongside the summary.
 
 | Model | Decode | Prefill | Peak RSS |
 | --- | ---: | ---: | ---: |
-| Gemma 4 E2B IT | 30.34 tok/s | 0.56 s | 324 MiB |
+| Gemma 4 E2B IT | 43.96 tok/s | 0.56 s | 324 MiB |
 | Gemma 4 E4B IT | 28.96 tok/s | 1.08 s | 324 MiB |
-| Gemma 4 12B IT QAT | 0.04 tok/s | 14.55 s | 324 MiB |
-| Gemma 4 26B-A4B IT | 7.07 tok/s | 11.03 s | 1,758 MiB |
+| Gemma 4 12B IT QAT | 6.88 tok/s | 14.55 s | 381 MiB |
+| Gemma 4 26B-A4B IT | 7.69 tok/s | 11.03 s | 1,394 MiB |
 | Qwen3.6 35B-A3B | 6.11 tok/s | 15.61 s | 1,417 MiB |
 | GPT-OSS 20B | 2.36 tok/s | 19.03 s | 2,616 MiB |
 | GPT-OSS 120B | 0.19 tok/s | 66.47 s | 2,430 MiB |
@@ -253,13 +264,9 @@ MiniMax M2.7 is absent because it was the one catalog model not installed on
 this Mac when the release was cut; its 120 GiB install is still downloading and
 its row will follow. Nothing about it changed in this release.
 
-**Gemma 4 12B QAT is the outlier, and the figure is real.** It is 10 GB of
-dense weights, so every token reads all 10 GB, and on a 16 GB Mac those pages
-cannot stay resident: each token re-reads them from SSD, about 25 seconds per
-token. It loads and answers correctly, and it is not usable at this size on
-this machine. A Mac with more memory does not have this problem. Sequential
-paging advice was tried against it and measured no better, so the runtime still
-maps weights with random advice.
+The Gemma 4 12B QAT row was 0.04 tok/s in v4.0.1 and is 6.88 here. That was a
+bug in v4.0.0 and v4.0.1, not a property of the model; v4.0.2 fixes it. See
+below.
 
 #### What v4.0.0 changed about decode
 
@@ -280,10 +287,18 @@ computing. Three things caused that, and all three are fixed:
 - **Weight mapping.** All of a model's resident weights were wrapped in one
   Metal buffer, up to gigabytes wide. Metal's per-dispatch cost for a bound
   buffer grows with that buffer's size, and decode issues hundreds of dispatches
-  per token, so the size was being paid hundreds of times over. The weights are
-  now mapped as many 64 MB regions, with any single larger tensor still getting
-  a region of its own. Alone this took Gemma 4 E2B from 28.4 to 42.3 tokens per
+  per token, so the size was being paid hundreds of times over. Weights are now
+  mapped as many 64 MB regions, with any single larger tensor still getting a
+  region of its own. Alone this took Gemma 4 E2B from 28.4 to 42.3 tokens per
   second in alternating builds.
+
+  v4.0.0 and v4.0.1 applied that split to every model, which was wrong. A model
+  whose weights do not fit in memory needs the opposite: one large mapping the
+  kernel can page lazily, rather than many Metal buffers that are all forced
+  resident together. Gemma 4 12B QAT — 10 GB of dense weights on a 16 GB Mac —
+  collapsed from 6.97 to 0.034 tokens per second. **v4.0.2 applies the split
+  only when a model's resident weights are at most a quarter of physical
+  memory**, and maps everything larger as a single region.
 
 Measured on Gemma 4 E2B with the harness above, alternating binaries on one
 machine:

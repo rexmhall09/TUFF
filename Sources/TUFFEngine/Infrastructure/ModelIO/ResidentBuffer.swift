@@ -105,8 +105,34 @@ final class ResidentBufferSet {
         let regionFileOffset: UInt64
     }
 
-    /// Target size of one mmap'd resident region. See the note in `init`.
+    /// Target size of one mmap'd resident region when splitting is safe.
     static let preferredRegionBytes: UInt64 = 64 << 20
+
+    /// Splitting is only safe while the whole resident payload can stay
+    /// resident. Above this share of physical memory the model is mapped as
+    /// one region instead. See `shouldSplitRegions`.
+    static let splitPayloadMemoryShareDenominator: UInt64 = 4
+
+    /// Whether to cut the resident weights into `preferredRegionBytes` regions.
+    ///
+    /// Splitting makes every dispatch cheaper, because Metal's per-encoder cost
+    /// for a bound buffer grows with that buffer's size. That is worth a lot to
+    /// a model whose weights fit in memory: Gemma 4 E2B went from 28.4 to 42.3
+    /// tokens per second.
+    ///
+    /// It is ruinous to a model whose weights do not fit. Gemma 4 12B QAT is
+    /// 10 GB of dense weights on a 16 GB Mac, and splitting it collapsed decode
+    /// from 6.97 to 0.034 tokens per second — every token re-reading the model
+    /// from SSD. One large mapping is paged lazily by the kernel; many separate
+    /// Metal buffers are not, and the whole set is forced resident.
+    ///
+    /// So the split is applied only when the payload is a small enough share of
+    /// physical memory to stay cached alongside everything else.
+    static func shouldSplitRegions(payloadSize: UInt64,
+                                   physicalMemory: UInt64) -> Bool {
+        guard physicalMemory > 0 else { return false }
+        return payloadSize <= physicalMemory / splitPayloadMemoryShareDenominator
+    }
 
     private let buffers: [ResidentBuffer]
     private let regionByTensorName: [String: Int]
@@ -118,15 +144,20 @@ final class ResidentBufferSet {
         // Metal's per-encoder cost for a bound buffer grows with the buffer's
         // size (measured: ~3 us for a 64 KB or 256 MB buffer, ~10-25 us for a
         // 1-2.6 GB buffer, per dispatch). Decode issues hundreds of dispatches
-        // per token, so the resident weights are mapped as many moderately
-        // sized regions instead of one model-wide buffer. Tensors larger than
-        // the target still get a region of their own.
+        // per token, so weights that comfortably fit in memory are mapped as
+        // many moderately sized regions. A model too large for that is mapped
+        // as one region and left to the kernel's paging; see
+        // `shouldSplitRegions`.
+        let split = Self.shouldSplitRegions(
+            payloadSize: index.header.residentSize,
+            physicalMemory: ProcessInfo.processInfo.physicalMemory)
         let plans = try Self.planRegions(
             entries: Array(index.entries.values),
             payloadOffset: index.header.indexSize,
             payloadSize: index.header.residentSize,
-            maximumLength: min(UInt64(device.maxBufferLength),
-                               Self.preferredRegionBytes),
+            maximumLength: split
+                ? min(UInt64(device.maxBufferLength), Self.preferredRegionBytes)
+                : UInt64(device.maxBufferLength),
             hardMaximumLength: UInt64(device.maxBufferLength))
 
         var opened: [ResidentBuffer] = []
