@@ -255,15 +255,18 @@ individual run is recorded alongside the summary.
 | Qwen3.6 35B-A3B | 6.11 tok/s | 15.61 s | 1,417 MiB |
 | GPT-OSS 20B | 2.36 tok/s | 19.03 s | 2,616 MiB |
 | GPT-OSS 120B | 0.19 tok/s | 66.47 s | 2,430 MiB |
+| MiniMax M2.7 4-bit | 0.33 tok/s | 71.37 s | 2,103 MiB |
 
 These are conservative for that reason: the same build measured 40.30 tokens
 per second on Gemma 4 E2B on an otherwise idle machine. Treat the ordering
 across models as the signal and each absolute figure as a floor. Reproduce any
 row with `Scripts/benchmark_simple.rb --repeat 3`.
 
-MiniMax M2.7 is absent because it was the one catalog model not installed on
-this Mac when the release was cut; its 120 GiB install is still downloading and
-its row will follow. Nothing about it changed in this release.
+MiniMax M2.7 needed 132 tokens to finish this answer, four past the 128-token
+cap the sweep uses, because it always reasons and its thinking is not part of
+the visible answer. Run to completion it answers correctly and stops at end of
+turn, at 0.303 tok/s. Its row above is the capped run, measured the same way as
+every other row.
 
 The Gemma 4 12B QAT row was 0.04 tok/s in v4.0.1 and is 6.88 here. That was a
 bug in v4.0.0 and v4.0.1, not a property of the model; v4.0.2 fixes it. See
