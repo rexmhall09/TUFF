@@ -187,7 +187,8 @@ tokens buy a longer conversation and make nothing faster.
 | Balanced | Up to twice that length | Resident experts |
 | Context | The longest that fits | Resident experts |
 
-Balanced is the default. The profiles differ in context and nothing else,
+Balanced is the default for every model, including profiles saved by an
+earlier build. The profiles differ in context and nothing else,
 because context is the only thing measurement says is worth buying. On Gemma 4
 26B-A4B, on a 16 GB Mac: 8K context with 16 cache slots gave 7.69 tok/s at
 1.93 GB peak, 16K context with 16 slots gave 7.67 at 1.93 GB, and 8K context

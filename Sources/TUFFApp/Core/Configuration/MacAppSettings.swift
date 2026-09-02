@@ -115,10 +115,14 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         automaticMemory = try container.decodeIfPresent(
             Bool.self, forKey: .automaticMemory) ?? true
-        // Archives written before the profiles existed resolved Auto the way
-        // Speed does, so that is what they decode to.
+        // Balanced, including for archives written before the profiles
+        // existed. Those resolved Auto the way Speed does, but now that Auto
+        // no longer buys expert-cache slots the profiles differ in context
+        // alone, and the extra context is free: measured on Gemma 4 26B-A4B,
+        // 7.69 tok/s at 8K against 7.67 at 16K, same peak memory. There is
+        // nothing to preserve by leaving saved profiles on the shorter window.
         automaticMemoryProfile = try container.decodeIfPresent(
-            AppAutomaticMemoryProfile.self, forKey: .automaticMemoryProfile) ?? .speed
+            AppAutomaticMemoryProfile.self, forKey: .automaticMemoryProfile) ?? .balanced
         contextTokens = try container.decode(Int.self, forKey: .contextTokens)
         expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
         temperature = try container.decode(Double.self, forKey: .temperature)

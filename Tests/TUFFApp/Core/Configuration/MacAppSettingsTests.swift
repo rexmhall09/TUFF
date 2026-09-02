@@ -358,11 +358,14 @@ import TUFFModelCatalog
         #expect(migrated.profile(for: key).expertCacheSlots == 24)
     }
 
-    /// An archive written before the Auto profiles existed keeps the behavior
-    /// it was saved with. Auto used to resolve exactly what Speed resolves, so
-    /// decoding to Balanced would silently hand those people more context than
-    /// the build they saved from had chosen.
-    @Test func anArchiveWithoutAnAutoProfileDecodesAsSpeed() throws {
+    /// Every model defaults to Balanced, saved archives included. The
+    /// profiles differ in context alone and the extra context is free, so
+    /// there is nothing to preserve by leaving an older archive on Speed.
+    @Test func everyProfileDefaultsToBalanced() throws {
+        #expect(AppModelSettingsProfile().automaticMemoryProfile == .balanced)
+        #expect(AppModelSettingsProfile.defaults(for: MacAppSettings.defaultProfileKey)
+            .automaticMemoryProfile == .balanced)
+
         var object = try #require(JSONSerialization.jsonObject(
             with: JSONEncoder().encode(AppModelSettingsProfile()))
             as? [String: Any])
@@ -371,7 +374,7 @@ import TUFFModelCatalog
             AppModelSettingsProfile.self,
             from: try JSONSerialization.data(withJSONObject: object))
 
-        #expect(decoded.automaticMemoryProfile == .speed)
+        #expect(decoded.automaticMemoryProfile == .balanced)
     }
 
     @Test(arguments: AppAutomaticMemoryProfile.allCases)
