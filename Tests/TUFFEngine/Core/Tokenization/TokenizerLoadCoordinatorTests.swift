@@ -75,3 +75,83 @@ struct TokenizerLoadCoordinatorTests {
         return url
     }
 }
+
+/// The hub fetch is the one part of loading a tokenizer that can fail without
+/// anything being wrong. A single timed-out request once failed a whole CI run
+/// of roughly seventy tests that each resolve a tokenizer.
+@Suite("Tokenizer load retry")
+struct TokenizerLoadRetryTests {
+    private struct Transient: Error {}
+
+    @Test("A transient failure is retried and the load succeeds")
+    func retriesTransientFailures() async throws {
+        actor Counter {
+            var calls = 0
+            func next() -> Int { calls += 1; return calls }
+        }
+        let counter = Counter()
+        let value = try await GFTokenizerLoadRetry.run(
+            attempts: GFTokenizerLoadRetry.networkAttempts,
+            sleep: { _ in }
+        ) {
+            guard await counter.next() >= 3 else { throw Transient() }
+            return "loaded"
+        }
+
+        #expect(value == "loaded")
+        #expect(await counter.calls == 3)
+    }
+
+    @Test("The last failure is thrown once the attempts run out")
+    func stopsAfterTheAllowedAttempts() async throws {
+        actor Counter {
+            var calls = 0
+            func next() { calls += 1 }
+        }
+        let counter = Counter()
+        await #expect(throws: Transient.self) {
+            try await GFTokenizerLoadRetry.run(attempts: 3, sleep: { _ in }) {
+                await counter.next()
+                throw Transient()
+            }
+        }
+
+        #expect(await counter.calls == 3)
+    }
+
+    @Test("A single attempt does not retry")
+    func oneAttemptRunsOnce() async throws {
+        actor Counter {
+            var calls = 0
+            func next() { calls += 1 }
+        }
+        let counter = Counter()
+        await #expect(throws: Transient.self) {
+            try await GFTokenizerLoadRetry.run(attempts: 1, sleep: { _ in }) {
+                await counter.next()
+                throw Transient()
+            }
+        }
+
+        #expect(await counter.calls == 1)
+    }
+
+    /// A folder on disk either has the files or does not, so retrying it only
+    /// repeats the same answer.
+    @Test("Only network sources are retried")
+    func onlyNetworkSourcesRetry() {
+        #expect(GFTokenizerLoadRetry.attemptCount(
+            for: .pretrained("some/model"), networkExhausted: false)
+            == GFTokenizerLoadRetry.networkAttempts)
+        #expect(GFTokenizerLoadRetry.attemptCount(
+            for: .local("/tmp/tokenizer"), networkExhausted: false) == 1)
+    }
+
+    /// Once a network load has spent its attempts, a machine that simply has no
+    /// network should fail fast rather than make every later test wait again.
+    @Test("Retries stop being offered after the network has failed once")
+    func exhaustedNetworkStopsRetrying() {
+        #expect(GFTokenizerLoadRetry.attemptCount(
+            for: .pretrained("some/model"), networkExhausted: true) == 1)
+    }
+}

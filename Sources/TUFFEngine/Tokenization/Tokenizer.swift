@@ -1137,29 +1137,95 @@ private extension Array where Element: Equatable {
     }
 }
 
-private enum GFTokenizerLoadSource: Hashable {
+enum GFTokenizerLoadSource: Hashable {
     case pretrained(String)
     case local(String)
+
+    /// Whether resolving this source has to reach the network. A folder on
+    /// disk either has the files or does not; a hub model ID can fail for a
+    /// reason that will not still be true a second later.
+    var isNetwork: Bool {
+        switch self {
+        case .pretrained: return true
+        case .local: return false
+        }
+    }
+}
+
+/// Retry policy for tokenizer loads.
+///
+/// The hub fetch is the one part of loading a tokenizer that can fail without
+/// anything being wrong: a request timed out, a connection dropped. Roughly
+/// seventy tests resolve a tokenizer this way, so a single timeout failed an
+/// otherwise clean run. One transient failure should not be a verdict.
+///
+/// A machine with no network at all is a different case, and retrying there
+/// only makes a doomed run slower. So the retries stop being offered once a
+/// network load has exhausted them: the first caller pays for the attempts and
+/// everything after it fails immediately.
+enum GFTokenizerLoadRetry {
+    static let networkAttempts = 3
+
+    static func attemptCount(for source: GFTokenizerLoadSource,
+                             networkExhausted: Bool) -> Int {
+        source.isNetwork && !networkExhausted ? networkAttempts : 1
+    }
+
+    /// Backoff before the attempt at `index` (1 for the first retry).
+    static func backoff(beforeAttempt index: Int) -> Duration {
+        .milliseconds(index <= 1 ? 500 : 2_000)
+    }
+
+    /// Runs `operation`, retrying up to `attempts` times. Cancellation is not
+    /// a transient failure and is never retried.
+    static func run<T: Sendable>(
+        attempts: Int,
+        sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        var lastError: Error?
+        for attempt in 0..<max(1, attempts) {
+            if attempt > 0 {
+                try Task.checkCancellation()
+                try await sleep(backoff(beforeAttempt: attempt))
+            }
+            do {
+                return try await operation()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? CancellationError()
+    }
 }
 
 private actor GFTokenizerLoadCoordinator {
     static let shared = GFTokenizerLoadCoordinator()
 
     private var tasks: [GFTokenizerLoadSource: Task<GFTokenizer, Error>] = [:]
+    /// Set once a network load has used all its attempts and still failed.
+    private var networkExhausted = false
 
     func load(_ source: GFTokenizerLoadSource) async throws -> GFTokenizer {
         if let task = tasks[source] {
             return try await task.value
         }
 
+        let attempts = GFTokenizerLoadRetry.attemptCount(
+            for: source, networkExhausted: networkExhausted)
         // Keep the CPU-heavy tokenizer build off the coordinator actor; callers
         // share the task result instead of owning its cancellation.
         let task = Task.detached(priority: .userInitiated) { () throws -> GFTokenizer in
-            switch source {
-            case .pretrained(let modelID):
-                return try await GFTokenizer.loadUncached(pretrained: modelID)
-            case .local(let path):
-                return try await GFTokenizer.loadUncached(from: URL(fileURLWithPath: path))
+            try await GFTokenizerLoadRetry.run(attempts: attempts) {
+                switch source {
+                case .pretrained(let modelID):
+                    return try await GFTokenizer.loadUncached(pretrained: modelID)
+                case .local(let path):
+                    return try await GFTokenizer.loadUncached(
+                        from: URL(fileURLWithPath: path))
+                }
             }
         }
         tasks[source] = task
@@ -1168,6 +1234,9 @@ private actor GFTokenizerLoadCoordinator {
             return try await task.value
         } catch {
             tasks[source] = nil
+            if source.isNetwork, attempts > 1, !(error is CancellationError) {
+                networkExhausted = true
+            }
             throw error
         }
     }
