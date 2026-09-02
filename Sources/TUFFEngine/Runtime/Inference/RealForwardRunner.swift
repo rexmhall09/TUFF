@@ -243,7 +243,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// allocation per layer. ~168 KB total at 30 layers × 2816 BF16 — bounded
     /// host work done once at init.
     private let effectiveScaleBuffers: [MTLBuffer]
-    private let sharedExpertProjections: [LayerSharedExpertProjections]
+    private let sharedExpertProjections: [LayerSharedExpertProjections?]
 
     public let maxContext: Int
 
@@ -261,9 +261,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private var rdadviseAdaptivePositionBytes: UInt64 = 0
     public init(model: Model, context: MetalContext, maxContext: Int,
                 runtimeConfiguration: RuntimeConfiguration = .production) throws {
+        let config = model.config
+        if config.feedForwardKind == .mixtureOfExperts,
+           let effectiveSlots = model.routedExpertCacheSlotCount(layer: 0),
+           effectiveSlots < config.topKExperts {
+            throw RuntimeConfigurationError.expertCacheTooSmall(
+                configured: effectiveSlots,
+                required: config.topKExperts)
+        }
         self.model = model
         self.ctx = context
-        self.cfg = model.config
+        self.cfg = config
         self.maxContext = maxContext
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
@@ -275,6 +283,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 byteCap: Self.rdadviseAdaptiveByteCap,
                 slowCallNanos: Self.rdadviseAdaptiveSlowCallNanos))
         self.rdadviseEnabled = runtimeConfiguration.rdadviseEnabled
+        let maximumVisionTokens = (cfg.family == .gemma4 || cfg.family == .qwen36)
+            ? VisionConfig(family: cfg.family).maximumPooledTokens : 0
         self.kv = try KVCacheManager(device: context.device,
                                      config: cfg,
                                      maxContext: maxContext,
@@ -282,8 +292,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      slidingWindow: cfg.slidingWindow,
                                      maxPrefillChunkTokens: max(
                                         PrefillRuntimeConfig.maxChunkTokens,
-                                        min(maxContext, VisionConfig(
-                                            family: cfg.family).maximumPooledTokens)))
+                                        min(maxContext, maximumVisionTokens)))
 
         let silu = cfg.hiddenActivation == "silu"
         self.embedInt4 = try EmbedLookupInt4(context: context)
@@ -456,9 +465,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                  rows: view.shape.0,
                                  cols: view.shape.1)
         }
-        var sharedViews: [LayerSharedExpertProjections] = []
+        var sharedViews: [LayerSharedExpertProjections?] = []
         sharedViews.reserveCapacity(cfg.numLayers)
         for L in 0..<cfg.numLayers {
+            guard cfg.hasSharedExpert else {
+                sharedViews.append(nil)
+                continue
+            }
             let gate = try model.sharedExpertGate(layer: L)
             let up = try model.sharedExpertUp(layer: L)
             let down = try model.sharedExpertDown(layer: L)
@@ -565,6 +578,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     public private(set) var totalCb2Nanos: UInt64 = 0
     public private(set) var totalHeadNanos: UInt64 = 0
     public private(set) var totalHeadFusedNanos: UInt64 = 0
+    /// GPU-side execution time (gpuStartTime→gpuEndTime) of the per-layer
+    /// command buffers and of the head, for TUFF_PHASES diagnostics.
+    public private(set) var totalGPULayerNanos: UInt64 = 0
+    public private(set) var totalGPUHeadNanos: UInt64 = 0
+    public private(set) var totalGPULayerCommandBuffers: UInt64 = 0
+    public private(set) var totalGPURoutedNanos: UInt64 = 0
+    public private(set) var totalGPUSharedNanos: UInt64 = 0
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
     public private(set) var totalRDAdviseNanos: UInt64 = 0
@@ -628,6 +648,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         case .default, .off:
             break
         }
+    }
+
+    public func produce(token: Int32, position: Int, into logits: MTLBuffer,
+                        appendingToFinalCommandBuffer epilogue: (MTLCommandBuffer) -> Void)
+        async throws -> Bool {
+        try prefillChunkState.requireClean(operation: "produce")
+        var encoded = false
+        // `produceToken` calls the epilogue during its own execution, before
+        // returning, so borrowing the non-escaping closure is safe here.
+        try await withoutActuallyEscaping(epilogue) { epilogue in
+            try await produceToken(token: token, position: position, into: logits,
+                                   emitHead: true, outputMode: .greedyIfAvailable,
+                                   epilogue: { cb in
+                                       encoded = true
+                                       epilogue(cb)
+                                   })
+        }
+        return encoded
     }
 
     public func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws {
@@ -1343,6 +1381,34 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         theta: isFull ? Float(cfg.fullRopeTheta) : Float(cfg.ropeTheta),
                         rotatedPairs: rotatedPairs,
                         eps: eps)
+                } else if cfg.usesProjectionWideQKNorm {
+                    let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
+                    prefillRMS.encodeBF16W(
+                        commandBuffer: cb,
+                        x: attnQ,
+                        weight: views.qNorm!.buffer,
+                        weightOffset: Int(views.qNorm!.offset),
+                        out: attnQ,
+                        t: UInt32(t), d: UInt32(qDim), eps: eps)
+                    prefillRMS.encodeBF16W(
+                        commandBuffer: cb,
+                        x: scratch.kStage,
+                        weight: views.kNorm!.buffer,
+                        weightOffset: Int(views.kNorm!.offset),
+                        out: scratch.kStage,
+                        t: UInt32(t), d: UInt32(kvDim), eps: eps)
+                    prefillQKVEpilogue.encodeProjectionWideNeoxSubdimRoPE(
+                        commandBuffer: cb,
+                        q: attnQ, k: scratch.kStage,
+                        startPosition: UInt32(startPosition),
+                        queryCount: UInt32(t),
+                        headDim: UInt32(headDim),
+                        numQHeads: UInt32(cfg.numHeads),
+                        numKVHeads: UInt32(numKVHeads),
+                        qTokenStrideElements: UInt32(qDim),
+                        kvTokenStrideElements: UInt32(kvDim),
+                        theta: Float(cfg.fullRopeTheta),
+                        rotaryDim: rotaryDim)
                 } else if cfg.ropeNeoxSubdim {
                     let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
                     if let mropeBuffers {
@@ -1498,7 +1564,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     weightOffset: Int(views.preFFN!.offset),
                     out: scratch.denseX,
                     t: UInt32(t), d: UInt32(D), eps: eps)
-                let denseProjections = sharedExpertProjections[L]
+                let denseProjections = sharedExpertProjections[L]!
                 try prefillSharedExpert.encodeBlock(
                     commandBuffer: cb,
                     x: scratch.denseX,
@@ -1644,6 +1710,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             } else {
                 perExpertScale = (onesPerExpertScale!, 0)
             }
+            if cfg.usesSigmoidCorrectionRouter {
+                let correction = try model.routerCorrectionBias(layer: L)
+                prefillRouter.encodeMiniMaxBlock(
+                        commandBuffer: cb,
+                        weights: views.router!.buffer,
+                        weightsOffset: Int(views.router!.offset),
+                        scales: views.router!.buffer,
+                        scalesOffset: Int(views.router!.scaleOffset),
+                        biases: views.router!.buffer,
+                        biasesOffset: Int(views.router!.biasOffset),
+                        hidden: scratch.routedX,
+                        effectiveScale: effectiveScaleBuffers[L],
+                        correctionBias: correction.buffer,
+                        correctionBiasOffset: Int(correction.offset),
+                        outIndices: scratch.routeIDs,
+                        outWeights: scratch.routeWeights,
+                        queryCount: UInt32(t),
+                        numExperts: UInt32(cfg.numExperts),
+                        d: UInt32(D),
+                        topK: UInt32(cfg.topKExperts),
+                        hiddenStrideElements: UInt32(D))
+            } else {
             prefillRouter.encodeGemma4Block(
                         commandBuffer: cb,
                         weights: views.router!.buffer,
@@ -1663,6 +1751,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         d: UInt32(D),
                         topK: UInt32(cfg.topKExperts),
                         hiddenStrideElements: UInt32(D))
+            }
 
                     cb.commit()
                     try waitForCompletion(cb)
@@ -1706,7 +1795,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     guard let sharedCB = ctx.queue.makeCommandBuffer() else {
                         throw ModelError.residentBufferWrapFailed
                     }
-                    let sharedProj = sharedExpertProjections[L]
+                    if let sharedProj = sharedExpertProjections[L] {
                     try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
                                                         x: cfg.ffnSandwichNorms
                                                             ? scratch.denseX
@@ -1762,6 +1851,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                 gateOffset: row * halfBytes,
                                 count: D)
                         }
+                    }
                     }
                     sharedCB.commit()
                     try waitForCompletion(sharedCB)
@@ -1936,10 +2026,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     } else {
                         // Plain pre-norm tail: hidden += gated shared branch
                         // + routed branch.
-                        elementwise!.encodeResidualAdd(commandBuffer: tailCB,
-                                                       hidden: scratch.hidden,
-                                                       delta: scratch.h1,
-                                                       count: t * D)
+                        if cfg.hasSharedExpert {
+                            elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+                                                           hidden: scratch.hidden,
+                                                           delta: scratch.h1,
+                                                           count: t * D)
+                        }
                         elementwise!.encodeResidualAdd(commandBuffer: tailCB,
                                                        hidden: scratch.hidden,
                                                        delta: scratch.h2,
@@ -2019,7 +2111,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                               position: Int,
                               into logits: MTLBuffer,
                               emitHead: Bool,
-                              outputMode: PrefillOutputMode) async throws {
+                              outputMode: PrefillOutputMode,
+                              epilogue: ((MTLCommandBuffer) -> Void)? = nil) async throws {
         let kvPosition = kv?.position ?? 0
         guard kvPosition == position else {
             throw PrefillError.prefillCursorMismatch(
@@ -2061,6 +2154,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 try checkCommandBufferError(phase1HitCB.error)
             }
             try checkCommandBufferError(pending.cb.error)
+            totalGPURoutedNanos &+= UInt64(max(0, (pending.cb.gpuEndTime - pending.cb.gpuStartTime) * 1e9))
+            if let sharedCB = pending.sharedCB {
+                totalGPUSharedNanos &+= UInt64(max(0, (sharedCB.gpuEndTime - sharedCB.gpuStartTime) * 1e9))
+            }
             totalCb2Nanos &+= pending.encodeAndCommitNanos
         }
 
@@ -2069,40 +2166,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             for i in 0..<slots.count { ptr[i] = slots[i] }
         }
 
-        // Embed lookup + sqrt(H) fused.
+        // Embed lookup + sqrt(H) fused. Keep these encodes on the first
+        // layer's command buffer: nothing on the CPU consumes `hidden` or the
+        // optional PLE scratch before that layer, so the old standalone
+        // command-buffer commit and synchronous wait were pure token overhead.
         let emb = model.embedding
-        do {
-            try runSync { cb in
-                embedInt4.encode(commandBuffer: cb,
-                                 table:  emb.buffer, tableOffset:  Int(emb.offset),
-                                 scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                                 biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                                 out: hidden,
-                                 tokenId: UInt32(bitPattern: token),
-                                 d: D,
-                                 outScale: embedOutScale)
-                if cfg.hasPerLayerInputs {
-                    let plan = PerLayerEmbeddingPlan(config: cfg)
-                    let identity = model.perLayerEmbedding
-                    embedInt4.encode(
-                        commandBuffer: cb,
-                        table: identity.buffer, tableOffset: Int(identity.offset),
-                        scales: identity.buffer, scalesOffset: Int(identity.scaleOffset),
-                        biases: identity.buffer, biasesOffset: Int(identity.biasOffset),
-                        out: pleIdentity!,
-                        tokenId: UInt32(bitPattern: token),
-                        d: UInt32(plan.packedWidth),
-                        outScale: plan.tokenIdentityScale)
-                    let projection = model.perLayerModelProjection
-                    int4.encode(
-                        commandBuffer: cb,
-                        weights: projection.buffer, weightsOffset: Int(projection.offset),
-                        scales: projection.buffer, scalesOffset: Int(projection.scaleOffset),
-                        biases: projection.buffer, biasesOffset: Int(projection.biasOffset),
-                        x: hidden, y: pleContext!,
-                        m: UInt32(plan.packedWidth), n: D)
-                }
-            }
+        var firstLayerCommandBuffer: MTLCommandBuffer? = ctx.queue.makeCommandBuffer()!
+        embedInt4.encode(commandBuffer: firstLayerCommandBuffer!,
+                         table:  emb.buffer, tableOffset:  Int(emb.offset),
+                         scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                         biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                         out: hidden,
+                         tokenId: UInt32(bitPattern: token),
+                         d: D,
+                         outScale: embedOutScale)
+        if cfg.hasPerLayerInputs {
+            let plan = PerLayerEmbeddingPlan(config: cfg)
+            let identity = model.perLayerEmbedding
+            embedInt4.encode(
+                commandBuffer: firstLayerCommandBuffer!,
+                table: identity.buffer, tableOffset: Int(identity.offset),
+                scales: identity.buffer, scalesOffset: Int(identity.scaleOffset),
+                biases: identity.buffer, biasesOffset: Int(identity.biasOffset),
+                out: pleIdentity!,
+                tokenId: UInt32(bitPattern: token),
+                d: UInt32(plan.packedWidth),
+                outScale: plan.tokenIdentityScale)
+            let projection = model.perLayerModelProjection
+            int4.encode(
+                commandBuffer: firstLayerCommandBuffer!,
+                weights: projection.buffer, weightsOffset: Int(projection.offset),
+                scales: projection.buffer, scalesOffset: Int(projection.scaleOffset),
+                biases: projection.buffer, biasesOffset: Int(projection.biasOffset),
+                x: hidden, y: pleContext!,
+                m: UInt32(plan.packedWidth), n: D)
         }
 
         for L in 0..<cfg.numLayers {
@@ -2122,7 +2219,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             // Everything up to and including the router runs in a single CB:
             // the only reason to break is the CPU readback of router indices
             // needed to issue I/O for the routed-expert blobs.
-            let cb = ctx.queue.makeCommandBuffer()!
+            let cb: MTLCommandBuffer
+            if let first = firstLayerCommandBuffer {
+                cb = first
+                firstLayerCommandBuffer = nil
+            } else {
+                cb = ctx.queue.makeCommandBuffer()!
+            }
             rms.encodeBF16W(commandBuffer: cb,
                             x: hidden,
                             weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
@@ -2244,6 +2347,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 let rotated = isFull
                     ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
                     : UInt32(headDimL / 2)
+                if cfg.usesProjectionWideQKNorm {
+                    guard let rope else {
+                        preconditionFailure("MiniMax attention requires RoPE kernels")
+                    }
+                    rms.encodeBF16W(commandBuffer: cb,
+                                    x: qScratch,
+                                    weight: qNorm.buffer,
+                                    weightOffset: Int(qNorm.offset),
+                                    out: qScratch,
+                                    d: qDim, eps: eps)
+                    rms.encodeBF16W(commandBuffer: cb,
+                                    x: kSlot.buffer,
+                                    xOffset: kSlot.offset,
+                                    weight: kNorm.buffer,
+                                    weightOffset: Int(kNorm.offset),
+                                    out: kSlot.buffer,
+                                    outOffset: kSlot.offset,
+                                    d: kvDim, eps: eps)
+                    let rotaryDim = UInt32(Double(headDimL) * cfg.partialRotaryFactor)
+                    rope.encodeNeoxSubdim(
+                        commandBuffer: cb, data: qScratch,
+                        position: UInt32(position), headDim: UInt32(headDimL),
+                        numHeads: UInt32(cfg.numHeads), rotaryDim: rotaryDim,
+                        theta: Float(cfg.fullRopeTheta))
+                    rope.encodeNeoxSubdim(
+                        commandBuffer: cb, data: kSlot.buffer, dataOffset: kSlot.offset,
+                        position: UInt32(position), headDim: UInt32(headDimL),
+                        numHeads: UInt32(numKVL), rotaryDim: rotaryDim,
+                        theta: Float(cfg.fullRopeTheta))
+                } else {
                 fusedQKVEpilogue.encode(commandBuffer: cb,
                                         q: qScratch,
                                         k: kSlot.buffer,
@@ -2261,6 +2394,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                         theta: isFull ? Float(cfg.fullRopeTheta) : Float(cfg.ropeTheta),
                                         rotatedPairs: rotated,
                                         eps: eps)
+                }
 
                 guard kv != nil else {
                     preconditionFailure("FP16 attention requires an FP16 KV cache")
@@ -2304,14 +2438,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             if cfg.feedForwardKind == .dense {
                 try encodeDenseGemmaLayerDecode(
                     cb, layer: L, postAttention: postAttn,
-                    projections: sharedProj, d: D, eps: eps)
-                cb.commit()
-                let waitStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                waitUntilCompleted(cb)
-                let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - waitStart
-                try checkCommandBufferError(cb.error)
-                totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                    - tCb1Start - waitNanos
+                    projections: sharedProj!, d: D, eps: eps)
+                // A dense layer produces nothing the CPU reads, so the whole
+                // token stays on one command buffer: the layer's work is
+                // handed to the next iteration instead of being committed and
+                // waited on here. Each round trip cost ~130 us of wall time
+                // against ~500 us of GPU work, so 35 of them per token were
+                // most of the gap between GPU time and tokens per second.
+                firstLayerCommandBuffer = cb
+                totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start
                 continue
             }
 
@@ -2358,6 +2493,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 perExpertScale = (onesPerExpertScale!, 0)
             }
 
+            if cfg.usesSigmoidCorrectionRouter {
+                let correction = try model.routerCorrectionBias(layer: L)
+                moe.encodeRouterMiniMax(commandBuffer: cb,
+                    weights: routerW.buffer, weightsOffset: Int(routerW.offset),
+                    scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
+                    biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
+                    hidden: routedX,
+                    effectiveScale: effectiveScaleBuffers[L],
+                    correctionBias: correction.buffer,
+                    correctionBiasOffset: Int(correction.offset),
+                    outIndices: outIndices, outWeights: outWeights,
+                    numExperts: UInt32(cfg.numExperts), d: D,
+                    topK: UInt32(cfg.topKExperts))
+            } else {
             moe.encodeRouterGemma4(commandBuffer: cb,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
                 scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
@@ -2368,6 +2517,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 perExpertScaleOffset: perExpertScale.offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+            }
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitUntilCompleted(cb)
@@ -2377,6 +2527,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 pendingRoutedCommand = nil
             }
             try checkCommandBufferError(cb.error)
+            totalGPULayerNanos &+= UInt64(max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1e9))
+            totalGPULayerCommandBuffers &+= 1
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
 
             // CPU readback to fetch routed-expert blobs from disk.
@@ -2401,10 +2553,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             var phase1MissSlots: [UInt32] = []
 
             if let plan = plannedFetch {
-                let missSet = Set(plan.misses)
-                phase1HitSlots = (0..<cfg.topKExperts)
-                    .filter { !missSet.contains($0) }
-                    .map { UInt32($0) }
+                phase1HitSlots.reserveCapacity(cfg.topKExperts - plan.misses.count)
+                for slot in 0..<cfg.topKExperts where !plan.misses.contains(slot) {
+                    phase1HitSlots.append(UInt32(slot))
+                }
                 phase1MissSlots = plan.misses.map { UInt32($0) }
             }
             func encodeRoutedPhase1Full(
@@ -2472,7 +2624,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             // the routed experts. Commit it without waiting so its GPU work
             // overlaps the routed-expert pread. The routed CB follows it on
             // the same queue, so the combine sees h1Buf.
-            let sharedCB = ctx.queue.makeCommandBuffer()!
+            let sharedCB = sharedProj.map { _ in ctx.queue.makeCommandBuffer()! }
+            if let sharedCB, let sharedProj {
             try! shared.encode(commandBuffer: sharedCB,
                                x: cfg.ffnSandwichNorms ? denseX : routedX,
                                gate: sharedProj.gate,
@@ -2507,6 +2660,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                     count: cfg.hiddenSize)
             }
             sharedCB.commit()
+            }
             if let cb = phase1HitCB {
                 cb.commit()
             }
@@ -2605,7 +2759,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                    routedOffsets: routedOffsets,
                                                    acts: moeActs,
                                                    routingWeights: outWeights,
-                                                   residual: cfg.ffnSandwichNorms ? zeroResidual : h1Buf,
+                                                   residual: (!cfg.ffnSandwichNorms && cfg.hasSharedExpert)
+                                                       ? h1Buf : zeroResidual,
                                                    y: h2Buf,
                                                    d: D,
                                                    f: FmoE,
@@ -2654,20 +2809,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 d: D, vocab: UInt32(self.cfg.vocabSize),
                 rmsEps: eps)
         }
+        // A dense token carries its layers on `firstLayerCommandBuffer`; the
+        // head joins them so the token costs exactly one commit and one wait.
+        let pendingTokenCommandBuffer = firstLayerCommandBuffer
+        firstLayerCommandBuffer = nil
         if emitHead {
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let head = useFusedHeadForThisToken ? gFusionHead : { cb in
+                gFinalNorm(cb)
+                gLmHead(cb)
+            }
+            if let cb = pendingTokenCommandBuffer {
+                head(cb)
+                epilogue?(cb)
+                cb.commit()
+                waitUntilCompleted(cb)
+                try checkCommandBufferError(cb.error)
+                totalGPULayerNanos &+= UInt64(max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1e9))
+                totalGPULayerCommandBuffers &+= 1
+            } else {
+                try runSync(head)
+            }
             if useFusedHeadForThisToken {
-                try runSync(gFusionHead)
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             } else {
-                try runSync { cb in
-                    gFinalNorm(cb)
-                    gLmHead(cb)
-                }
                 totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
             }
+        } else if let cb = pendingTokenCommandBuffer {
+            cb.commit()
+            waitUntilCompleted(cb)
+            try checkCommandBufferError(cb.error)
+            totalGPULayerNanos &+= UInt64(max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1e9))
+            totalGPULayerCommandBuffers &+= 1
         }
 
         kv?.advance()
@@ -2951,6 +3126,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         body(cb)
         cb.commit()
         try waitForCompletion(cb)
+        totalGPUHeadNanos &+= UInt64(max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1e9))
     }
 
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) throws {
@@ -2962,4 +3138,130 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         cb.waitUntilCompleted()
     }
 
+}
+
+// MARK: - Decode kernel benchmark (diagnostic)
+
+extension RealForwardRunner {
+    /// Times the decode projections against this model's own resident tensors
+    /// and reports achieved memory bandwidth, then times command-buffer round
+    /// trips. Decode is memory-bound, so those two numbers say whether a token
+    /// is limited by the kernels or by submission latency. The CLI exposes it
+    /// behind `TUFF_KERNEL_BENCH=1`.
+    public func benchmarkDecodeKernels(repetitions: Int = 20) throws -> String {
+        var report = ""
+        let D = UInt32(cfg.hiddenSize)
+        guard let scratchLogits = ctx.device.makeBuffer(
+            length: cfg.vocabSize * MemoryLayout<Float16>.size,
+            options: .storageModeShared) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        // Real activations: an all-zero input can be measured optimistically.
+        for buffer in [normed, denseX, attnOut, hidden, denseScratchAct] {
+            let count = buffer.length / MemoryLayout<Float16>.size
+            let pointer = buffer.contents().assumingMemoryBound(to: Float16.self)
+            for i in 0..<count { pointer[i] = Float16(sin(Float(i) * 0.37) * 0.5) }
+        }
+        func gemvBytes(_ view: TensorView) -> Double {
+            Double(view.length + view.scaleLength + view.biasLength)
+        }
+        /// Best of several rounds. Each timed buffer is preceded by a burst of
+        /// real work so nothing is measured at idle GPU clocks.
+        func time(_ label: String, bytesPerRep: Double,
+                  _ body: @escaping (MTLCommandBuffer) throws -> Void) throws {
+            let cb = ctx.queue.makeCommandBuffer()!
+            try body(cb)
+            cb.commit()
+            cb.waitUntilCompleted()
+            let lm = model.lmHead
+            var best = Double.infinity
+            for _ in 0..<4 {
+                let heater = ctx.queue.makeCommandBuffer()!
+                for _ in 0..<2 {
+                    int4.encode(commandBuffer: heater,
+                                weights: lm.buffer, weightsOffset: Int(lm.offset),
+                                scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                                biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                                x: normed, y: scratchLogits,
+                                m: UInt32(cfg.vocabSize), n: D)
+                }
+                heater.commit()
+                let timed = ctx.queue.makeCommandBuffer()!
+                for _ in 0..<repetitions { try body(timed) }
+                timed.commit()
+                timed.waitUntilCompleted()
+                try checkCommandBufferError(timed.error)
+                best = min(best, timed.gpuEndTime - timed.gpuStartTime)
+            }
+            report += String(format: "%-34@ %9.1f us  %7.1f GB/s  (%.1f MB)\n",
+                             label as NSString,
+                             best / Double(repetitions) * 1e6,
+                             bytesPerRep * Double(repetitions) / best / 1e9,
+                             bytesPerRep / 1e6)
+        }
+        func gemv(_ label: String, _ view: TensorView, x: MTLBuffer, y: MTLBuffer) throws {
+            try time("\(label) \(view.shape.0)x\(view.shape.1)",
+                     bytesPerRep: gemvBytes(view)) { [self] cb in
+                int4.encode(commandBuffer: cb,
+                            weights: view.buffer, weightsOffset: Int(view.offset),
+                            scales: view.buffer, scalesOffset: Int(view.scaleOffset),
+                            biases: view.buffer, biasesOffset: Int(view.biasOffset),
+                            x: x, y: y, m: view.shape.0, n: view.shape.1)
+            }
+        }
+        for L in Set([0, cfg.numLayers / 2, cfg.numLayers - 1]).sorted() {
+            try gemv("L\(L) q_proj", try model.qProj(layer: L), x: normed, y: qScratch)
+            try gemv("L\(L) o_proj", try model.oProj(layer: L), x: attnOut, y: oOut)
+            if cfg.hasSharedExpert {
+                try gemv("L\(L) gate_proj", try model.sharedExpertGate(layer: L),
+                         x: denseX, y: denseScratchGate)
+                try gemv("L\(L) down_proj", try model.sharedExpertDown(layer: L),
+                         x: denseScratchAct, y: h1Buf)
+            }
+        }
+        try gemv("lm_head", model.lmHead, x: normed, y: scratchLogits)
+
+        // Wall-clock cost of a command-buffer round trip. Every one of these a
+        // token pays is latency no kernel change can recover.
+        let inputNorm = try model.inputNorm(layer: 0)
+        func wall(_ label: String, iterations: Int, _ body: () -> Void) {
+            for _ in 0..<3 { body() }
+            var best = UInt64.max
+            for _ in 0..<5 {
+                let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                for _ in 0..<iterations { body() }
+                best = min(best, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start)
+            }
+            report += String(format: "%-34@ %9.1f us wall\n", label as NSString,
+                             Double(best) / Double(iterations) / 1000.0)
+        }
+        func encodeNorms(_ cb: MTLCommandBuffer, count: Int) {
+            for _ in 0..<count {
+                rms.encodeBF16W(commandBuffer: cb, x: hidden,
+                                weight: inputNorm.buffer,
+                                weightOffset: Int(inputNorm.offset),
+                                out: normed, d: D, eps: 1e-6)
+            }
+        }
+        wall("empty CB commit+wait", iterations: 200) { [self] in
+            let cb = ctx.queue.makeCommandBuffer()!
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
+        wall("16 norms, one CB", iterations: 100) { [self] in
+            let cb = ctx.queue.makeCommandBuffer()!
+            encodeNorms(cb, count: 16)
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
+        wall("16 norms, 16 CBs", iterations: 20) { [self] in
+            for _ in 0..<16 {
+                let cb = ctx.queue.makeCommandBuffer()!
+                encodeNorms(cb, count: 1)
+                cb.commit()
+                cb.waitUntilCompleted()
+            }
+        }
+        return report
+    }
 }

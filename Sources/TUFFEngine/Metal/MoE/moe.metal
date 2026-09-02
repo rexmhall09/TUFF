@@ -321,6 +321,56 @@ kernel void router_topk_select_k8(
     }
 }
 
+// MiniMax M2.7 chooses experts by sigmoid(logit) plus a learned correction,
+// but combines the selected experts with the uncorrected sigmoid probabilities
+// renormalized over top-k.
+kernel void router_topk_select_minimax_k8(
+    device const float* logits [[buffer(0)]],
+    device const float* correction_bias [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (tid != 0) return;
+    const uint NE = router_fc_num_experts(num_experts);
+    uint top_idx[8];
+    float top_score[8];
+    for (uint i = 0; i < 8; ++i) {
+        top_idx[i] = 0u;
+        top_score[i] = -INFINITY;
+    }
+    for (uint e = 0; e < NE; ++e) {
+        const float probability = 1.0f / (1.0f + fast::exp(-logits[e]));
+        const float score = probability + correction_bias[e];
+        if (score <= top_score[7]) continue;
+        uint pos = 8u;
+        for (uint i = 0; i < 8; ++i) {
+            if (score > top_score[i] || (score == top_score[i] && e < top_idx[i])) {
+                pos = i;
+                break;
+            }
+        }
+        if (pos >= 8u) continue;
+        for (uint i = 7; i > pos; --i) {
+            top_idx[i] = top_idx[i - 1];
+            top_score[i] = top_score[i - 1];
+        }
+        top_idx[pos] = e;
+        top_score[pos] = score;
+    }
+    float sum = 0.0f;
+    float probabilities[8];
+    for (uint i = 0; i < 8; ++i) {
+        probabilities[i] = 1.0f / (1.0f + fast::exp(-logits[top_idx[i]]));
+        sum += probabilities[i];
+    }
+    for (uint i = 0; i < 8; ++i) {
+        out_indices[i] = top_idx[i];
+        out_weights[i] = half(probabilities[i] / sum);
+    }
+}
+
 // Each SIMD computes one affine INT4 row. Four adjacent groups are loaded as
 // aligned 32-bit chunks; remaining groups use one byte per lane.
 static inline float moe_int4_gemv_row_simd_dev_vec(

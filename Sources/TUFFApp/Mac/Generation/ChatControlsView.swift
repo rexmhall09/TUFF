@@ -50,8 +50,8 @@ struct ChatControlsView: View {
         switch model.selectedDescriptor.reasoningControl {
         case .toggle, .toggleWithPreservation:
             Picker("Thinking", selection: $model.reasoning) {
-                Text("Thinking off").tag(ChatReasoning.off)
-                Text("Thinking on").tag(ChatReasoning.on)
+                Text("Thinking Off").tag(ChatReasoning.off)
+                Text("Thinking On").tag(ChatReasoning.on)
             }
             .labelsHidden()
             .pickerStyle(.menu)
@@ -63,9 +63,9 @@ struct ChatControlsView: View {
             .accessibilityLabel("Thinking")
         case .graded:
             Picker("Reasoning", selection: $model.reasoningEffort) {
-                Text("Reasoning low").tag(GPTOSSReasoningEffort.low)
-                Text("Reasoning medium").tag(GPTOSSReasoningEffort.medium)
-                Text("Reasoning high").tag(GPTOSSReasoningEffort.high)
+                Text("Reasoning Low").tag(GPTOSSReasoningEffort.low)
+                Text("Reasoning Medium").tag(GPTOSSReasoningEffort.medium)
+                Text("Reasoning High").tag(GPTOSSReasoningEffort.high)
             }
             .labelsHidden()
             .pickerStyle(.menu)
@@ -75,6 +75,14 @@ struct ChatControlsView: View {
             .frame(height: 28)
             .background(pillBackground)
             .accessibilityLabel("Reasoning effort")
+        case .alwaysOn:
+            Text("Thinking On")
+                .foregroundStyle(TUFFMacTheme.accentColor)
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background(pillBackground)
+                .help("This model always reasons before answering")
+                .accessibilityLabel("Thinking always on")
         case nil:
             EmptyView()
         }

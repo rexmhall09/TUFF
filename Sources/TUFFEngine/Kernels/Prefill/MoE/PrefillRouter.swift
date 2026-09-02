@@ -29,9 +29,55 @@ public struct PrefillTokenExpertPair: Equatable, Sendable {
 
 final class PrefillRouter {
     private let pso: MTLComputePipelineState
+    private let minimaxPSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.pso = try context.pipeline("prefill_router_gemma4_block")
+        self.minimaxPSO = try context.pipeline("prefill_router_minimax_block")
+    }
+
+    func encodeMiniMaxBlock(commandBuffer: MTLCommandBuffer,
+                            weights: MTLBuffer, weightsOffset: Int = 0,
+                            scales: MTLBuffer, scalesOffset: Int = 0,
+                            biases: MTLBuffer, biasesOffset: Int = 0,
+                            hidden: MTLBuffer, hiddenOffset: Int = 0,
+                            effectiveScale: MTLBuffer,
+                            correctionBias: MTLBuffer,
+                            correctionBiasOffset: Int = 0,
+                            outIndices: MTLBuffer, outIndicesOffset: Int = 0,
+                            outWeights: MTLBuffer, outWeightsOffset: Int = 0,
+                            queryCount: UInt32,
+                            numExperts: UInt32,
+                            d: UInt32,
+                            topK: UInt32,
+                            hiddenStrideElements: UInt32) {
+        precondition(queryCount > 0 && numExperts <= 256)
+        precondition(topK > 0 && topK <= 64)
+        precondition(d % UInt32(Quantization.groupSize) == 0)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(minimaxPSO)
+        enc.setBuffer(weights, offset: weightsOffset, index: 0)
+        enc.setBuffer(scales, offset: scalesOffset, index: 1)
+        enc.setBuffer(biases, offset: biasesOffset, index: 2)
+        enc.setBuffer(hidden, offset: hiddenOffset, index: 3)
+        enc.setBuffer(effectiveScale, offset: 0, index: 4)
+        enc.setBuffer(correctionBias, offset: correctionBiasOffset, index: 5)
+        enc.setBuffer(outIndices, offset: outIndicesOffset, index: 6)
+        enc.setBuffer(outWeights, offset: outWeightsOffset, index: 7)
+        var t = queryCount
+        var ne = numExperts
+        var dimension = d
+        var k = topK
+        var stride = hiddenStrideElements
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 8)
+        enc.setBytes(&ne, length: MemoryLayout<UInt32>.size, index: 9)
+        enc.setBytes(&dimension, length: MemoryLayout<UInt32>.size, index: 10)
+        enc.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 11)
+        enc.setBytes(&stride, length: MemoryLayout<UInt32>.size, index: 12)
+        let width = min(max(Int(numExperts), 32), minimaxPSO.maxTotalThreadsPerThreadgroup)
+        enc.dispatchThreadgroups(MTLSize(width: Int(queryCount), height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     func encodeGemma4Block(commandBuffer: MTLCommandBuffer,

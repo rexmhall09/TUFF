@@ -71,6 +71,19 @@ import Metal
         #expect(model.openLayerFileCount() == 0)
     }
 
+    @Test func routedExpertCacheSlotCountCapsAtExpertsPerLayer() throws {
+        let dir = try ModelLoaderTests.writeToySynthetic()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let model = try Model.load(directoryURL: dir, device: device,
+                                   expecting: .gemma4Toy(),
+                                   streamingMode: .pread(slotCount: 128))
+
+        #expect(model.openLayerFileCount() == 0)
+        #expect(model.routedExpertCacheSlotCount(layer: 1) == 16)
+        #expect(model.openLayerFileCount() == 0)
+    }
+
     @Test func beginOpeningRoutedExpertStreamerIsCompatibleWithLazyFetch() throws {
         let dir = try ModelLoaderTests.writeToySynthetic()
         defer { try? FileManager.default.removeItem(at: dir) }

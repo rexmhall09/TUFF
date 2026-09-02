@@ -42,6 +42,7 @@ public enum ChatDialect: String, Sendable {
     case gemma
     case chatml
     case harmony
+    case minimax
 }
 
 /// Model-supported reasoning switch used by chat prompt renderers.
@@ -81,6 +82,7 @@ public struct GFTokenizer: @unchecked Sendable {
     public static let chatTemplateIdentity = "gemma4-it-text-no-tools-v1"
     public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
     public static let harmonyChatTemplateIdentity = "gpt-oss-harmony-v1"
+    public static let minimaxChatTemplateIdentity = "minimax-m2.7-v1"
 
     public let dialect: ChatDialect
     /// Decoder pipeline declared by the installed `tokenizer.json`.
@@ -269,6 +271,9 @@ public struct GFTokenizer: @unchecked Sendable {
         if Self.specialTokenID(tokenizer, Self.harmonyStartMark) != nil {
             dialect = .harmony
             resolved = try Self.resolveHarmonyTokens(tokenizer)
+        } else if Self.specialTokenID(tokenizer, Self.minimaxBOSMark) != nil {
+            dialect = .minimax
+            resolved = try Self.resolveMiniMaxTokens(tokenizer)
         } else if Self.specialTokenID(tokenizer, Self.imEndMark) != nil {
             dialect = .chatml
             resolved = try Self.resolveChatMLTokens(tokenizer)
@@ -474,6 +479,38 @@ public struct GFTokenizer: @unchecked Sendable {
             vocabSize: 201_088)
     }
 
+    private static func resolveMiniMaxTokens(
+        _ tokenizer: any Tokenizer
+    ) throws -> ResolvedSpecialTokens {
+        func id(_ token: String) throws -> Int32 {
+            try Self.requireTokenID(tokenizer, token)
+        }
+        let bos = try id(Self.minimaxBOSMark)
+        _ = try id(Self.minimaxTurnMark)
+        let eos = try id(Self.minimaxEOSMark)
+        let thinkStart = try id("<think>")
+        let thinkEnd = try id("</think>")
+        let toolStart = try id("<minimax:tool_call>")
+        let toolEnd = try id("</minimax:tool_call>")
+        return ResolvedSpecialTokens(
+            bosID: bos,
+            bosPrefixID: nil,
+            eosID: eos,
+            padID: eos,
+            endOfTurnID: eos,
+            toolCallStartID: toolStart,
+            toolCallEndID: toolEnd,
+            toolResponseID: eos,
+            toolResponseEndID: eos,
+            channelStartID: thinkStart,
+            channelEndID: thinkEnd,
+            thinkStartID: thinkStart,
+            thinkEndID: thinkEnd,
+            harmonyTokenIDs: nil,
+            stopTokenIDs: [eos],
+            vocabSize: 200_064)
+    }
+
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
     ///
     /// The library's `addSpecialTokens: true` flag is a no-op for the Gemma 4 IT
@@ -587,6 +624,9 @@ public struct GFTokenizer: @unchecked Sendable {
     private static let imStartMark = "<|im_start|>"
     private static let imEndMark   = "<|im_end|>"
     private static let harmonyStartMark = "<|start|>"
+    private static let minimaxBOSMark = "]~!b["
+    private static let minimaxTurnMark = "]~b]"
+    private static let minimaxEOSMark = "[e~["
     /// Generation prompt with thinking disabled, matching the Jinja template's
     /// `add_generation_prompt` + `enable_thinking=false` branch.
     private static let chatMLThinkingOffSuffix =
@@ -624,6 +664,9 @@ public struct GFTokenizer: @unchecked Sendable {
         case .harmony:
             throw GFTokenizerError.unsupportedForDialect(
                 "binary reasoning control for Harmony")
+        case .minimax:
+            return try minimaxChatTemplate(
+                messages, preserveThinking: preserveThinking)
         }
     }
 
@@ -738,6 +781,50 @@ public struct GFTokenizer: @unchecked Sendable {
         return s
     }
 
+    private func minimaxChatTemplate(
+        _ messages: [Message],
+        preserveThinking: Bool
+    ) throws -> String {
+        var remaining = messages[...]
+        let system: String
+        if let first = messages.first, first.role == .system {
+            guard let content = first.content else {
+                throw GFTokenizerError.invalidChatTemplate("system message requires content")
+            }
+            system = content
+            remaining = messages.dropFirst()
+        } else {
+            system = "You are a helpful assistant. Your name is MiniMax-M2.7 and is built by MiniMax."
+        }
+        let lastUser = remaining.lastIndex { $0.role == .user }
+        var rendered = Self.minimaxBOSMark + Self.minimaxTurnMark
+            + "system\n" + system + Self.minimaxEOSMark + "\n"
+        for index in remaining.indices {
+            let message = remaining[index]
+            guard let content = message.content else {
+                throw GFTokenizerError.invalidChatTemplate("text-only messages require content")
+            }
+            switch message.role {
+            case .user:
+                rendered += Self.minimaxTurnMark + "user\n" + content
+                    + Self.minimaxEOSMark + "\n"
+            case .assistant:
+                rendered += Self.minimaxTurnMark + "ai\n"
+                if preserveThinking, index > (lastUser ?? remaining.startIndex),
+                   let thinking = message.thinking, !thinking.isEmpty {
+                    rendered += "<think>\n" + thinking + "\n</think>\n\n"
+                }
+                rendered += content + Self.minimaxEOSMark + "\n"
+            case .system, .developer:
+                throw GFTokenizerError.invalidChatTemplate("system message must be first")
+            case .tool:
+                throw GFTokenizerError.invalidChatTemplate(
+                    "tool messages require the installed MiniMax chat template")
+            }
+        }
+        return rendered + Self.minimaxTurnMark + "ai\n<think>\n"
+    }
+
     public func encodeToolChat(messages: [Message],
                                tools: [FunctionDefinition],
                                reasoning: ChatReasoning = .off) throws -> [Int32] {
@@ -833,6 +920,11 @@ public struct GFTokenizer: @unchecked Sendable {
             return [eosID] + encode(
                 "\(Self.harmonyStartMark)user<|message|>\(content)<|end|>"
                     + "\(Self.harmonyStartMark)assistant",
+                addBOS: false)
+        case .minimax:
+            return [eosID] + encode(
+                "\n\(Self.minimaxTurnMark)user\n\(content)\(Self.minimaxEOSMark)\n"
+                    + "\(Self.minimaxTurnMark)ai\n<think>\n",
                 addBOS: false)
         }
     }

@@ -2,6 +2,10 @@ import Metal
 
 /// MLX-affine INT4 matrix-vector multiplication.
 /// Eight SIMD groups process eight output rows per threadgroup.
+///
+/// Measured on M2 (E2B shapes): this one-row-per-SIMD layout reaches 55-80
+/// GB/s and beat wider-load designs (8 or 4 rows per SIMD with 16-byte
+/// vector loads ran 1.3-2x slower), so it stays the production kernel.
 final class DequantInt4GEMV {
     private struct Shape: Hashable {
         var m: UInt32
@@ -60,13 +64,37 @@ final class DequantInt4GEMV {
                 yOffset: Int = 0,
                 m: UInt32,
                 n: UInt32) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encode(encoder: encoder,
+               weights: weights, weightsOffset: weightsOffset,
+               scales: scales, scalesOffset: scalesOffset,
+               biases: biases, biasesOffset: biasesOffset,
+               x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+               m: m, n: n)
+        encoder.endEncoding()
+    }
+
+    /// Encode onto an open serial compute encoder (the decode path batches a
+    /// whole token into one encoder).
+    func encode(encoder: MTLComputeCommandEncoder,
+                weights: MTLBuffer,
+                weightsOffset: Int = 0,
+                scales: MTLBuffer,
+                scalesOffset: Int = 0,
+                biases: MTLBuffer,
+                biasesOffset: Int = 0,
+                x: MTLBuffer,
+                xOffset: Int = 0,
+                y: MTLBuffer,
+                yOffset: Int = 0,
+                m: UInt32,
+                n: UInt32) {
         precondition(n % UInt32(Quantization.groupSize) == 0,
                      "N must be a multiple of \(Quantization.groupSize)")
         // The kernel reads packed weights through a `ushort*`; the repacker
         // guarantees two-byte sub-tensor alignment but not four-byte alignment.
         precondition(weightsOffset % 2 == 0,
                      "dequant_int4_gemv_simd needs a 2-aligned weightsOffset, got \(weightsOffset)")
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(
             specializedPipelines[Shape(m: m, n: n)] ?? pipeline)
         encoder.setBuffer(weights, offset: weightsOffset, index: 0)
@@ -89,6 +117,5 @@ final class DequantInt4GEMV {
             depth: 1)
         encoder.dispatchThreadgroups(threadgroupCount,
                                      threadsPerThreadgroup: threadgroupSize)
-        encoder.endEncoding()
     }
 }

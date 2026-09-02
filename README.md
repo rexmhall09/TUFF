@@ -128,13 +128,14 @@ The interface has four places:
   labelled with the model that produced it, so a chat that switched models
   mid-way still says which answer came from where. The model picker in the
   message box offers the models that are on this Mac; downloads live in Models.
-- **Models** shows all seven checkpoints and their real disk and memory
+- **Models** shows all eight checkpoints and their real disk and memory
   requirements. Image support lives inside the model card as a separate,
   optional download.
 - **Server** runs an OpenAI-compatible endpoint on `127.0.0.1`. Chat and Server
   share one decode service, so TUFF never starts a second copy of the model.
 - **Settings** keeps simple chat behavior separate from per-model context,
-  sampling, cache, prefill, and memory controls.
+  sampling, cache, prefill, and memory controls. Per-model memory defaults to
+  Auto; turning it off restores that model's saved manual choices.
 
 Both sides of the conversation render headings, lists, links, quotes, code
 blocks, inline code, emphasis, and LaTeX math such as `$a^2 + b^2 = c^2$`. Math
@@ -161,15 +162,21 @@ copy of a checkpoint first.
 | Qwen3.6 35B-A3B | Coding, long context, and images | 19.55 GB | 8 GB | Image input |
 | GPT-OSS 20B | Reasoning and local tool workflows | 13.79 GB | 16 GB | None |
 | GPT-OSS 120B | The largest and highest-quality option | 65.4 GB | 16 GB | None |
+| MiniMax M2.7 4-bit | Always-thinking, file-backed 229B MoE | 128.71 GB | 16 GB | None |
 
 Gemma and Qwen expose thinking on or off. GPT-OSS exposes low, medium, and high
 reasoning. Qwen can also preserve thinking between turns from its advanced
-profile.
+profile. MiniMax M2.7 always reasons, so TUFF labels it as always on and keeps
+its thought channel separate from the visible answer instead of presenting a
+switch the checkpoint cannot honor.
 
-TUFF reads physical unified memory with `hw.memsize`, then checks the selected
-model, context length, KV layout, cache slots, and a system reserve. Models that
-are not safe for a Mac stay visible but gray, with Download and Load disabled
-and an explanation. Disk space is checked separately.
+TUFF reads physical unified memory with `hw.memsize` plus reclaimable memory at
+app launch, then checks the selected model, context length, KV layout, cache
+slots, and a system reserve. Auto spends safe spare capacity on more resident
+experts, reducing SSD reads during generation; its manual context, cache, and
+prefill controls remain visible but disabled until Auto is turned off. Models
+that are not safe for a Mac stay visible but gray, with Download and Load
+disabled and an explanation. Disk space is checked separately.
 
 The memory limits above come from real model runs. They are not guesses based
 on parameter count. GPT-OSS 120B completed a coherent 4K-context run on my 16 GB
@@ -188,15 +195,60 @@ variance.
 One short question, `What is the capital of France?`, one process per model.
 Decode rate excludes install, load, and prefill. Every model answered correctly:
 
-| Model | Decode | Prefill | Peak RSS |
-| --- | ---: | ---: | ---: |
-| Gemma 4 E4B IT | 17.05 tok/s | 1.02 s | 374 MiB |
-| Gemma 4 26B-A4B IT | 7.82 tok/s | 6.92 s | 1,844 MiB |
-| Qwen3.6 35B-A3B | 7.15 tok/s | 9.65 s | 1,406 MiB |
-| GPT-OSS 20B | 3.73 tok/s | 13.32 s | 1,932 MiB |
-| GPT-OSS 120B | 0.49 tok/s | 47.58 s | 1,659 MiB |
+| Model | Decode | Prefill | Peak RSS | Measured on |
+| --- | ---: | ---: | ---: | --- |
+| Gemma 4 E2B IT | 40.30 tok/s | 0.54 s | 324 MiB | v4.0.0 |
+| Gemma 4 E4B IT | 17.05 tok/s | 1.02 s | 374 MiB | v3.0.3 |
+| Gemma 4 26B-A4B IT | 7.82 tok/s | 6.92 s | 1,844 MiB | v3.0.3 |
+| Qwen3.6 35B-A3B | 7.15 tok/s | 9.65 s | 1,406 MiB | v3.0.3 |
+| GPT-OSS 20B | 3.73 tok/s | 13.32 s | 1,932 MiB | v3.0.3 |
+| GPT-OSS 120B | 0.49 tok/s | 47.58 s | 1,659 MiB | v3.0.3 |
 
-Reproduce it with `Scripts/benchmark_simple.rb`. Peak RSS understates what a
+The v3.0.3 rows are carried over. v4.0.0 reworked decode, and only the models
+installed on this machine when the release was cut were re-measured, so the
+other rows are stale rather than wrong. Reproduce any row with
+`Scripts/benchmark_simple.rb`.
+
+#### What v4.0.0 changed about decode
+
+Decode on a dense model used to spend most of its time waiting rather than
+computing. Three things caused that, and all three are fixed:
+
+- **Attention.** Each query head ran in its own 256-thread threadgroup, so every
+  cached position cost two threadgroup barriers, and the query heads sharing a
+  key/value head each re-read that head's keys and values. Attention now gives
+  one SIMD group to each query head, reduces a score with a single
+  `simd_sum`, and has no barrier in its inner loop.
+- **Command buffers.** A dense layer produces nothing the CPU reads, yet the
+  runner still committed a command buffer per layer and blocked on it. On this
+  Mac a round trip costs about 130 microseconds against roughly 500 microseconds
+  of layer work, so 35 of them per token were most of the gap between GPU time
+  and tokens per second. A dense token is now one command buffer, and where the sampler does
+  not need a host pass it rides on that same buffer.
+- **Weight mapping.** All of a model's resident weights were wrapped in one
+  Metal buffer, up to gigabytes wide. Metal's per-dispatch cost for a bound
+  buffer grows with that buffer's size, and decode issues hundreds of dispatches
+  per token, so the size was being paid hundreds of times over. The weights are
+  now mapped as many 64 MB regions, with any single larger tensor still getting
+  a region of its own. Alone this took Gemma 4 E2B from 28.4 to 42.3 tokens per
+  second in alternating builds.
+
+Measured on Gemma 4 E2B with the harness above, alternating binaries on one
+machine:
+
+| Runner | Decode |
+| --- | ---: |
+| v3.0.3 | 17.94 tok/s |
+| v4.0.0 | 40.30 tok/s |
+
+Greedy output is byte-identical across the two runners for the same prompt and
+seed, on both Gemma 4 E2B and Gemma 4 26B-A4B.
+
+Mixture-of-experts decode is unchanged within run-to-run variance: it waits on
+SSD reads for routed experts, not on the paths above. That is also why giving a
+mixture-of-experts model a larger expert cache lowers its measured read wait
+without raising its tokens per second, and why a dense model gains nothing at
+all from extra memory. Memory buys residency; it does not buy bandwidth. Peak RSS understates what a
 model costs, because the weights are memory-mapped and the kernel owns those
 pages; the longer-workload rows below report footprint alongside RSS for that
 reason.
@@ -284,7 +336,8 @@ launch. Existing compatible v1 Gemma and Qwen installations remain readable.
 ### Command-line interface
 
 The stable installer selectors are `gemma4-e2b`, `gemma4-e4b`,
-`gemma4-12b-qat`, `gemma4`, `qwen36`, `gpt-oss-20b`, and `gpt-oss-120b`:
+`gemma4-12b-qat`, `gemma4`, `qwen36`, `gpt-oss-20b`, `gpt-oss-120b`, and
+`minimax-m2.7`:
 
 ```bash
 swift run -c release TUFFRepack \
@@ -305,6 +358,22 @@ swift run -c release TUFFCLI \
   --max-new 256
 ```
 
+The packaged app also includes a unified native command at
+`TUFF.app/Contents/Resources/bin/tuff`. Add that directory to `PATH` to use the
+short command everywhere:
+
+```bash
+export PATH="/Applications/TUFF.app/Contents/Resources/bin:$PATH"
+tuff load minimax-m2.7
+tuff prompt "Why does bounded expert streaming matter?"
+tuff serve --port 8080
+```
+
+`tuff load` selects an already-installed model, opens the containing app, and
+requests a real load. `prompt` and `serve` use the selected app model unless
+`--model` names another catalog model or `.gturbo` path. Their context,
+sampling, and expert-cache defaults come from the model catalog.
+
 ## How it works
 
 One Foundation-only registry describes each checkpoint's source, fingerprint,
@@ -314,7 +383,7 @@ defaults. The app, installer, CLI, and server all use that registry.
 The runtime then separates the checkpoint from the architecture behavior:
 
 - dense and mixture-of-experts feed-forward paths
-- Gemma, Qwen ChatML, and GPT-OSS Harmony prompts
+- Gemma, Qwen ChatML, GPT-OSS Harmony, and MiniMax M2.7 prompts
 - affine INT4 and GPT-OSS MXFP4 weights
 - model-specific attention, routing, RoPE, KV, and memory plans
 - bounded expert reads and bounded chunked-prefill scratch

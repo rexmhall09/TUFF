@@ -41,6 +41,26 @@ import Metal
         #expect(runner.usesFusedGreedyHead)
     }
 
+    @Test func runnerRejectsCacheSmallerThanRoutedTopK() throws {
+        let dir = try QwenToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ctx = try MetalContext()
+        let model = try Model.load(
+            directoryURL: dir,
+            device: ctx.device,
+            expecting: .qwen36Toy(),
+            streamingMode: .pread(slotCount: 4))
+
+        #expect(throws: RuntimeConfigurationError.expertCacheTooSmall(
+            configured: 4, required: 8)) {
+            _ = try RealForwardRunner(
+                model: model,
+                context: ctx,
+                maxContext: 64,
+                runtimeConfiguration: RuntimeConfiguration(expertCacheSlots: 4))
+        }
+    }
+
     /// Decode smoke over the hybrid layer graph: two linear (GDN) layers and
     /// two gated full-attention layers, 8-of-8 routing, gated shared expert,
     /// untied greedy head. Verifies tokens are produced, the cursor advances,

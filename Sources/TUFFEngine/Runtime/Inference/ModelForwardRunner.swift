@@ -4,7 +4,7 @@ import Metal
 /// existing Gemma/Qwen implementation remains untouched; GPT-OSS selects its
 /// BF16/MXFP4 layer graph after the model has passed normal load validation.
 public final class ModelForwardRunner: ChunkedPrefillRunner,
-    MultimodalPrefillRunner, ContextWindowReporting,
+    MultimodalPrefillRunner, ContextWindowReporting, EpilogueFusingLogitProducer,
     ContinuableLogitProducer, GreedyHeadReporting, @unchecked Sendable {
     private enum Backend {
         case affine(RealForwardRunner)
@@ -44,6 +44,20 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
             try await runner.produce(token: token, position: position, into: logits)
         case .gptOss(let runner):
             try await runner.produce(token: token, position: position, into: logits)
+        }
+    }
+
+    public func produce(token: Int32, position: Int, into logits: MTLBuffer,
+                        appendingToFinalCommandBuffer epilogue: (MTLCommandBuffer) -> Void)
+        async throws -> Bool {
+        switch backend {
+        case .affine(let runner):
+            return try await runner.produce(token: token, position: position,
+                                            into: logits,
+                                            appendingToFinalCommandBuffer: epilogue)
+        case .gptOss(let runner):
+            try await runner.produce(token: token, position: position, into: logits)
+            return false
         }
     }
 
@@ -160,6 +174,43 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         switch backend {
         case .affine: return 0
         case .gptOss(let runner): return runner.prefillExpertGroupCount
+        }
+    }
+    /// Diagnostic kernel timing report; see `RealForwardRunner.benchmarkDecodeKernels`.
+    public func benchmarkDecodeKernels() throws -> String {
+        switch backend {
+        case .affine(let runner): return try runner.benchmarkDecodeKernels()
+        case .gptOss: return "kernel benchmark is not available for GPT-OSS\n"
+        }
+    }
+    public var totalGPULayerNanos: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalGPULayerNanos
+        case .gptOss: return 0
+        }
+    }
+    public var totalGPUHeadNanos: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalGPUHeadNanos
+        case .gptOss: return 0
+        }
+    }
+    public var totalGPURoutedNanos: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalGPURoutedNanos
+        case .gptOss: return 0
+        }
+    }
+    public var totalGPUSharedNanos: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalGPUSharedNanos
+        case .gptOss: return 0
+        }
+    }
+    public var totalGPULayerCommandBuffers: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalGPULayerCommandBuffers
+        case .gptOss: return 0
         }
     }
     public var totalHeadFusedNanos: UInt64 {

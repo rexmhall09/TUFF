@@ -52,7 +52,8 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 allowedTools: allowedTools,
                 idGenerator: idGenerator)
         }
-        if promptOpensThinking, tokenizer.dialect == .chatml {
+        if promptOpensThinking,
+           tokenizer.dialect == .chatml || tokenizer.dialect == .minimax {
             channel = .thought
         }
     }
@@ -66,9 +67,21 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         tokenizer: GFTokenizer,
         reasoning: ChatReasoning
     ) -> Bool {
-        tokenizer.harmonyTokenIDs == nil
-            && tokenizer.dialect == .chatml
-            && reasoning == .on
+        promptOpensThinking(dialect: tokenizer.dialect, reasoning: reasoning)
+    }
+
+    static func promptOpensThinking(
+        dialect: ChatDialect,
+        reasoning: ChatReasoning
+    ) -> Bool {
+        switch dialect {
+        case .chatml:
+            reasoning == .on
+        case .minimax:
+            true
+        case .gemma, .harmony:
+            false
+        }
     }
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
@@ -77,6 +90,18 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             return try harmonyDecoder.consume(tokenID: tokenID, delta: delta)
         } else if tokenizer.dialect == .chatml {
             return try consumeChatML(tokenID: tokenID, delta: delta)
+        } else if tokenizer.dialect == .minimax {
+            if tokenID == tokenizer.thinkStartID {
+                let events = routeText(delta)
+                channel = .thought
+                return events
+            }
+            if tokenID == tokenizer.thinkEndID {
+                let events = routeText(delta)
+                channel = .visible
+                return events
+            }
+            return routeText(delta)
         }
 
         // A non-empty delta on a control token is text the detokenizer held
@@ -219,12 +244,14 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             return []
         }
         if tokenID == tokenizer.thinkStartID {
+            let events = routeText(delta)
             channel = .thought
-            return []
+            return events
         }
         if tokenID == tokenizer.thinkEndID {
+            let events = routeText(delta)
             channel = .visible
-            return []
+            return events
         }
         if channel == .thought {
             return delta.isEmpty ? [] : [.thinking(delta)]

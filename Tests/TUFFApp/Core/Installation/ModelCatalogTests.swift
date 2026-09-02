@@ -70,15 +70,20 @@ import TUFFRepackCore
         #expect(AppModelInstallDescriptor.visionCompanion(for: .gptOss_20B) == nil)
         #expect(AppModelInstallDescriptor.visionCompanion(for: .gptOss_120B) == nil)
         #expect(AppModelInstallDescriptor.visionCompanion(for: ModelFamily.gptOss) == nil)
+        #expect(AppModelInstallDescriptor.visionCompanion(for: .minimaxM27) == nil)
+        #expect(AppModelInstallDescriptor.visionCompanion(for: ModelFamily.minimaxM2) == nil)
     }
 
     @Test func catalogExposesStableAPIIDsAndPromptDialects() {
         for descriptor in AppModelInstallDescriptor.catalog {
             #expect(!descriptor.apiModelID.isEmpty)
+            #expect(descriptor.defaultSystemPrompt.hasPrefix(
+                "You are \(descriptor.shortName), a helpful AI assistant."))
             switch descriptor.family {
             case .gemma4: #expect(descriptor.chatDialect == .gemma)
             case .qwen36: #expect(descriptor.chatDialect == .chatml)
             case .gptOss: #expect(descriptor.chatDialect == .harmony)
+            case .minimaxM2: #expect(descriptor.chatDialect == .minimax)
             }
         }
     }
@@ -131,6 +136,7 @@ import TUFFRepackCore
             "qwen36-35b-a3b",
             "gpt-oss-20b",
             "gpt-oss-120b",
+            "minimax-m2.7",
         ])
         #expect(AppModelInstallDescriptor.catalog.map(\.installDirectoryName) == [
             "gemma4-e2b.gturbo",
@@ -140,6 +146,7 @@ import TUFFRepackCore
             "qwen36.gturbo",
             "gpt-oss-20b.gturbo",
             "gpt-oss-120b.gturbo",
+            "minimax-m2.7.gturbo",
         ])
         #expect(AppModelInstallDescriptor.gemma4E4B.supportsImageInput)
         #expect(MacModelSettings.defaults(
@@ -157,6 +164,9 @@ import TUFFRepackCore
             for: ModelVariant.gptOss_20B)?.settingsProfileKey == "gpt-oss-20b")
         #expect(AppModelInstallDescriptor.descriptor(
             for: ModelVariant.gptOss_120B)?.settingsProfileKey == "gpt-oss-120b")
+        #expect(AppModelInstallDescriptor.descriptor(
+            for: ModelVariant.minimaxM27) == .minimaxM27)
+        #expect(AppModelInstallDescriptor.minimaxM27.reasoningControl == .alwaysOn)
         #expect(AppModelInstallDescriptor.gemma4E4B.reasoningControl == .toggle)
         #expect(AppModelInstallDescriptor.qwen36.reasoningControl
             == .toggleWithPreservation)

@@ -74,4 +74,64 @@ public enum WriterCore {
         }
         return hasher.finalizeHexString()
     }
+
+    public static func pwriteFP32AsBF16(srcShard: MmapHandle,
+                                        srcAbsoluteOffset: UInt64,
+                                        size: UInt64,
+                                        dstFd: Int32, dstPath: String,
+                                        dstOffset: UInt64,
+                                        audit: RepackAudit) throws {
+        guard size.isMultiple(of: 4) else {
+            throw RepackError.configurationInvalid(
+                detail: "FP32 source region has non-element-aligned byte count \(size)")
+        }
+        let scratch = UnsafeMutableRawBufferPointer.allocate(
+            byteCount: tileBytes, alignment: 16_384)
+        defer { scratch.deallocate() }
+        audit.largestScratchBytes = max(audit.largestScratchBytes, scratch.count)
+        var remaining = size
+        var source = srcAbsoluteOffset
+        var destination = dstOffset
+        while remaining > 0 {
+            let count = min(Int(remaining), scratch.count) & ~3
+            let sourcePointer = srcShard.base.advanced(by: Int(source))
+            memcpy(scratch.baseAddress!, sourcePointer, count)
+            let outputCount = convertFP32ToBF16InPlace(scratch.baseAddress!, byteCount: count)
+            try Posix.pwriteAll(fd: dstFd, path: dstPath,
+                                buf: scratch.baseAddress!, count: outputCount,
+                                offset: destination)
+            audit.recordTile(bytes: count)
+            audit.recordRead(bytes: count)
+            audit.recordWrite(bytes: outputCount)
+            srcShard.adviseDontNeed(offset: source, count: count)
+            remaining -= UInt64(count)
+            source += UInt64(count)
+            destination += UInt64(outputCount)
+        }
+    }
+
+    @discardableResult
+    public static func convertFP32ToBF16InPlace(_ buffer: UnsafeMutableRawPointer,
+                                                byteCount: Int) -> Int {
+        precondition(byteCount.isMultiple(of: 4))
+        let elementCount = byteCount / 4
+        let input = buffer.assumingMemoryBound(to: UInt32.self)
+        let output = buffer.assumingMemoryBound(to: UInt16.self)
+        for index in 0..<elementCount {
+            let bits = UInt32(littleEndian: input[index])
+            let exponent = bits & 0x7f80_0000
+            let mantissa = bits & 0x007f_ffff
+            let bf16: UInt16
+            if exponent == 0x7f80_0000, mantissa != 0 {
+                // Preserve NaN rather than allowing rounding overflow to turn
+                // the largest payload into signed zero.
+                bf16 = UInt16(truncatingIfNeeded: bits >> 16) | 0x0040
+            } else {
+                let rounded = bits &+ 0x7fff &+ ((bits >> 16) & 1)
+                bf16 = UInt16(truncatingIfNeeded: rounded >> 16)
+            }
+            output[index] = bf16.littleEndian
+        }
+        return elementCount * 2
+    }
 }

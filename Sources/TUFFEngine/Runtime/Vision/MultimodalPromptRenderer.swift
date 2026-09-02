@@ -98,8 +98,8 @@ public enum MultimodalPromptRenderer {
             switch family {
             case .gemma4: return .gemma4
             case .qwen36: return .qwen36
-            case .gptOss:
-                preconditionFailure("GPT-OSS does not accept image input")
+            case .gptOss, .minimaxM2:
+                preconditionFailure("This model family does not accept image input")
             }
         }
     }

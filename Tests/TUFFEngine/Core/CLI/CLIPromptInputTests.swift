@@ -28,6 +28,20 @@ import TUFFEngine
         return url
     }
 
+    @Test func aChatSystemPromptPrecedesTheUserMessage() throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo",
+            "--chat-prompt", "Hello.",
+            "--system-prompt", "Be helpful.",
+        ])
+        guard case .messages(let messages) = try parseInput(args: arguments) else {
+            Issue.record("expected text chat messages")
+            return
+        }
+        #expect(messages.map(\.role) == [.system, .user])
+        #expect(messages.map(\.content) == ["Be helpful.", "Hello."])
+    }
+
     /// A relative `image_file` belongs to the messages file's directory. The old
     /// code branched on `URL(fileURLWithPath:).path`, which resolves against the
     /// *process* directory and is therefore always absolute — so the relative

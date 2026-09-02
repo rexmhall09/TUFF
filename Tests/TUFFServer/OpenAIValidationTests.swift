@@ -25,6 +25,18 @@ struct OpenAIValidationTests {
         #expect(validated.reasoning == .on)
     }
 
+    @Test func minimaxAlwaysUsesItsNativeThinkingChannel() throws {
+        for enableThinking in ["true", "false"] {
+            let data = Data("""
+            {"model":"m","messages":[{"role":"user","content":"x"}],"enable_thinking":\(enableThinking)}
+            """.utf8)
+            let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+            let validated = try OpenAIRequestValidator.validate(
+                request, modelID: "m", dialect: .minimax)
+            #expect(validated.reasoning == .on)
+        }
+    }
+
     @Test func harmonySelectsGradedReasoningAndCapturesDate() throws {
         let data = Data(#"""
         {"model":"m","messages":[{"role":"user","content":"x"}],"reasoning_effort":"high"}

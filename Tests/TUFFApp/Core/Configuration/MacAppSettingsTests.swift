@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import TUFFEngine
+import TUFFModelCatalog
 @testable import TUFFAppCore
 
 @Suite struct MacAppSettingsTests {
@@ -203,13 +204,19 @@ import TUFFEngine
         let settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: model)
 
-        #expect(settings.version == 4)
+        #expect(settings.version == MacAppSettings.currentVersion)
         #expect(settings.modelProfiles.count == 2)
         #expect(settings.profile(for: "gemma4-26b-a4b").temperature == 0.1)
         #expect(settings.profile(for: "qwen36-35b-a3b").contextTokens == 16_384)
         #expect(settings.profile(for: "qwen36-35b-a3b").defaultReasoning == .off)
         #expect(settings.profile(for: "qwen36-35b-a3b").defaultReasoningEffort == .medium)
         #expect(!settings.profile(for: "qwen36-35b-a3b").preserveThinking)
+        #expect(MacModelSettings.defaults(
+            for: "minimax-m2.7").defaultReasoning == .on)
+        #expect(settings.profile(for: "gemma4-26b-a4b").systemPrompt
+            == TUFFModelCatalog.gemma4_26B_A4B.defaultSystemPrompt)
+        #expect(settings.profile(for: "qwen36-35b-a3b").systemPrompt
+            == TUFFModelCatalog.qwen36_35B_A3B.defaultSystemPrompt)
     }
 
     @Test func versionThreeLowSlotPrefillMigratesToAValidProfile() throws {
@@ -240,7 +247,7 @@ import TUFFEngine
         let settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: model)
 
-        #expect(settings.version == 4)
+        #expect(settings.version == MacAppSettings.currentVersion)
         #expect(settings.profile(for: "gemma4-26b-a4b").expertCacheSlots == 8)
         #expect(!settings.profile(for: "gemma4-26b-a4b").prefillEnabled)
         #expect(settings.isValid())
@@ -284,6 +291,71 @@ import TUFFEngine
         let legacy = try JSONDecoder().decode(
             AppModelSettingsProfile.self, from: legacyData)
         #expect(legacy.systemPrompt.isEmpty)
+
+        let minimax = AppModelSettingsProfile.defaults(for: "minimax-m2.7")
+        #expect(minimax.systemPrompt
+            == "You are MiniMax M2.7, a helpful AI assistant. "
+                + "You are running in a SSD MoE streaming app on Mac called TUFF.")
+    }
+
+    @Test func versionFourAddsDefaultsWithoutReplacingCustomSystemPrompts() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
+        let gemmaKey = TUFFModelCatalog.gemma4_26B_A4B.id.rawValue
+        let minimaxKey = TUFFModelCatalog.minimaxM27.id.rawValue
+        let old = MacAppSettings(version: 4, modelProfiles: [
+            gemmaKey: AppModelSettingsProfile(systemPrompt: "Custom."),
+            minimaxKey: AppModelSettingsProfile(systemPrompt: ""),
+        ])
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try JSONEncoder().encode(old).write(to: fileURL)
+
+        let migrated = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: model,
+            profileKey: gemmaKey)
+
+        #expect(migrated.version == MacAppSettings.currentVersion)
+        #expect(migrated.profile(for: gemmaKey).systemPrompt == "Custom.")
+        #expect(migrated.profile(for: minimaxKey).systemPrompt
+            == TUFFModelCatalog.minimaxM27.defaultSystemPrompt)
+    }
+
+    @Test func versionFiveProfilesEnableAutomaticMemoryByDefault() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
+        let key = TUFFModelCatalog.gemma4_26B_A4B.id.rawValue
+        var object = try #require(JSONSerialization.jsonObject(with:
+            JSONEncoder().encode(MacAppSettings(modelProfiles: [
+                key: AppModelSettingsProfile(
+                    automaticMemory: false,
+                    contextTokens: 16_384,
+                    expertCacheSlots: 24)
+            ]))) as? [String: Any])
+        object["version"] = 5
+        var profiles = try #require(object["modelProfiles"] as? [String: Any])
+        var profile = try #require(profiles[key] as? [String: Any])
+        profile.removeValue(forKey: "automaticMemory")
+        profiles[key] = profile
+        object["modelProfiles"] = profiles
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: object).write(to: fileURL)
+
+        let migrated = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: model,
+            profileKey: key)
+
+        #expect(migrated.version == MacAppSettings.currentVersion)
+        #expect(migrated.profile(for: key).automaticMemory)
+        #expect(migrated.profile(for: key).contextTokens == 16_384)
+        #expect(migrated.profile(for: key).expertCacheSlots == 24)
     }
 
     @MainActor
@@ -376,6 +448,7 @@ import TUFFEngine
             otherInstalls: [qwen],
             settingsPersistenceEnabled: true)
         var qwenProfile = model.settingsProfile(for: qwen)
+        qwenProfile.automaticMemory = false
         qwenProfile.contextTokens = 32_768
         qwenProfile.temperature = 0.65
         qwenProfile.defaultReasoning = .on
@@ -464,6 +537,7 @@ import TUFFEngine
             at: modelDirectory,
             withIntermediateDirectories: true)
         let initial = MacAppSettings(
+            automaticMemory: false,
             contextTokens: 8_192,
             expertCacheSlots: 24,
             temperature: 0.4,
@@ -512,6 +586,54 @@ import TUFFEngine
         #expect(!saved.showPromptExamples)
         #expect(saved.sentPromptBehavior == .clear)
         model.cancel()
+    }
+
+    @MainActor
+    @Test func autoPreservesAndRestoresTheManualMemoryProfile() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelDirectory = root.appendingPathComponent(
+            "gemma4.gturbo", isDirectory: true)
+        let key = AppModelInstallDescriptor.default.settingsProfileKey
+        var initial = MacAppSettings()
+        initial.setProfile(AppModelSettingsProfile(
+            automaticMemory: true,
+            contextTokens: 32_768,
+            expertCacheSlots: 24,
+            temperature: 0.4,
+            prefillEnabled: false), for: key)
+        try MacAppSettingsFileStore.save(
+            initial, forModelDirectory: modelDirectory)
+        let model = makeAppModel(
+            modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
+        let selected = try #require(
+            model.installs.first { $0.id == model.selectedModelID })
+
+        #expect(model.automaticMemory)
+        #expect(model.maxContextTokens == 8_192)
+        #expect(model.runtimeOptions.expertCacheSlots == 128)
+        #expect(model.runtimeOptions.prefillEnabled)
+
+        var effective = model.settingsProfile(for: selected)
+        effective.temperature = 0.6
+        model.updateSettingsProfile(effective, for: selected)
+        let whileAutomatic = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory,
+            profileKey: key).profile(for: key)
+        #expect(whileAutomatic.automaticMemory)
+        #expect(whileAutomatic.contextTokens == 32_768)
+        #expect(whileAutomatic.expertCacheSlots == 24)
+        #expect(!whileAutomatic.prefillEnabled)
+        #expect(whileAutomatic.temperature == 0.6)
+
+        model.setAutomaticMemory(false, for: selected)
+
+        #expect(!model.automaticMemory)
+        #expect(model.maxContextTokens == 32_768)
+        #expect(model.runtimeOptions.expertCacheSlots == 24)
+        #expect(!model.runtimeOptions.prefillEnabled)
     }
 
     @MainActor
@@ -592,7 +714,7 @@ import TUFFEngine
 
     /// Phase D item 15. The newer-version branch says "Every key decodes with
     /// `decodeIfPresent`, so it reads cleanly", and that is false: required keys
-    /// still use a hard `decode`. So a version-4 file whose schema moved one
+    /// still use a hard `decode`. So a newer-version file whose schema moved one
     /// throws inside `JSONDecoder().decode` *before* the version guard is
     /// reached, and lands in the `catch` that deletes the file - destroying a
     /// newer build's settings, which is the exact outcome that branch exists to
@@ -606,7 +728,7 @@ import TUFFEngine
         // A plausible future version with a schema this build does not understand.
         let newer = """
         {
-          "version": 5,
+          "version": 7,
           "profilesByModel": {}
         }
         """

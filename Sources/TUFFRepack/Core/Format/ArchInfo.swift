@@ -7,6 +7,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case gptOss = "gpt-oss"
+    case minimaxM2 = "minimax-m2"
 }
 
 enum RepackModelVariant: String, Sendable, Equatable {
@@ -17,6 +18,7 @@ enum RepackModelVariant: String, Sendable, Equatable {
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
+    case minimaxM27 = "minimax-m2.7"
 }
 
 /// Which dense Gemma a checkpoint is, from its own shape.
@@ -112,6 +114,9 @@ struct ArchInfo: Sendable, Equatable {
         if (root["model_type"] as? String) == "gpt_oss" {
             return try loadGPTOSS(configPath: configPath, config: root)
         }
+        if (root["model_type"] as? String) == "minimax_m2" {
+            return try loadMiniMaxM27(configPath: configPath, config: root)
+        }
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
         }
@@ -119,6 +124,83 @@ struct ArchInfo: Sendable, Equatable {
             return try loadQwen36(configPath: configPath, tc: tc)
         }
         return try loadGemma4(configPath: configPath, tc: tc)
+    }
+
+    // MARK: - MiniMax M2.7
+
+    private static func loadMiniMaxM27(
+        configPath: String,
+        config: [String: Any]
+    ) throws -> ArchInfo {
+        func i(_ key: String) throws -> Int {
+            guard let value = (config[key] as? Int)
+                    ?? (config[key] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "missing \(key)")
+            }
+            return value
+        }
+        func d(_ key: String) throws -> Double {
+            guard let value = (config[key] as? Double)
+                    ?? (config[key] as? NSNumber)?.doubleValue else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "missing \(key)")
+            }
+            return value
+        }
+        let headDim = try i("head_dim")
+        let rotaryDim = try i("rotary_dim")
+        let layers = try i("num_hidden_layers")
+        let arch = ArchInfo(
+            hiddenSize: try i("hidden_size"),
+            intermediateSize: try i("intermediate_size"),
+            moeIntermediateSize: try i("intermediate_size"),
+            numHeads: try i("num_attention_heads"),
+            numKVHeads: try i("num_key_value_heads"),
+            numFullKVHeads: try i("num_key_value_heads"),
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: 0,
+            finalLogitSoftcap: 0,
+            ropeTheta: try d("rope_theta"),
+            fullRopeTheta: try d("rope_theta"),
+            partialRotaryFactor: Double(rotaryDim) / Double(headDim),
+            numLayers: layers,
+            numExperts: try i("num_local_experts"),
+            topKExperts: try i("num_experts_per_tok"),
+            tieWordEmbeddings: (config["tie_word_embeddings"] as? Bool) ?? false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: [UInt8](repeating: 1, count: layers),
+            hiddenActivation: (config["hidden_act"] as? String) ?? "silu",
+            family: .minimaxM2,
+            variant: .minimaxM27,
+            feedForwardKind: .mixtureOfExperts,
+            attentionScale: 1 / Double(headDim).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: false,
+            ropeNeoxSubdim: true)
+        guard arch.hiddenSize == 3_072,
+              arch.intermediateSize == 1_536,
+              arch.numLayers == 62,
+              arch.numHeads == 48,
+              arch.numKVHeads == 8,
+              arch.headDim == 128,
+              arch.vocabSize == 200_064,
+              arch.ropeTheta == 5_000_000,
+              arch.numExperts == 256,
+              arch.topKExperts == 8,
+              arch.partialRotaryFactor == 0.5,
+              !arch.tieWordEmbeddings,
+              arch.hiddenActivation == "silu",
+              config["use_qk_norm"] as? Bool == true else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "config does not match the pinned MiniMax M2.7 architecture baseline")
+        }
+        return arch
     }
 
     // MARK: - GPT-OSS

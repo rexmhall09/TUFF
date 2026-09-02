@@ -218,4 +218,47 @@ import TUFFValidationSupport
                                     rowStride: rowStride,
                                     usedPerRow: used)
     }
+
+    @Test func blockSubdimNeoxMatchesRepeatedScalarAbsolutePositions() throws {
+        let rows = 4
+        let heads = 8
+        let headDim = 128
+        let rotaryDim = 64
+        let used = heads * headDim
+        let rowStride = used + 11
+        let startPosition = 777
+        let theta: Float = 5_000_000
+        let input = Self.makeBlock(
+            rows: rows, rowStride: rowStride, usedPerRow: used,
+            seed: 0xA503, label: "prefill-rope-minimax")
+        let ctx = try MetalContext()
+        let scalar = try RoPE(context: ctx)
+        let block = try PrefillRoPE(context: ctx)
+        let reference = try #require(Fp16Buffer.make(ctx.device, halves: input))
+        let candidate = try #require(Fp16Buffer.make(ctx.device, halves: input))
+        let cb = try #require(ctx.queue.makeCommandBuffer())
+        for row in 0..<rows {
+            scalar.encodeNeoxSubdim(
+                commandBuffer: cb, data: reference,
+                dataOffset: row * rowStride * MemoryLayout<Float16>.size,
+                position: UInt32(startPosition + row),
+                headDim: UInt32(headDim), numHeads: UInt32(heads),
+                rotaryDim: UInt32(rotaryDim), theta: theta)
+        }
+        block.encodeNeoxSubdim(
+            commandBuffer: cb, data: candidate,
+            startPosition: UInt32(startPosition), queryCount: UInt32(rows),
+            headDim: UInt32(headDim), numHeads: UInt32(heads),
+            rotaryDim: UInt32(rotaryDim),
+            tokenStrideElements: UInt32(rowStride), theta: theta)
+        cb.commit()
+        cb.waitUntilCompleted()
+        #expect(cb.error == nil)
+        let expected = Fp16Buffer.read(reference, count: rows * rowStride)
+        let actual = Fp16Buffer.read(candidate, count: rows * rowStride)
+        #expect(RelError.maxAbsDiff(actual, expected) <= 1e-3)
+        Self.assertPaddingUnchanged(
+            candidate, original: input, rows: rows,
+            rowStride: rowStride, usedPerRow: used)
+    }
 }

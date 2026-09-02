@@ -242,12 +242,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let misses = experts.indices.filter { assignedSlots[$0] == -1 }
-        // Warm decode steps need no eviction candidates, but must still
-        // update the use counts and timestamps below for LFU/LRU.
-        let evictable = misses.isEmpty ? [] : (0..<slotCount)
-            .filter { !reserved[$0] }
-            .sorted { shouldEvictSlot($0, before: $1) }
-        guard misses.count <= evictable.count else { return nil }
+        guard misses.count <= reserved.lazy.filter({ !$0 }).count else { return nil }
 
         useClock = clock
         for expert in experts where expert >= 0 && expert < expertUseCount.count {
@@ -256,8 +251,22 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for slot in assignedSlots where slot >= 0 {
             slotLastUse[slot] = clock
         }
-        for (offset, index) in misses.enumerated() {
-            let slot = evictable[offset]
+        // Decode selects only a small top-k (four or eight experts). Scanning
+        // once per miss avoids allocating and sorting every unreserved cache
+        // slot, which matters once Auto grows caches beyond 32 slots. Ties keep
+        // the lowest slot, matching the old iteration order deterministically.
+        for index in misses {
+            var selectedSlot: Int?
+            for slot in 0..<slotCount where !reserved[slot] {
+                guard let current = selectedSlot else {
+                    selectedSlot = slot
+                    continue
+                }
+                if shouldEvictSlot(slot, before: current) {
+                    selectedSlot = slot
+                }
+            }
+            guard let slot = selectedSlot else { return nil }
             assignedSlots[index] = slot
             reserved[slot] = true
             slotExpert[slot] = -1

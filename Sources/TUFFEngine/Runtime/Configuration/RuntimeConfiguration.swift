@@ -19,8 +19,24 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case lru
 }
 
+public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable {
+    case expertCacheTooSmall(configured: Int, required: Int)
+
+    public var description: String {
+        switch self {
+        case .expertCacheTooSmall(let configured, let required):
+            return "expert cache has \(configured) slots; this model routes "
+                + "\(required) experts per token"
+        }
+    }
+}
+
 public struct RuntimeConfiguration: Sendable, Equatable {
-    public static let allowedExpertCacheSlots = [4, 8, 16, 24, 32]
+    /// Larger caches let high-memory Macs retain more routed experts instead
+    /// of rereading them from SSD. The runtime clamps the requested count to
+    /// the model's actual experts-per-layer, so a 32-expert model never pays
+    /// for (for example) a 128-slot cache.
+    public static let allowedExpertCacheSlots = [4, 8, 16, 24, 32, 48, 64, 96, 128]
     public static let allowedPrefillChunkTokens = PrefillRuntimeConfig.allowedChunkTokens
     public static let minimumExpertCacheSlotsForChunkedPrefill = 16
 

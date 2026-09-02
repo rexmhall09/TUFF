@@ -161,32 +161,43 @@ struct AppSettingsView: View {
 
     private var memorySettings: some View {
         Section("Memory") {
-            Picker("Context", selection: profileBinding(\.contextTokens)) {
-                ForEach(AppContextLengthOption.allCases) { option in
-                    let eligibility = contextEligibility(
-                        tokens: option.tokens,
-                        slots: selectedProfile.expertCacheSlots)
-                    Text(contextLabel(option, eligibility: eligibility))
-                        .tag(option.tokens)
-                        .disabled(!eligibility.isCompatible)
-                }
+            Toggle("Auto", isOn: automaticMemoryBinding)
+            if selectedProfile.automaticMemory,
+               let plan = model.automaticMemoryPlan(for: selectedProfileInstall) {
+                Text(automaticMemorySummary(plan))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            if selectedProfileInstall.descriptor.usesExpertCache {
-                Picker("Expert cache", selection: expertCacheSlotsBinding) {
-                    ForEach(AppRuntimeOptions.allowedSlotCounts, id: \.self) { slots in
+            Group {
+                Picker("Context", selection: profileBinding(\.contextTokens)) {
+                    ForEach(AppContextLengthOption.allCases) { option in
                         let eligibility = contextEligibility(
-                            tokens: selectedProfile.contextTokens,
-                            slots: slots)
-                        Text("\(slots) slots · "
-                            + MetricFormat.storage(eligibility.estimatedWorkingSetBytes))
-                            .tag(slots)
+                            tokens: option.tokens,
+                            slots: selectedProfile.expertCacheSlots)
+                        Text(contextLabel(option, eligibility: eligibility))
+                            .tag(option.tokens)
                             .disabled(!eligibility.isCompatible)
                     }
                 }
-            } else {
-                LabeledContent("Expert cache", value: "Not used by this dense model")
-                    .foregroundStyle(.secondary)
+                if selectedProfileInstall.descriptor.usesExpertCache {
+                    Picker("Expert cache", selection: expertCacheSlotsBinding) {
+                        ForEach(selectedProfileInstall.descriptor.usefulExpertCacheSlotCounts,
+                                id: \.self) { slots in
+                            let eligibility = contextEligibility(
+                                tokens: selectedProfile.contextTokens,
+                                slots: slots)
+                            Text("\(slots) slots · "
+                                + MetricFormat.storage(eligibility.estimatedWorkingSetBytes))
+                                .tag(slots)
+                                .disabled(!eligibility.isCompatible)
+                        }
+                    }
+                } else {
+                    LabeledContent("Expert cache", value: "Not used by this dense model")
+                        .foregroundStyle(.secondary)
+                }
             }
+            .disabled(selectedProfile.automaticMemory)
             let eligibility = contextEligibility(
                 tokens: selectedProfile.contextTokens,
                 slots: selectedProfile.expertCacheSlots)
@@ -220,6 +231,17 @@ struct AppSettingsView: View {
                     }
                 }
                 .accessibilityLabel("System prompt")
+            HStack {
+                Spacer()
+                Button("Restore Default") {
+                    var profile = selectedProfile
+                    profile.systemPrompt = selectedProfileInstall.descriptor.defaultSystemPrompt
+                    model.updateSettingsProfile(profile, for: selectedProfileInstall)
+                }
+                .disabled(selectedProfile.systemPrompt
+                    == selectedProfileInstall.descriptor.defaultSystemPrompt)
+                .help("Restore TUFF's default prompt for this model")
+            }
             Text("Sent as a system message before the conversation. It applies "
                  + "from the next message; answers already given were not "
                  + "written with it.")
@@ -246,10 +268,18 @@ struct AppSettingsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                case .alwaysOn:
+                    LabeledContent("Thinking", value: "Always On")
+                    Text("This model always reasons before answering. TUFF keeps "
+                        + "that reasoning separate from the visible answer.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                Text("Chat can override this for the current conversation.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if control != .alwaysOn {
+                    Text("Chat can override this for the current conversation.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -291,9 +321,14 @@ struct AppSettingsView: View {
         Group {
             Section("Runtime") {
                 Toggle("Chunked prefill", isOn: profileBinding(\.prefillEnabled))
-                    .disabled(selectedProfile.expertCacheSlots
+                    .disabled(selectedProfile.automaticMemory
+                        || selectedProfile.expertCacheSlots
                         < RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
-                if selectedProfile.expertCacheSlots
+                if selectedProfile.automaticMemory {
+                    Text("Auto manages chunked prefill with this model's memory plan.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if selectedProfile.expertCacheSlots
                     < RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill {
                     Text("Chunked prefill needs at least "
                         + "\(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) "
@@ -377,6 +412,14 @@ struct AppSettingsView: View {
         }
     }
 
+    private var automaticMemoryBinding: Binding<Bool> {
+        Binding {
+            selectedProfile.automaticMemory
+        } set: { enabled in
+            model.setAutomaticMemory(enabled, for: selectedProfileInstall)
+        }
+    }
+
     private var expertCacheSlotsBinding: Binding<Int> {
         Binding {
             selectedProfile.expertCacheSlots
@@ -406,6 +449,17 @@ struct AppSettingsView: View {
     ) -> String {
         option.shortLabel + " · "
             + MetricFormat.storage(eligibility.estimatedWorkingSetBytes)
+    }
+
+    private func automaticMemorySummary(_ plan: AppAutomaticMemoryPlan) -> String {
+        let detected = MetricFormat.storage(model.deviceCapabilities.unifiedMemoryBytes)
+        let selected = MetricFormat.storage(plan.estimatedWorkingSetBytes)
+        let budget = MetricFormat.storage(plan.safeBudgetBytes)
+        let available = model.deviceCapabilities.availableMemoryBytes.map {
+            " \(MetricFormat.storage($0)) was available at launch."
+        } ?? ""
+        return "Detected \(detected) unified memory.\(available) TUFF selected "
+            + "\(selected) of its \(budget) safe app budget for this model."
     }
 
     private var newlineShortcutBinding: Binding<AppNewlineShortcut> {

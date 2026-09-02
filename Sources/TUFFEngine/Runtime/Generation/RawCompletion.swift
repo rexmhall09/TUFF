@@ -231,6 +231,15 @@ public func runRawCompletion(producer: any LogitProducer,
         }
     }
 
+    // Sampling reads only what the token's own command buffer produced, so a
+    // producer that can carry it there saves one submit-and-wait per token.
+    // The repetition penalty rewrites the logits on the CPU between the head
+    // and the sampler, so that configuration keeps its own command buffer.
+    let epilogueProducer = config.repetitionPenalty == 1.0
+        ? producer as? any EpilogueFusingLogitProducer
+        : nil
+    var fusedTokenReady = false
+
     let decodeStart = Date()
     let prefillSeconds = decodeStart.timeIntervalSince(prefillStart)
     var stopMatcher = StreamingStopMatcher(stops: config.stopStrings)
@@ -252,6 +261,9 @@ public func runRawCompletion(producer: any LogitProducer,
             }
         } else if fusedGreedy {
             tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
+        } else if fusedTokenReady {
+            // The previous token's command buffer already ran the sampler.
+            tokenID = Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
         } else {
             tokenID = try sampleOnce(scratch: scratch, context: context,
                                      history: history, config: config, position: generated)
@@ -291,7 +303,24 @@ public func runRawCompletion(producer: any LogitProducer,
         }
 
         history.append(tokenID)
-        try await producer.produce(token: tokenID, position: position, into: scratch.logits)
+        fusedTokenReady = false
+        if !fusedGreedy, let epilogueProducer {
+            // `generated` here equals the `position` the next iteration's
+            // sampler would use for its per-position seed, and `history` is
+            // already the list that sampler would see.
+            let samplerPosition = generated
+            fusedTokenReady = try await epilogueProducer.produce(
+                token: tokenID, position: position, into: scratch.logits
+            ) { commandBuffer in
+                scratch.sampler.sample(commandBuffer: commandBuffer,
+                                       logits: scratch.logits, probs: scratch.probs,
+                                       history: history, config: config,
+                                       position: samplerPosition,
+                                       outToken: scratch.outToken)
+            }
+        } else {
+            try await producer.produce(token: tokenID, position: position, into: scratch.logits)
+        }
         position += 1
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
     }

@@ -119,7 +119,8 @@ import Testing
             scaleOffset: indexSize + 16, scaleSize: 8,
             biasOffset: indexSize + 24, biasSize: 8,
             quantSpec: QuantSpec(bits: 4),
-            sourceWeight: source, sourceScales: source, sourceBiases: source)
+            sourceWeight: source, sourceScales: source, sourceBiases: source,
+            companionTransform: .identity)
         let nameBytes = Array(residentEntry.name.utf8)
         let resident = ResidentFilePlan(
             path: "/fixture/model_weights.bin",

@@ -136,6 +136,37 @@ final class PrefillQKVEpilogue {
                               theta: theta)
     }
 
+    /// Chunk-aware partial RoPE for architectures whose Q/K norms span the
+    /// complete projection rather than repeating independently per head.
+    /// The caller applies those projection-wide norms before this method.
+    func encodeProjectionWideNeoxSubdimRoPE(
+        commandBuffer: MTLCommandBuffer,
+        q: MTLBuffer,
+        k: MTLBuffer,
+        startPosition: UInt32,
+        queryCount: UInt32,
+        headDim: UInt32,
+        numQHeads: UInt32,
+        numKVHeads: UInt32,
+        qTokenStrideElements: UInt32,
+        kvTokenStrideElements: UInt32,
+        theta: Float,
+        rotaryDim: UInt32
+    ) {
+        rope.encodeNeoxSubdim(
+            commandBuffer: commandBuffer, data: q,
+            startPosition: startPosition, queryCount: queryCount,
+            headDim: headDim, numHeads: numQHeads,
+            rotaryDim: rotaryDim,
+            tokenStrideElements: qTokenStrideElements, theta: theta)
+        rope.encodeNeoxSubdim(
+            commandBuffer: commandBuffer, data: k,
+            startPosition: startPosition, queryCount: queryCount,
+            headDim: headDim, numHeads: numKVHeads,
+            rotaryDim: rotaryDim,
+            tokenStrideElements: kvTokenStrideElements, theta: theta)
+    }
+
     func encodeMRoPENeoxSubdimNoVNorm(
         commandBuffer: MTLCommandBuffer,
         q: MTLBuffer, k: MTLBuffer,

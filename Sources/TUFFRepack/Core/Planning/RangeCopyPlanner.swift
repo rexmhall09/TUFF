@@ -1,23 +1,51 @@
 import Foundation
 import TUFFFormat
 
+public enum RangeCopyTransform: UInt8, Sendable, Equatable {
+    case identity = 0
+    case fp32ToBF16 = 1
+
+    public func destinationSize(sourceBytes: UInt64, name: String) throws -> UInt64 {
+        switch self {
+        case .identity:
+            return sourceBytes
+        case .fp32ToBF16:
+            guard sourceBytes.isMultiple(of: 4) else {
+                throw RepackError.configurationInvalid(
+                    detail: "FP32 tensor \(name) has non-element-aligned byte count \(sourceBytes)")
+            }
+            return sourceBytes / 2
+        }
+    }
+}
+
 public struct RangeCopy: Sendable, Equatable {
     public let shardID: String
     public let sourceOffset: UInt64
     public let size: UInt64
     public let destinationPath: String
     public let destinationOffset: UInt64
+    public let transform: RangeCopyTransform
+
+    public var destinationSize: UInt64 {
+        switch transform {
+        case .identity: size
+        case .fp32ToBF16: size / 2
+        }
+    }
 
     public init(shardID: String,
                 sourceOffset: UInt64,
                 size: UInt64,
                 destinationPath: String,
-                destinationOffset: UInt64) {
+                destinationOffset: UInt64,
+                transform: RangeCopyTransform = .identity) {
         self.shardID = shardID
         self.sourceOffset = sourceOffset
         self.size = size
         self.destinationPath = destinationPath
         self.destinationOffset = destinationOffset
+        self.transform = transform
     }
 }
 
@@ -109,16 +137,18 @@ public enum RangeCopyPlanner {
             if let scales = entry.sourceScales {
                 copies.append(RangeCopy(shardID: scales.shardPath,
                                         sourceOffset: scales.absoluteOffset,
-                                        size: entry.scaleSize,
+                                        size: scales.sizeBytes,
                                         destinationPath: repackPlan.resident.path,
-                                        destinationOffset: entry.scaleOffset))
+                                        destinationOffset: entry.scaleOffset,
+                                        transform: entry.companionTransform))
             }
             if let biases = entry.sourceBiases {
                 copies.append(RangeCopy(shardID: biases.shardPath,
                                         sourceOffset: biases.absoluteOffset,
-                                        size: entry.biasSize,
+                                        size: biases.sizeBytes,
                                         destinationPath: repackPlan.resident.path,
-                                        destinationOffset: entry.biasOffset))
+                                        destinationOffset: entry.biasOffset,
+                                        transform: entry.companionTransform))
             }
         }
 
@@ -166,6 +196,13 @@ public enum RangeCopyPlanner {
                                 rangeChunkBytes: Int) throws -> [CoalescedRangeCopy] {
         guard rangeChunkBytes > 0 else {
             throw RepackError.configurationInvalid(detail: "rangeChunkBytes must be positive")
+        }
+        for copy in copies where copy.transform == .fp32ToBF16 {
+            guard rangeChunkBytes >= 4,
+                  copy.size.isMultiple(of: 4) else {
+                throw RepackError.configurationInvalid(
+                    detail: "FP32 conversion range is not element-aligned")
+            }
         }
         let sorted = splitLargeCopies(copies, rangeChunkBytes: rangeChunkBytes).sorted {
             if $0.shardID != $1.shardID { return $0.shardID < $1.shardID }
@@ -231,15 +268,19 @@ public enum RangeCopyPlanner {
             var src = copy.sourceOffset
             var dst = copy.destinationOffset
             while remaining > 0 {
-                let n = min(remaining, limit)
+                var n = min(remaining, limit)
+                if copy.transform == .fp32ToBF16, n < remaining {
+                    n -= n % 4
+                }
                 out.append(RangeCopy(shardID: copy.shardID,
                                      sourceOffset: src,
                                      size: n,
                                      destinationPath: copy.destinationPath,
-                                     destinationOffset: dst))
+                                     destinationOffset: dst,
+                                     transform: copy.transform))
                 remaining -= n
                 src += n
-                dst += n
+                dst += copy.transform == .identity ? n : n / 2
             }
         }
         return out
@@ -275,7 +316,7 @@ public enum RangeCopyPlanner {
         var previousPath: String?
         var previousEnd: UInt64 = 0
         for (path, copy) in sorted {
-            guard copy.destinationOffset <= UInt64.max - copy.size else {
+            guard copy.destinationOffset <= UInt64.max - copy.destinationSize else {
                 throw RepackError.configurationInvalid(
                     detail: "destination range overflows \(path)")
             }
@@ -284,7 +325,7 @@ public enum RangeCopyPlanner {
                     detail: "overlapping destination ranges in \(path)")
             }
             previousPath = path
-            previousEnd = copy.destinationOffset + copy.size
+            previousEnd = copy.destinationOffset + copy.destinationSize
         }
     }
 
@@ -328,6 +369,9 @@ public enum RangeCopyPlanner {
                 writer.append(destination.destinationOffset)
                 writer.append(destination.sourceOffset - copy.sourceOffset)
                 writer.append(destination.size)
+                if destination.transform != .identity {
+                    writer.append(UInt64(destination.transform.rawValue))
+                }
             }
         }
         return writer.finalize()

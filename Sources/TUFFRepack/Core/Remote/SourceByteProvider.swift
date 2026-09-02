@@ -93,6 +93,7 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                         sourceOffset: destination.sourceOffset - copy.sourceOffset,
                         destinationOffset: destination.destinationOffset,
                         size: destination.size,
+                        transform: destination.transform,
                         scratch: scratch,
                         audit: audit)
                 }
@@ -116,7 +117,7 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                 id: copy.id,
                 destinationDigest: digest,
                 sourceBytes: copy.size,
-                destinationBytes: copy.destinations.reduce(0) { $0 + $1.size }))
+                destinationBytes: copy.destinations.reduce(0) { $0 + $1.destinationSize }))
             progress(downloaded)
             try? FileManager.default.removeItem(atPath: temporary.path)
             try Task.checkCancellation()
@@ -143,10 +144,13 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
             digest.append(destination.destinationOffset)
             digest.append(destination.sourceOffset - copy.sourceOffset)
             digest.append(destination.size)
+            if destination.transform != .identity {
+                digest.append(UInt64(destination.transform.rawValue))
+            }
 
             let descriptor = try Posix.openReadNoFollow(destination.destinationPath)
             defer { close(descriptor) }
-            var remaining = destination.size
+            var remaining = destination.destinationSize
             var offset = destination.destinationOffset
             while remaining > 0 {
                 let count = min(Int(remaining), scratch.count)
@@ -174,6 +178,7 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
         sourceOffset: UInt64,
         destinationOffset: UInt64,
         size: UInt64,
+        transform: RangeCopyTransform,
         scratch: UnsafeMutableRawBufferPointer,
         audit: RepackAudit
     ) throws {
@@ -182,25 +187,43 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
         var destination = destinationOffset
         while remaining > 0 {
             try Task.checkCancellation()
-            let count = min(Int(remaining), scratch.count)
+            let count: Int
+            switch transform {
+            case .identity:
+                count = min(Int(remaining), scratch.count)
+            case .fp32ToBF16:
+                guard scratch.count >= 4, remaining.isMultiple(of: 4) else {
+                    throw RepackError.configurationInvalid(
+                        detail: "FP32 range or conversion tile is not element-aligned")
+                }
+                count = min(Int(remaining), scratch.count) & ~3
+            }
             try Posix.preadAll(
                 fd: sourceFD,
                 path: sourcePath,
                 buf: scratch.baseAddress!,
                 count: count,
                 offset: source)
+            let outputCount: Int
+            switch transform {
+            case .identity:
+                outputCount = count
+            case .fp32ToBF16:
+                outputCount = WriterCore.convertFP32ToBF16InPlace(
+                    scratch.baseAddress!, byteCount: count)
+            }
             try Posix.pwriteAll(
                 fd: destinationFD,
                 path: destinationPath,
                 buf: scratch.baseAddress!,
-                count: count,
+                count: outputCount,
                 offset: destination)
             audit.recordTile(bytes: count)
             audit.recordRead(bytes: count)
-            audit.recordWrite(bytes: count)
+            audit.recordWrite(bytes: outputCount)
             remaining -= UInt64(count)
             source += UInt64(count)
-            destination += UInt64(count)
+            destination += UInt64(outputCount)
         }
     }
 }

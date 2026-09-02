@@ -473,7 +473,7 @@ public final class RemoteStreamingRepacker {
             guard let copy = copiesByID[range.id],
                   range.sourceBytes == copy.size,
                   range.destinationBytes
-                      == copy.destinations.reduce(UInt64(0), { $0 + $1.size }) else {
+                      == copy.destinations.reduce(UInt64(0), { $0 + $1.destinationSize }) else {
                 throw RepackError.installStateCorrupt(
                     path: partialDirectory,
                     detail: "checkpoint contains an unknown range")

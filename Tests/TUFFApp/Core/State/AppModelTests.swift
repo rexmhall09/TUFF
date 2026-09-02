@@ -58,7 +58,11 @@ import Testing
                 "the reply limit follows the default context, 8K since 2026-08-17")
         #expect(request.repetitionPenalty == 1)
         #expect(!request.isPureGreedy)
-        #expect(request.runtimeOptions.expertCacheSlots == 16)
+        let selected = try #require(
+            model.installs.first { $0.id == model.selectedModelID })
+        let automaticPlan = try #require(model.automaticMemoryPlan(for: selected))
+        #expect(request.runtimeOptions.expertCacheSlots
+            == automaticPlan.expertCacheSlots)
         #expect(request.runtimeOptions.expertCachePolicy == .lfu)
         #expect(request.runtimeOptions.rdadvisePolicy == .off)
         #expect(request.runtimeOptions.prefillEnabled)

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TUFFModelCatalog
 @testable import TUFFAppCore
 
 /// Rewinding a conversation, the context estimate, and the system prompt.
@@ -97,13 +98,13 @@ import Testing
 
     // MARK: - System prompt
 
-    @Test func theSystemPromptIsSentWhenSetAndOmittedWhenNot() {
+    @Test func theSystemPromptDefaultsPerModelAndCanStillBeCleared() {
         let (root, store) = makeStore()
         defer { try? FileManager.default.removeItem(at: root) }
         let model = makeAppModel(conversationStore: store)
 
-        #expect(model.effectiveSystemPrompt == nil,
-                "no system prompt means no system message, not an empty one")
+        #expect(model.effectiveSystemPrompt
+            == TUFFModelCatalog.gemma4_26B_A4B.defaultSystemPrompt)
 
         model.modelSystemPrompt = "Be brief."
         #expect(model.effectiveSystemPrompt == "Be brief.")

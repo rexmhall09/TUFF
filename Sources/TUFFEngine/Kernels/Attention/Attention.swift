@@ -8,6 +8,10 @@ struct AttentionSplitGeometry: Sendable, Equatable {
     let chunkLength: Int
     let partialThreadgroups: Int
     let useSWAGroupedPartial: Bool
+    /// One SIMD group per query head, one threadgroup per (KV head, chunk).
+    let useSIMDPerHeadPartial: Bool
+    /// Threads in each pass-1 threadgroup.
+    let partialThreadgroupWidth: Int
 }
 
 
@@ -37,6 +41,22 @@ final class Attention {
     private let psoCombineFull: MTLComputePipelineState
     private let psoCombineSWAChunks16: MTLComputePipelineState
     private let psoCombineFullChunks16: MTLComputePipelineState
+    private let psoSIMDPartial: MTLComputePipelineState
+    private var psoSIMDPartialSpecialized: [SIMDPartialShape: MTLComputePipelineState] = [:]
+    private let specializedLock = NSLock()
+
+    struct SIMDPartialShape: Hashable {
+        var headDim: UInt32
+        var numQHeads: UInt32
+        var numKVHeads: UInt32
+        var numChunks: UInt32
+        var ringCapacity: UInt32
+    }
+
+    /// Largest `numQHeads / numKVHeads` the SIMD-per-head kernel accepts; it
+    /// gives each query head one of the threadgroup's SIMD groups.
+    static let maxSIMDPerHeadQPerKV = 8
+
 
     /// Mirrors `kAttnThreads` in `attention.metal`. The kernel was authored
     /// with a hardcoded 256-thread group so its threadgroup-memory scratch
@@ -63,6 +83,7 @@ final class Attention {
     init(context: MetalContext) throws {
         self.ctx = context
         self.psoPartial = try context.pipeline("attention_decode_partial")
+        self.psoSIMDPartial = try context.pipeline("attention_decode_simd_partial")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
         self.psoPartialSWA = try Self.specializedPipeline(context,
@@ -138,22 +159,40 @@ final class Attention {
                                      numKVHeads: UInt32,
                                      seqLen: UInt32,
                                      kvStart: UInt32,
-                                     preferGQASWA: Bool) -> AttentionSplitGeometry {
+                                     preferGQASWA: Bool,
+                                     headDim: UInt32 = 0) -> AttentionSplitGeometry {
         let qPerKV = Int(numQHeads / numKVHeads)
-        let useSWAGQAPartial = preferGQASWA && qPerKV <= 2
+        // The SIMD-per-head kernel is the default wherever its shape rules
+        // hold: it drops the per-position threadgroup barriers and lets the
+        // query heads of one KV head share their K/V reads.
+        let useSIMDPerHead = headDim > 0
+            && headDim % 32 == 0
+            && Int(headDim) <= maxHeadDim
+            && numQHeads % numKVHeads == 0
+            && qPerKV <= maxSIMDPerHeadQPerKV
+        let useSWAGQAPartial = !useSIMDPerHead && preferGQASWA && qPerKV <= 2
         let effectiveLength = Int(seqLen) - Int(kvStart)
         let baseChunks = Self.chunkCount(effLen: effectiveLength,
                                          preferGQASWA: useSWAGQAPartial)
+        // Splitting the KV range further to raise the threadgroup count was
+        // measured on E2B and made decode slower (41.0 against 42.8 tokens per
+        // second, alternating builds): the extra partials cost more in pass 2
+        // than the added parallelism wins in pass 1.
         let numChunks = useSWAGQAPartial
             ? max(baseChunks, min(Self.maxChunks, baseChunks * qPerKV))
             : baseChunks
         let chunkLength = (max(1, effectiveLength) + numChunks - 1) / numChunks
-        let partialHeadGroups = useSWAGQAPartial ? Int(numKVHeads) : Int(numQHeads)
+        let partialHeadGroups = (useSWAGQAPartial || useSIMDPerHead)
+            ? Int(numKVHeads) : Int(numQHeads)
         return AttentionSplitGeometry(effectiveLength: effectiveLength,
                                       numChunks: numChunks,
                                       chunkLength: chunkLength,
                                       partialThreadgroups: partialHeadGroups * numChunks,
-                                      useSWAGroupedPartial: useSWAGQAPartial)
+                                      useSWAGroupedPartial: useSWAGQAPartial,
+                                      useSIMDPerHeadPartial: useSIMDPerHead,
+                                      partialThreadgroupWidth: useSIMDPerHead
+                                          ? 32 * qPerKV
+                                          : threadsPerGroup)
     }
 
 
@@ -254,17 +293,41 @@ final class Attention {
                                           numKVHeads: numKVHeads,
                                           seqLen: seqLen,
                                           kvStart: kvStart,
-                                          preferGQASWA: preferGQASWA)
+                                          preferGQASWA: preferGQASWA,
+                                          headDim: headDim)
         let useSWAGQAPartial = geometry.useSWAGroupedPartial
         let nChunks = geometry.numChunks
         let chunkLen = geometry.chunkLength
-        let partialPSO = partialPipeline(headDim: headDim,
+        var partialPSO = geometry.useSIMDPerHeadPartial
+            ? simdPartialPipeline(headDim: headDim,
+                                  numQHeads: numQHeads,
+                                  numKVHeads: numKVHeads,
+                                  numChunks: nChunks,
+                                  ringCapacity: ringCapacity)
+            : partialPipeline(headDim: headDim,
+                              numQHeads: numQHeads,
+                              numKVHeads: numKVHeads,
+                              numChunks: nChunks,
+                              useGQAPartial: useSWAGQAPartial,
+                              ringCapacity: ringCapacity)
+        var partialGroups = geometry.partialThreadgroups
+        var tgWidth = geometry.partialThreadgroupWidth
+        if geometry.useSIMDPerHeadPartial,
+           partialPSO.maxTotalThreadsPerThreadgroup < tgWidth {
+            // The SIMD-per-head kernel needs one SIMD group per query head in
+            // the same threadgroup; a pipeline whose register pressure forces
+            // a narrower threadgroup would leave some heads unwritten. Fall
+            // back rather than produce partial results.
+            partialPSO = partialPipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,
                                          numChunks: nChunks,
-                                         useGQAPartial: useSWAGQAPartial,
+                                         useGQAPartial: false,
                                          ringCapacity: ringCapacity)
-        let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
+            partialGroups = Int(numQHeads) * nChunks
+            tgWidth = Self.threadsPerGroup
+        }
+        tgWidth = min(tgWidth, Int(partialPSO.maxTotalThreadsPerThreadgroup))
 
         guard let p1 = commandBuffer.makeComputeCommandEncoder() else { return }
         p1.setComputePipelineState(partialPSO)
@@ -284,7 +347,6 @@ final class Attention {
         p1.setBytes(&cl,  length: MemoryLayout<UInt32>.size, index: 11)
         p1.setBytes(&nc,  length: MemoryLayout<UInt32>.size, index: 12)
         p1.setBytes(&sc,  length: MemoryLayout<Float>.size,  index: 13)
-        let partialGroups = geometry.partialThreadgroups
         p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
         p1.endEncoding()
@@ -343,6 +405,40 @@ final class Attention {
             constants.append(MetalFunctionConstant(index: 69, value: .uint32(ringCapacity)))
         }
         return try context.pipeline(name, constants: constants)
+    }
+
+    /// The SIMD-per-head kernel folds every shape parameter into function
+    /// constants; the variants are compiled on first use and cached, since a
+    /// model touches only a handful of (head geometry, chunk count) pairs.
+    private func simdPartialPipeline(headDim: UInt32,
+                                     numQHeads: UInt32,
+                                     numKVHeads: UInt32,
+                                     numChunks: Int,
+                                     ringCapacity: UInt32) -> MTLComputePipelineState {
+        let shape = SIMDPartialShape(headDim: headDim,
+                                     numQHeads: numQHeads,
+                                     numKVHeads: numKVHeads,
+                                     numChunks: UInt32(numChunks),
+                                     ringCapacity: ringCapacity)
+        specializedLock.lock()
+        let cached = psoSIMDPartialSpecialized[shape]
+        specializedLock.unlock()
+        if let cached { return cached }
+        do {
+            let pipeline = try Self.specializedPipeline(
+                ctx, "attention_decode_simd_partial",
+                headDim: headDim,
+                numQHeads: numQHeads,
+                numKVHeads: numKVHeads,
+                numChunks: UInt32(numChunks),
+                ringCapacity: ringCapacity == 0 ? nil : ringCapacity)
+            specializedLock.lock()
+            psoSIMDPartialSpecialized[shape] = pipeline
+            specializedLock.unlock()
+            return pipeline
+        } catch {
+            return psoSIMDPartial
+        }
     }
 
     private func partialPipeline(headDim: UInt32,

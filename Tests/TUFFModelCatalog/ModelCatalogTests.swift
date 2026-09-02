@@ -5,7 +5,7 @@ import Testing
     @Test func currentCatalogOrderAndSelectorsAreStable() {
         #expect(TUFFModelCatalog.all.map(\.selector) == [
             "gemma4-e2b", "gemma4-e4b", "gemma4-12b-qat", "gemma4", "qwen36",
-            "gpt-oss-20b", "gpt-oss-120b",
+            "gpt-oss-20b", "gpt-oss-120b", "minimax-m2.7",
         ])
         #expect(TUFFModelCatalog.model(selector: "e2b")?.id == .gemma4_E2B)
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
@@ -15,6 +15,7 @@ import Testing
         #expect(TUFFModelCatalog.model(selector: "qwen36")?.id == .qwen36_35B_A3B)
         #expect(TUFFModelCatalog.model(selector: "gpt-oss")?.id == .gptOss_20B)
         #expect(TUFFModelCatalog.model(selector: "gpt-oss-120b")?.id == .gptOss_120B)
+        #expect(TUFFModelCatalog.model(selector: "minimax")?.id == .minimaxM27)
         #expect(TUFFModelCatalog.model(selector: "unknown") == nil)
     }
 
@@ -37,6 +38,7 @@ import Testing
         // each carry a vision tower packaged separately.
         #expect(TUFFModelCatalog.gptOss_20B.addons.isEmpty)
         #expect(TUFFModelCatalog.gptOss_120B.addons.isEmpty)
+        #expect(TUFFModelCatalog.minimaxM27.addons.isEmpty)
         for model in [TUFFModelCatalog.gemma4_E2B,
                       TUFFModelCatalog.gemma4_E4B,
                       TUFFModelCatalog.gemma4_12B_QAT,
@@ -54,6 +56,7 @@ import Testing
         let qwen = TUFFModelCatalog.qwen36_35B_A3B
         let gptOss = TUFFModelCatalog.gptOss_20B
         let gptOss120B = TUFFModelCatalog.gptOss_120B
+        let minimax = TUFFModelCatalog.minimaxM27
 
         #expect(TUFFArchitectureProfile.gemma4E4B.feedForwardKind == .dense)
         #expect(TUFFArchitectureProfile.gemma4E4B.weightLayout == .affine)
@@ -61,12 +64,16 @@ import Testing
         #expect(qwen.architecture.id == .qwen36_35B_A3B)
         #expect(gptOss.architecture.id == .gptOss_20B)
         #expect(gptOss120B.architecture.id == .gptOss_120B)
+        #expect(minimax.architecture.id == .minimaxM27)
         #expect(gemma.architecture.feedForwardKind == .mixtureOfExperts)
         #expect(qwen.architecture.feedForwardKind == .mixtureOfExperts)
         #expect(gemma.architecture.weightLayout == .affine)
         #expect(qwen.architecture.weightLayout == .affine)
         #expect(gptOss.architecture.weightLayout == .mxfp4)
         #expect(gptOss120B.architecture.weightLayout == .mxfp4)
+        #expect(minimax.architecture.weightLayout == .affine)
+        #expect(minimax.hardware.minimumUnifiedMemoryBytes == 16 * TUFFModelCatalog.oneGiB)
+        #expect(minimax.reasoningControl == .alwaysOn)
         #expect(gemma.capabilities.contains(.imageInput))
         #expect(qwen.capabilities.contains(.reasoning))
         #expect(gptOss.reasoningControl == .graded)

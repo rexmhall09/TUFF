@@ -37,6 +37,7 @@ struct TUFFMacApp: App {
     @State private var serverController: AppServerController
     @State private var updateController: AppUpdateController
     private let inferenceBroker: SharedInferenceBroker
+    private let loadModelRequested: Bool
 
     init() {
         // Move any models still under the old Application Support directory
@@ -55,6 +56,7 @@ struct TUFFMacApp: App {
             broker: inferenceBroker, store: model.serverStore)
         let updateController = AppUpdateController()
         self.inferenceBroker = inferenceBroker
+        self.loadModelRequested = CommandLine.arguments.contains("--load-model")
         _model = State(initialValue: model)
         _serverController = State(initialValue: serverController)
         _updateController = State(initialValue: updateController)
@@ -73,7 +75,13 @@ struct TUFFMacApp: App {
                 // Once, when the window first appears: the setting is read
                 // from disk in init, and loadModelAtLaunchIfEnabled ignores a
                 // model that is missing or already busy.
-                .task { model.loadModelAtLaunchIfEnabled() }
+                .task {
+                    if loadModelRequested {
+                        model.loadModel()
+                    } else {
+                        model.loadModelAtLaunchIfEnabled()
+                    }
+                }
                 // On the window, not in the Inspector: the menu item works
                 // whether or not the Inspector is open.
                 .confirmationDialog(

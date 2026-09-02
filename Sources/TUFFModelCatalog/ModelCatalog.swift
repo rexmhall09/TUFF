@@ -9,12 +9,14 @@ public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
+    case minimaxM27 = "minimax-m2.7"
 }
 
 public enum TUFFModelFamily: String, Codable, Sendable {
     case gemma4
     case qwen36
     case gptOss = "gpt-oss"
+    case minimaxM2 = "minimax-m2"
 }
 
 public enum TUFFArchitectureID: String, Codable, Sendable {
@@ -25,6 +27,7 @@ public enum TUFFArchitectureID: String, Codable, Sendable {
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
+    case minimaxM27 = "minimax-m2.7"
 }
 
 public enum TUFFFeedForwardKind: String, Codable, Sendable {
@@ -96,12 +99,19 @@ public extension TUFFArchitectureProfile {
         family: .gptOss,
         feedForwardKind: .mixtureOfExperts,
         weightLayout: .mxfp4)
+
+    static let minimaxM27 = TUFFArchitectureProfile(
+        id: .minimaxM27,
+        family: .minimaxM2,
+        feedForwardKind: .mixtureOfExperts,
+        weightLayout: .affine)
 }
 
 public enum TUFFReasoningControl: String, Codable, Sendable {
     case toggle
     case toggleWithPreservation
     case graded
+    case alwaysOn
 }
 
 public enum TUFFModelQualification: String, Codable, Sendable {
@@ -230,13 +240,18 @@ public struct TUFFModelMemoryProfile: Codable, Equatable, Sendable {
 
 public struct TUFFDeviceCapabilities: Codable, Equatable, Sendable {
     public let unifiedMemoryBytes: UInt64
+    /// Free, inactive, and speculative pages reclaimable when TUFF launched.
+    /// Nil for synthetic/test capability descriptions and older archives.
+    public let availableMemoryBytes: UInt64?
     public let macOSMajorVersion: Int
     public let appleSiliconGeneration: Int
 
     public init(unifiedMemoryBytes: UInt64,
+                availableMemoryBytes: UInt64? = nil,
                 macOSMajorVersion: Int,
                 appleSiliconGeneration: Int) {
         self.unifiedMemoryBytes = unifiedMemoryBytes
+        self.availableMemoryBytes = availableMemoryBytes
         self.macOSMajorVersion = macOSMajorVersion
         self.appleSiliconGeneration = appleSiliconGeneration
     }
@@ -247,8 +262,58 @@ public struct TUFFDeviceCapabilities: Codable, Equatable, Sendable {
             .flatMap(appleSiliconGeneration(brandString:)) ?? 1
         return TUFFDeviceCapabilities(
             unifiedMemoryBytes: memory,
+            availableMemoryBytes: hostAvailableMemoryBytes(),
             macOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion,
             appleSiliconGeneration: generation)
+    }
+
+    /// Memory TUFF can use while retaining a system/other-app reserve. It caps
+    /// the machine-tier budget with one launch-time availability snapshot, so
+    /// another large application is respected without making the active model
+    /// profile oscillate as page counts change during generation.
+    public var safeAppMemoryBudgetBytes: UInt64 {
+        let reserve = max(2 * TUFFModelCatalog.oneGiB, unifiedMemoryBytes / 5)
+        let capacityBudget = unifiedMemoryBytes > reserve
+            ? unifiedMemoryBytes - reserve : 0
+        guard let availableMemoryBytes else { return capacityBudget }
+        // Keep at least 1 GiB (or 10% on a roomier machine) of the pages that
+        // were reclaimable at launch. Capturing this once makes Auto respond
+        // to other applications without oscillating throughout a session.
+        let availableReserve = max(
+            TUFFModelCatalog.oneGiB,
+            availableMemoryBytes / 10)
+        let availabilityBudget = availableMemoryBytes > availableReserve
+            ? availableMemoryBytes - availableReserve : 0
+        return min(capacityBudget, availabilityBudget)
+    }
+
+    private static func hostAvailableMemoryBytes() -> UInt64? {
+        var pageSize: vm_size_t = 0
+        guard host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS else {
+            return nil
+        }
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<vm_statistics64_data_t>.size
+                / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &stats) { pointer in
+            pointer.withMemoryRebound(
+                to: integer_t.self,
+                capacity: Int(count)
+            ) { rebound in
+                host_statistics64(
+                    mach_host_self(),
+                    HOST_VM_INFO64,
+                    rebound,
+                    &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        let pages = UInt64(stats.free_count)
+            + UInt64(stats.inactive_count)
+            + UInt64(stats.speculative_count)
+        let bytes = pages.multipliedReportingOverflow(by: UInt64(pageSize))
+        return bytes.overflow ? nil : bytes.partialValue
     }
 
     static func appleSiliconGeneration(brandString: String) -> Int? {
@@ -395,6 +460,11 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
         self.addons = addons
     }
 
+    public var defaultSystemPrompt: String {
+        "You are \(shortName), a helpful AI assistant. "
+            + "You are running in a SSD MoE streaming app on Mac called TUFF."
+    }
+
     public func compatibility(
         with device: TUFFDeviceCapabilities,
         contextTokens: Int? = nil,
@@ -424,10 +494,7 @@ public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
             let estimate = memory.estimatedWorkingSetBytes(
                 contextTokens: contextTokens,
                 expertCacheSlots: expertCacheSlots ?? runtimeDefaults.expertCacheSlots)
-            let twentyPercent = device.unifiedMemoryBytes / 5
-            let reserve = max(2 * TUFFModelCatalog.oneGiB, twentyPercent)
-            let budget = device.unifiedMemoryBytes > reserve
-                ? device.unifiedMemoryBytes - reserve : 0
+            let budget = device.safeAppMemoryBudgetBytes
             if estimate > budget {
                 issues.append(.contextExceedsSafeMemory(
                     estimatedBytes: estimate,
@@ -529,6 +596,16 @@ public enum TUFFModelCatalog {
         manifestModelID: "openai/gpt-oss-120b",
         approximateDownloadBytes: 65_300_000_000,
         installedBytes: 65_400_000_000,
+        reserveBytes: oneGiB)
+
+    private static let minimaxM27Source = TUFFModelSource(
+        repoID: "mlx-community/MiniMax-M2.7-4bit",
+        revision: "66d2e5cb7c5cda05251b4625c504af4b034df7ff",
+        sourceIndexSHA256:
+            "8b2204b5a4741cb323a49d3ad6cfc5523c72c7c8ffa6e668a5627fb36ee13e52",
+        manifestModelID: "mlx-community/MiniMax-M2.7-4bit",
+        approximateDownloadBytes: 128_700_000_000,
+        installedBytes: 128_700_000_000,
         reserveBytes: oneGiB)
 
     /// Small text-only launch model. Image and audio remain intentionally
@@ -829,6 +906,39 @@ public enum TUFFModelCatalog {
         capabilities: [.textGeneration, .reasoning],
         reasoningControl: .graded)
 
+    /// MiniMax M2.7 streamed from the pinned MLX 4-bit checkpoint. Its 229B
+    /// total parameters remain file-backed; only the selected eight experts
+    /// per layer enter the bounded cache.
+    public static let minimaxM27 = TUFFModelDescriptor(
+        id: .minimaxM27,
+        selector: "minimax-m2.7",
+        aliases: ["minimax", "m2.7"],
+        apiModelID: "minimax-m2.7",
+        displayName: "MiniMax M2.7 4-bit",
+        shortName: "MiniMax M2.7",
+        summary: "229B total with eight active experts, streamed for 16 GB Macs.",
+        family: .minimaxM2,
+        architecture: .minimaxM27,
+        installDirectoryName: "minimax-m2.7.gturbo",
+        source: minimaxM27Source,
+        hardware: TUFFModelHardwareRequirements(
+            minimumUnifiedMemoryBytes: 16 * oneGiB,
+            minimumAppleSiliconGeneration: 2),
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 11_250_000_000,
+            defaultContextTokens: 4_096,
+            defaultExpertCacheSlots: 16,
+            expertCacheBytesPerSlot: 493_682_688,
+            kvCache: TUFFKVCacheProfile(fullAttentionBytesPerToken: 253_952)),
+        runtimeDefaults: TUFFModelRuntimeDefaults(
+            contextTokens: 4_096,
+            expertCacheSlots: 16,
+            temperature: 1.0,
+            topK: 40,
+            topP: 0.95),
+        capabilities: [.textGeneration, .reasoning],
+        reasoningControl: .alwaysOn)
+
     public static let all: [TUFFModelDescriptor] = [
         gemma4_E2B,
         gemma4_E4B,
@@ -837,6 +947,7 @@ public enum TUFFModelCatalog {
         qwen36_35B_A3B,
         gptOss_20B,
         gptOss_120B,
+        minimaxM27,
     ]
     public static let `default` = gemma4_26B_A4B
 

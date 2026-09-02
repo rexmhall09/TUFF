@@ -420,6 +420,7 @@ public final class AppModelLibraryStore {
 @Observable
 public final class AppSettingsStore {
     public var runtimeOptions = AppRuntimeOptions()
+    public var automaticMemory = true
     public var maxNewTokensOverride: Int?
     public var reasoning: ChatReasoning = .off
     public var reasoningEffort: GPTOSSReasoningEffort = .medium

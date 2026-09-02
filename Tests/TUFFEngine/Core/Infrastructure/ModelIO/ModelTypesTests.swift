@@ -80,4 +80,24 @@ import Foundation
         #expect(config.yarnRope == ArchConfig.gptOss_20B.yarnRope)
         #expect(config.decodeInt4GEMVShapes.isEmpty)
     }
+
+    @Test func minimaxM27ProfileMatchesPinnedCheckpoint() {
+        let config = ArchConfig.minimaxM27
+        #expect(config.family == .minimaxM2)
+        #expect(config.variant == .minimaxM27)
+        #expect(config.hiddenSize == 3_072)
+        #expect(config.intermediateSize == 1_536)
+        #expect(config.numLayers == 62)
+        #expect(config.numHeads == 48)
+        #expect(config.numKVHeads == 8)
+        #expect(config.headDim == 128)
+        #expect(config.numExperts == 256)
+        #expect(config.topKExperts == 8)
+        #expect(config.vocabSize == 200_064)
+        #expect(config.fullAttentionLayerMask == [UInt8](repeating: 1, count: 62))
+        #expect(config.partialRotaryFactor == 0.5)
+        #expect(config.usesProjectionWideQKNorm)
+        #expect(config.usesSigmoidCorrectionRouter)
+        #expect(!config.hasSharedExpert)
+    }
 }

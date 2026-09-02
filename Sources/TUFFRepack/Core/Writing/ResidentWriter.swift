@@ -28,12 +28,14 @@ enum ResidentWriter {
                         shardsByPath: &shardsByPath, audit: audit)
             if let scales = e.sourceScales {
                 try copyOne(srcTensor: scales, dstFd: fd, dstPath: plan.path,
-                            dstOffset: e.scaleOffset, sizeBytes: e.scaleSize,
+                            dstOffset: e.scaleOffset, sizeBytes: scales.sizeBytes,
+                            transform: e.companionTransform,
                             shardsByPath: &shardsByPath, audit: audit)
             }
             if let biases = e.sourceBiases {
                 try copyOne(srcTensor: biases, dstFd: fd, dstPath: plan.path,
-                            dstOffset: e.biasOffset, sizeBytes: e.biasSize,
+                            dstOffset: e.biasOffset, sizeBytes: biases.sizeBytes,
+                            transform: e.companionTransform,
                             shardsByPath: &shardsByPath, audit: audit)
             }
         }
@@ -153,15 +155,26 @@ enum ResidentWriter {
     private static func copyOne(srcTensor: SourceTensor,
                                 dstFd: Int32, dstPath: String, dstOffset: UInt64,
                                 sizeBytes: UInt64,
+                                transform: RangeCopyTransform = .identity,
                                 shardsByPath: inout [String: MmapHandle],
                                 audit: RepackAudit) throws {
         let shard = try mappedShard(path: srcTensor.shardPath, shardsByPath: &shardsByPath)
-        try WriterCore.pwriteTensorRegion(srcShard: shard,
-                                          srcAbsoluteOffset: srcTensor.absoluteOffset,
-                                          size: sizeBytes,
-                                          dstFd: dstFd, dstPath: dstPath,
-                                          dstOffset: dstOffset,
-                                          audit: audit)
+        switch transform {
+        case .identity:
+            try WriterCore.pwriteTensorRegion(srcShard: shard,
+                                              srcAbsoluteOffset: srcTensor.absoluteOffset,
+                                              size: sizeBytes,
+                                              dstFd: dstFd, dstPath: dstPath,
+                                              dstOffset: dstOffset,
+                                              audit: audit)
+        case .fp32ToBF16:
+            try WriterCore.pwriteFP32AsBF16(srcShard: shard,
+                                           srcAbsoluteOffset: srcTensor.absoluteOffset,
+                                           size: sizeBytes,
+                                           dstFd: dstFd, dstPath: dstPath,
+                                           dstOffset: dstOffset,
+                                           audit: audit)
+        }
     }
 
     private static func mappedShard(path: String,

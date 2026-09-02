@@ -30,7 +30,7 @@ public struct ServerArguments: Equatable, Sendable {
       --model-id <id>            API model identifier (default derived from the
                                  installed model: gemma-4-e4b-it,
                                  gemma-4-26b-a4b-it, qwen3.6-35b-a3b,
-                                 gpt-oss-20b, or gpt-oss-120b).
+                                 gpt-oss-20b, gpt-oss-120b, or minimax-m2.7).
       --max-context <tokens>     4096, 8192, 16384, 32768, or 65536 (default 16384).
       --queue-limit <count>      Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>

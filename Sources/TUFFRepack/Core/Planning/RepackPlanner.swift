@@ -32,6 +32,40 @@ struct ResidentEntry: Sendable {
     let sourceWeight: SourceTensor
     let sourceScales: SourceTensor?
     let sourceBiases: SourceTensor?
+    /// MiniMax publishes the quantized router's affine companions as FP32.
+    /// TUFF's resident affine format is BF16, so those two small tensors are
+    /// converted while streaming instead of being staged as a second model.
+    let companionTransform: RangeCopyTransform
+
+    init(name: String,
+         dtype: UInt8,
+         logicalShape4: [UInt32],
+         fileOffset: UInt64,
+         sizeBytes: UInt64,
+         scaleOffset: UInt64,
+         scaleSize: UInt64,
+         biasOffset: UInt64,
+         biasSize: UInt64,
+         quantSpec: QuantSpec?,
+         sourceWeight: SourceTensor,
+         sourceScales: SourceTensor?,
+         sourceBiases: SourceTensor?,
+         companionTransform: RangeCopyTransform = .identity) {
+        self.name = name
+        self.dtype = dtype
+        self.logicalShape4 = logicalShape4
+        self.fileOffset = fileOffset
+        self.sizeBytes = sizeBytes
+        self.scaleOffset = scaleOffset
+        self.scaleSize = scaleSize
+        self.biasOffset = biasOffset
+        self.biasSize = biasSize
+        self.quantSpec = quantSpec
+        self.sourceWeight = sourceWeight
+        self.sourceScales = sourceScales
+        self.sourceBiases = sourceBiases
+        self.companionTransform = companionTransform
+    }
 }
 
 struct ResidentFilePlan: Sendable {
@@ -258,6 +292,15 @@ enum RepackPlanner {
             }
             return .lmResident
         }
+        if family == .minimaxM2,
+           (name == "lm_head.weight" || name.hasPrefix("model.")) {
+            if let role = routedExpertRole(in: name, family: family),
+               let layer = layerIndex(in: name),
+               layer >= 0 && layer < numLayers {
+                return .routedExpert(role: role, layer: layer)
+            }
+            return .lmResident
+        }
         if name.hasPrefix("language_model.") {
             // Routed expert?
             if let role = routedExpertRole(in: name, family: family),
@@ -280,6 +323,7 @@ enum RepackPlanner {
         case .gemma4: routedContainer = ".experts.switch_glu."
         case .qwen36: routedContainer = ".mlp.switch_mlp."
         case .gptOss: routedContainer = ".mlp.experts."
+        case .minimaxM2: routedContainer = ".block_sparse_moe.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -476,7 +520,14 @@ enum RepackPlanner {
                 guard let biases = registry[base + ".biases"] else {
                     throw RepackError.missingBiasesCompanion(name: name)
                 }
-                if scales.dtype != .bf16 || biases.dtype != .bf16 {
+                let companionTransform: RangeCopyTransform
+                if scales.dtype == .bf16, biases.dtype == .bf16 {
+                    companionTransform = .identity
+                } else if family == .minimaxM2,
+                          sourceName.hasSuffix(".block_sparse_moe.gate.weight"),
+                          scales.dtype == .fp32, biases.dtype == .fp32 {
+                    companionTransform = .fp32ToBF16
+                } else {
                     throw RepackError.dtypeMismatch(name: name,
                         detail: "expected BF16 scales/biases, got \(scales.dtype)/\(biases.dtype)")
                 }
@@ -486,9 +537,11 @@ enum RepackPlanner {
                 let wOff = fileCursor
                 let wSize = weight.sizeBytes
                 let sOff = wOff + wSize
-                let sSize = scales.sizeBytes
+                let sSize = try companionTransform.destinationSize(
+                    sourceBytes: scales.sizeBytes, name: scales.name)
                 let bOff = sOff + sSize
-                let bSize = biases.sizeBytes
+                let bSize = try companionTransform.destinationSize(
+                    sourceBytes: biases.sizeBytes, name: biases.name)
                 fileCursor = bOff + bSize
 
                 entries.append(ResidentEntry(
@@ -498,7 +551,8 @@ enum RepackPlanner {
                     scaleOffset: sOff, scaleSize: sSize,
                     biasOffset: bOff, biasSize: bSize,
                     quantSpec: spec,
-                    sourceWeight: weight, sourceScales: scales, sourceBiases: biases))
+                    sourceWeight: weight, sourceScales: scales, sourceBiases: biases,
+                    companionTransform: companionTransform))
             } else {
                 // Unquantized (BF16 norm / scalar) — no companions.
                 let off = fileCursor
@@ -512,7 +566,8 @@ enum RepackPlanner {
                     scaleOffset: 0, scaleSize: 0,
                     biasOffset: 0, biasSize: 0,
                     quantSpec: nil,
-                    sourceWeight: weight, sourceScales: nil, sourceBiases: nil))
+                    sourceWeight: weight, sourceScales: nil, sourceBiases: nil,
+                    companionTransform: .identity))
             }
         }
 
@@ -530,7 +585,7 @@ enum RepackPlanner {
         _ sourceName: String,
         family: RepackModelFamily
     ) -> String {
-        guard family == .gptOss else { return sourceName }
+        guard family == .gptOss || family == .minimaxM2 else { return sourceName }
         if sourceName == "lm_head.weight" {
             return "language_model.lm_head.weight"
         }
@@ -835,6 +890,7 @@ enum RepackPlanner {
                 case .gemma4: slot = slotRank(in: n)
                 case .qwen36: slot = qwenSlotRank(in: n)
                 case .gptOss: slot = gptOssSlotRank(in: n)
+                case .minimaxM2: slot = minimaxSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -863,6 +919,20 @@ enum RepackPlanner {
         if name.hasSuffix(".post_attention_layernorm.weight") { return 10 }
         if name.contains(".mlp.router.weight") { return 11 }
         if name.contains(".mlp.router.bias") { return 12 }
+        return 100
+    }
+
+    private static func minimaxSlotRank(in n: String) -> Int {
+        if n.hasSuffix(".input_layernorm.weight") { return 0 }
+        if n.contains(".self_attn.q_proj.weight") { return 1 }
+        if n.contains(".self_attn.k_proj.weight") { return 2 }
+        if n.contains(".self_attn.v_proj.weight") { return 3 }
+        if n.contains(".self_attn.o_proj.weight") { return 4 }
+        if n.contains(".self_attn.q_norm.weight") { return 5 }
+        if n.contains(".self_attn.k_norm.weight") { return 6 }
+        if n.hasSuffix(".post_attention_layernorm.weight") { return 7 }
+        if n.contains(".block_sparse_moe.gate.weight") { return 8 }
+        if n.hasSuffix(".block_sparse_moe.e_score_correction_bias") { return 9 }
         return 100
     }
 

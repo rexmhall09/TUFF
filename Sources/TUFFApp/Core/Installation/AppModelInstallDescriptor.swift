@@ -7,6 +7,7 @@ public enum AppReasoningControl: Equatable, Sendable {
     case toggle
     case toggleWithPreservation
     case graded
+    case alwaysOn
 }
 
 public enum AppModelHardwareIssue: Equatable, Sendable {
@@ -144,6 +145,9 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public static let qwen36 = AppModelInstallDescriptor(
         catalog: TUFFModelCatalog.qwen36_35B_A3B)
 
+    public static let minimaxM27 = AppModelInstallDescriptor(
+        catalog: TUFFModelCatalog.minimaxM27)
+
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
         catalog.first { $0.family == family }
@@ -190,6 +194,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .gemma4: .gemma
         case .qwen36: .chatml
         case .gptOss: .harmony
+        case .minimaxM2: .minimax
         }
     }
 
@@ -205,6 +210,21 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
 
     public var usesExpertCache: Bool {
         catalogDescriptor?.architecture.feedForwardKind == .mixtureOfExperts
+    }
+
+    /// Cache sizes that can help this model. Counts below routed top-k cannot
+    /// execute a token, while counts above the model's expert count only create
+    /// idle buffers. Custom descriptors retain the shared runtime choices.
+    public var usefulExpertCacheSlotCounts: [Int] {
+        guard let architectureID = catalogDescriptor?.architecture.id,
+              let variant = ModelVariant(rawValue: architectureID.rawValue),
+              let architecture = ArchConfig.registeredArchitectures[variant],
+              architecture.numExperts > 0 else {
+            return AppRuntimeOptions.allowedSlotCounts
+        }
+        return AppRuntimeOptions.allowedSlotCounts.filter {
+            $0 >= architecture.topKExperts && $0 <= architecture.numExperts
+        }
     }
 
     /// Unified memory to run this model comfortably at its default settings,
@@ -279,10 +299,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         let estimate = catalogDescriptor.memory.estimatedWorkingSetBytes(
             contextTokens: contextTokens,
             expertCacheSlots: expertCacheSlots)
-        let reserve = max(2 * TUFFModelCatalog.oneGiB,
-                          device.unifiedMemoryBytes / 5)
-        let budget = device.unifiedMemoryBytes > reserve
-            ? device.unifiedMemoryBytes - reserve : 0
+        let budget = device.safeAppMemoryBudgetBytes
         return AppModelContextEligibility(
             estimatedWorkingSetBytes: estimate,
             safeBudgetBytes: budget)
@@ -293,6 +310,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .toggle: .toggle
         case .toggleWithPreservation: .toggleWithPreservation
         case .graded: .graded
+        case .alwaysOn: .alwaysOn
         case nil: nil
         }
     }
@@ -309,6 +327,12 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
 
     public var shortName: String {
         catalogDescriptor?.shortName ?? displayName
+    }
+
+    public var defaultSystemPrompt: String {
+        catalogDescriptor?.defaultSystemPrompt
+            ?? "You are \(shortName), a helpful AI assistant. "
+                + "You are running in a SSD MoE streaming app on Mac called TUFF."
     }
 
     /// The descriptor the app products select at launch. Defaults to Gemma 4.
@@ -352,6 +376,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .gemma4: return .visionCompanion
         case .qwen36: return .qwen36VisionCompanion
         case .gptOss: return nil
+        case .minimaxM2: return nil
         }
     }
 

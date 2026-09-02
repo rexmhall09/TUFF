@@ -149,7 +149,7 @@ public struct VisionConfig: Sendable, Equatable {
             attentionScale = 1 / sqrt(Float(headDimension))
             minimumPixels = 65_536
             maximumPixels = 16_777_216
-        case .gptOss:
+        case .gptOss, .minimaxM2:
             architecture = .gemma4Legacy
             hiddenSize = 0
             intermediateSize = 0
@@ -170,7 +170,7 @@ public struct VisionConfig: Sendable, Equatable {
             attentionScale = 0
             minimumPixels = 0
             maximumPixels = 0
-            preconditionFailure("GPT-OSS has no vision companion")
+            preconditionFailure("This model family has no vision companion")
         }
     }
 }

@@ -40,6 +40,8 @@ final class MoE {
     private let routerGemvSpecializedPSO: MTLComputePipelineState
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
+    private let routerSelectMiniMaxK8PSO: MTLComputePipelineState
+    private let routerSelectMiniMaxK8SpecializedPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
     private let phase1U16SpecializedPSO: MTLComputePipelineState
@@ -89,6 +91,11 @@ final class MoE {
         self.routerSelectK8PSO = try context.pipeline("router_topk_select_k8")
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8",
+            constants: routerConstants)
+        self.routerSelectMiniMaxK8PSO = try context.pipeline(
+            "router_topk_select_minimax_k8")
+        self.routerSelectMiniMaxK8SpecializedPSO = try context.pipeline(
+            "router_topk_select_minimax_k8",
             constants: routerConstants)
         self.phase1U16PSO = try context.pipeline(
             "moe_phase1_gate_up_act_u16load", constants: activationConstants)
@@ -164,6 +171,57 @@ final class MoE {
                 useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
             encoder.setBuffer(routerLogits, offset: 0, index: 0)
             encoder.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
+            encoder.setBuffer(outIndices, offset: 0, index: 2)
+            encoder.setBuffer(outWeights, offset: 0, index: 3)
+            encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: 1, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            encoder.endEncoding()
+        }
+    }
+
+    func encodeRouterMiniMax(commandBuffer: MTLCommandBuffer,
+                             weights: MTLBuffer, weightsOffset: Int = 0,
+                             scales: MTLBuffer, scalesOffset: Int = 0,
+                             biases: MTLBuffer, biasesOffset: Int = 0,
+                             hidden: MTLBuffer,
+                             effectiveScale: MTLBuffer,
+                             correctionBias: MTLBuffer,
+                             correctionBiasOffset: Int = 0,
+                             outIndices: MTLBuffer,
+                             outWeights: MTLBuffer,
+                             numExperts: UInt32,
+                             d: UInt32,
+                             topK: UInt32) {
+        precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
+        precondition(numExperts <= 256)
+        precondition(topK == UInt32(Self.maxStreamedExperts))
+        var expertCount = numExperts
+        var dimension = d
+        let useSpecialized = numExperts == realDecodeNumExperts && d == realDecodeD
+        if let encoder = commandBuffer.makeComputeCommandEncoder() {
+            encoder.setComputePipelineState(
+                useSpecialized ? routerGemvSpecializedPSO : routerGemvPSO)
+            encoder.setBuffer(weights, offset: weightsOffset, index: 0)
+            encoder.setBuffer(scales, offset: scalesOffset, index: 1)
+            encoder.setBuffer(biases, offset: biasesOffset, index: 2)
+            encoder.setBuffer(hidden, offset: 0, index: 3)
+            encoder.setBuffer(effectiveScale, offset: 0, index: 4)
+            encoder.setBuffer(routerLogits, offset: 0, index: 5)
+            encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+            encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 7)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: (Int(numExperts) + 3) / 4, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+            encoder.endEncoding()
+        }
+        if let encoder = commandBuffer.makeComputeCommandEncoder() {
+            encoder.setComputePipelineState(
+                useSpecialized ? routerSelectMiniMaxK8SpecializedPSO
+                    : routerSelectMiniMaxK8PSO)
+            encoder.setBuffer(routerLogits, offset: 0, index: 0)
+            encoder.setBuffer(correctionBias, offset: correctionBiasOffset, index: 1)
             encoder.setBuffer(outIndices, offset: 0, index: 2)
             encoder.setBuffer(outWeights, offset: 0, index: 3)
             encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)

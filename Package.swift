@@ -11,6 +11,7 @@ let package = Package(
         .library(name: "TUFFEngine", targets: ["TUFFEngine"]),
         .executable(name: "TUFFRepack", targets: ["TUFFRepack"]),
         .executable(name: "TUFFCLI", targets: ["TUFFCLI"]),
+        .executable(name: "TUFFCommand", targets: ["TUFFCommand"]),
         .executable(name: "TUFF", targets: ["TUFFMac"]),
         .executable(name: "TUFFDecodeService", targets: ["TUFFDecodeService"]),
         .executable(name: "TUFFServer", targets: ["TUFFServer"]),
@@ -62,6 +63,16 @@ let package = Package(
             name: "TUFFCLI",
             dependencies: ["TUFFCLICore"],
             path: "Sources/TUFFCLI/Command"
+        ),
+        .target(
+            name: "TUFFCommandCore",
+            dependencies: ["TUFFModelCatalog"],
+            path: "Sources/TUFFCommand/Core"
+        ),
+        .executableTarget(
+            name: "TUFFCommand",
+            dependencies: ["TUFFCommandCore"],
+            path: "Sources/TUFFCommand/Command"
         ),
         .target(
             name: "TUFFAppCore",
@@ -143,6 +154,11 @@ let package = Package(
             name: "TUFFModelCatalogTests",
             dependencies: ["TUFFModelCatalog"],
             path: "Tests/TUFFModelCatalog"
+        ),
+        .testTarget(
+            name: "TUFFCommandTests",
+            dependencies: ["TUFFCommandCore", "TUFFModelCatalog"],
+            path: "Tests/TUFFCommand"
         ),
         .testTarget(
             name: "TUFFFormatTests",

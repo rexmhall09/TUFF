@@ -48,6 +48,21 @@ public struct Model {
     let streamersBox: StreamersBox
     let streamersQueue: DispatchQueue
 
+    /// Cache slots that can provide useful residency or one cold-read tile of
+    /// prefill overlap. The latter needs two top-8 tile banks even when a toy
+    /// or future compact MoE owns fewer than 16 distinct experts.
+    var effectiveExpertCacheSlotCount: Int {
+        let configured: Int
+        switch streamingMode {
+        case .pread(let slotCount):
+            configured = slotCount
+        }
+        let usefulMaximum = max(
+            packedExpertsLayout.expertsPerLayer,
+            RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
+        return min(configured, usefulMaximum)
+    }
+
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
@@ -150,6 +165,8 @@ public struct Model {
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
         case .gptOss:
             return try resident(name: "language_model.model.layers.\(L).mlp.router.weight")
+        case .minimaxM2:
+            return try resident(name: "language_model.model.layers.\(L).block_sparse_moe.gate.weight")
         }
     }
     public func routerBias(layer L: Int) throws -> TensorView {
@@ -175,7 +192,14 @@ public struct Model {
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
         case .gptOss:
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
+        case .minimaxM2:
+            return "language_model.model.layers.\(L).block_sparse_moe.\(proj).weight"
         }
+    }
+
+    public func routerCorrectionBias(layer L: Int) throws -> TensorView {
+        try resident(name:
+            "language_model.model.layers.\(L).block_sparse_moe.e_score_correction_bias")
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
     /// 8-bit projection whose sigmoid multiplies the shared FFN output.
@@ -418,15 +442,10 @@ public struct Model {
             expertsPerLayer: packedExpertsLayout.expertsPerLayer,
             expertStride: packedExpertsLayout.expertStride,
             expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
-        let slotCount: Int
-        switch streamingMode {
-        case .pread(let configuredSlotCount):
-            slotCount = configuredSlotCount
-        }
         streamersBox.streamers[L] = try PreadExpertStreamer(
             layout: layout,
             device: device,
-            slotCount: slotCount,
+            slotCount: effectiveExpertCacheSlotCount,
             cachePolicy: expertCachePolicy,
             fileDescriptor: layerFD)
         streamersBox.layerVerified[L] = true
@@ -694,6 +713,26 @@ extension Model {
             }
         }
 
+        func requireFP32(_ name: String, count: Int) throws {
+            guard let entry = residentIndex.entries[name] else {
+                throw ModelError.indexCorrupt(detail: "missing required resident tensor \(name)")
+            }
+            guard let logicalCount = UInt32(exactly: count), logicalCount > 0 else {
+                throw ModelError.indexCorrupt(detail: "\(name) has invalid dimensions")
+            }
+            let expectedBytes = try checkedMultiply(
+                UInt64(logicalCount), UInt64(MemoryLayout<Float>.size), field: name)
+            guard entry.dtype == GTurboFormatV1.DType.fp32.rawValue,
+                  entry.shape.0 == logicalCount,
+                  entry.shape.1 == 0, entry.shape.2 == 0, entry.shape.3 == 0,
+                  entry.sizeBytes == expectedBytes,
+                  entry.scaleOffset == 0, entry.scaleSize == 0,
+                  entry.biasOffset == 0, entry.biasSize == 0,
+                  entry.fileOffset % UInt64(MemoryLayout<Float>.alignment) == 0 else {
+                throw ModelError.indexCorrupt(detail: "\(name) does not match the required FP32 schema")
+            }
+        }
+
         func affineSizes(rows: Int,
                          columns: Int,
                          slot: ManifestQuantSlot,
@@ -839,6 +878,13 @@ extension Model {
                 config: config, quant: quant,
                 requireBF16: requireBF16,
                 requireBF16Shaped: requireBF16Shaped,
+                requireAffine: requireAffine,
+                checkedIntMultiply: checkedIntMultiply)
+        } else if config.family == .minimaxM2 {
+            try validateMiniMaxM27LayerSchema(
+                config: config, quant: quant,
+                requireBF16: requireBF16,
+                requireFP32: requireFP32,
                 requireAffine: requireAffine,
                 checkedIntMultiply: checkedIntMultiply)
         } else {
@@ -1166,6 +1212,40 @@ extension Model {
                               config.hiddenSize, queryDimension, quant.attention)
             try requireBF16("\(prefix).self_attn.q_norm.weight", config.fullHeadDim)
             try requireBF16("\(prefix).self_attn.k_norm.weight", config.fullHeadDim)
+        }
+    }
+
+    private static func validateMiniMaxM27LayerSchema(
+        config: ArchConfig,
+        quant: ManifestQuant,
+        requireBF16: (String, Int) throws -> Void,
+        requireFP32: (String, Int) throws -> Void,
+        requireAffine: (String, Int, Int, ManifestQuantSlot) throws -> Void,
+        checkedIntMultiply: (Int, Int, String) throws -> Int
+    ) throws {
+        let qDimension = try checkedIntMultiply(
+            config.numHeads, config.headDim, "MiniMax query")
+        let kvDimension = try checkedIntMultiply(
+            config.numKVHeads, config.headDim, "MiniMax key/value")
+        for layer in 0..<config.numLayers {
+            let prefix = "language_model.model.layers.\(layer)"
+            try requireBF16("\(prefix).input_layernorm.weight", config.hiddenSize)
+            try requireBF16("\(prefix).post_attention_layernorm.weight", config.hiddenSize)
+            try requireBF16("\(prefix).self_attn.q_norm.weight", qDimension)
+            try requireBF16("\(prefix).self_attn.k_norm.weight", kvDimension)
+            try requireFP32(
+                "\(prefix).block_sparse_moe.e_score_correction_bias",
+                config.numExperts)
+            try requireAffine("\(prefix).self_attn.q_proj.weight",
+                              qDimension, config.hiddenSize, quant.attention)
+            try requireAffine("\(prefix).self_attn.k_proj.weight",
+                              kvDimension, config.hiddenSize, quant.attention)
+            try requireAffine("\(prefix).self_attn.v_proj.weight",
+                              kvDimension, config.hiddenSize, quant.attention)
+            try requireAffine("\(prefix).self_attn.o_proj.weight",
+                              config.hiddenSize, qDimension, quant.attention)
+            try requireAffine("\(prefix).block_sparse_moe.gate.weight",
+                              config.numExperts, config.hiddenSize, quant.router)
         }
     }
 

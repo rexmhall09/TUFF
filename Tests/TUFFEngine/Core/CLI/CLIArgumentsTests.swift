@@ -7,6 +7,7 @@ import TUFFEngine
         let arguments = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
         #expect(arguments.model == "m.gturbo")
         #expect(arguments.prompt == "hi")
+        #expect(arguments.systemPrompt == nil)
         #expect(arguments.messagesFile == nil)
         #expect(arguments.maxNew == 1_024)
         // 8K as of 2026-08-17, so an image and its prompt fit without anyone
@@ -71,6 +72,7 @@ import TUFFEngine
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
+            "--system-prompt",
             "--thinking", "--reasoning",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--expert-cache-slots",
@@ -81,6 +83,21 @@ import TUFFEngine
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
         #expect(options == expected)
+    }
+
+    @Test func systemPromptParsesOnlyWithAChatPrompt() throws {
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--chat-prompt", "hi",
+            "--system-prompt", "Be helpful.",
+        ])
+        #expect(arguments.systemPrompt == "Be helpful.")
+
+        #expect(throws: ArgsError.requiredMissing("--chat-prompt")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--system-prompt", "Be helpful.",
+            ])
+        }
     }
 
     @Test func thinkingParsesForChatAndIsRejectedForRawCompletion() throws {

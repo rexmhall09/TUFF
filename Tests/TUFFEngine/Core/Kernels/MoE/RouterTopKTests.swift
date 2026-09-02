@@ -69,6 +69,29 @@ import TUFFValidationSupport
         #expect(actual.indices == expected.indices)
     }
 
+    @Test func minimaxRouterUsesCorrectionOnlyForSelection() throws {
+        let hidden = [Float](repeating: 1, count: Self.dimension)
+        let effectiveScale = [Float](repeating: 1, count: Self.dimension)
+        let weights = (0..<Self.experts).map { expert in
+            [Float](repeating: Float(expert) / 10_000, count: Self.dimension)
+        }
+        var correction = [Float](repeating: 0, count: Self.experts)
+        correction[0] = 10
+        let actual = try Self.runMiniMax(
+            weights: weights, hidden: hidden,
+            effectiveScale: effectiveScale, correction: correction)
+        #expect(actual.indices.first == 0)
+
+        let rows = weights.map { Quantization.quantizeInt8Affine($0) }
+        let logits = DequantInt8GemvRef.apply(
+            weightRows: rows, x: hidden, n: Self.dimension)
+        let probabilities = actual.indices.map { 1 / (1 + exp(-logits[Int($0)])) }
+        let total = probabilities.reduce(0, +)
+        for (actualWeight, probability) in zip(actual.weights, probabilities) {
+            #expect(abs(actualWeight - probability / total) < 5e-3)
+        }
+    }
+
     private static func reference(weights: [[Float]],
                                   hidden: [Float],
                                   effectiveScale: [Float],
@@ -156,6 +179,58 @@ import TUFFValidationSupport
             to: UInt32.self, capacity: Self.topK)
         return Result(
             indices: (0..<Self.topK).map { indexPointer[$0] },
+            weights: Fp16Buffer.read(outputWeightBuffer, count: Self.topK))
+    }
+
+    private static func runMiniMax(weights: [[Float]],
+                                   hidden: [Float],
+                                   effectiveScale: [Float],
+                                   correction: [Float]) throws -> Result {
+        let rows = weights.map { Quantization.quantizeInt8Affine($0) }
+        let packed = rows.flatMap(\.packed)
+        let scales = rows.flatMap(\.scales)
+        let biases = rows.flatMap(\.biases)
+        let context = try MetalContext()
+        let kernel = try MoE(context: context,
+                             siluActivation: true,
+                             specializedD: UInt32(Self.dimension),
+                             specializedF: 128,
+                             specializedNumExperts: UInt32(Self.experts))
+        guard let weightBuffer = context.device.makeBuffer(
+                  bytes: packed, length: packed.count, options: .storageModeShared),
+              let scaleBuffer = context.device.makeBuffer(
+                  bytes: scales, length: scales.count * 2, options: .storageModeShared),
+              let biasBuffer = context.device.makeBuffer(
+                  bytes: biases, length: biases.count * 2, options: .storageModeShared),
+              let hiddenBuffer = Fp16Buffer.make(context.device, values: hidden),
+              let effectiveBuffer = context.device.makeBuffer(
+                  bytes: effectiveScale.map(Quantization.bf16Bits),
+                  length: effectiveScale.count * 2, options: .storageModeShared),
+              let correctionBuffer = context.device.makeBuffer(
+                  bytes: correction,
+                  length: correction.count * MemoryLayout<Float>.size,
+                  options: .storageModeShared),
+              let indexBuffer = context.device.makeBuffer(
+                  length: Self.topK * 4, options: .storageModeShared),
+              let outputWeightBuffer = Fp16Buffer.make(context.device, count: Self.topK),
+              let commandBuffer = context.queue.makeCommandBuffer() else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        kernel.encodeRouterMiniMax(
+            commandBuffer: commandBuffer,
+            weights: weightBuffer, scales: scaleBuffer, biases: biasBuffer,
+            hidden: hiddenBuffer, effectiveScale: effectiveBuffer,
+            correctionBias: correctionBuffer,
+            outIndices: indexBuffer, outWeights: outputWeightBuffer,
+            numExperts: UInt32(Self.experts), d: UInt32(Self.dimension),
+            topK: UInt32(Self.topK))
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        #expect(commandBuffer.error == nil)
+        let indices = indexBuffer.contents().bindMemory(
+            to: UInt32.self, capacity: Self.topK)
+        return Result(
+            indices: (0..<Self.topK).map { indices[$0] },
             weights: Fp16Buffer.read(outputWeightBuffer, count: Self.topK))
     }
 }

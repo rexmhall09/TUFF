@@ -441,6 +441,15 @@ public enum OpenAIRequestValidator {
             reasoning = .off
             reasoningEffort = request.reasoningEffort ?? .medium
             harmonyCurrentDate = HarmonyPromptRenderer.calendarDate()
+        } else if dialect == .minimax {
+            guard request.reasoningEffort == nil else {
+                throw invalid(
+                    "reasoning_effort is only supported by GPT-OSS",
+                    "reasoning_effort", "unsupported_parameter")
+            }
+            reasoning = .on
+            reasoningEffort = nil
+            harmonyCurrentDate = nil
         } else {
             guard request.reasoningEffort == nil else {
                 throw invalid(

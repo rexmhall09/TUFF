@@ -82,6 +82,41 @@ struct RangeCopyPlannerTests {
         }
     }
 
+    @Test func fp32ToBF16TransformRoundsAndHalvesDestinationRanges() throws {
+        var words: [UInt32] = [
+            Float(1).bitPattern.littleEndian,
+            Float(-2.5).bitPattern.littleEndian,
+            UInt32(0x3f80_8000).littleEndian,
+            UInt32(0x7f80_0001).littleEndian,
+        ]
+        let outputBytes = words.withUnsafeMutableBytes {
+            WriterCore.convertFP32ToBF16InPlace(
+                $0.baseAddress!, byteCount: $0.count)
+        }
+        let converted = words.withUnsafeBytes { raw in
+            Array(raw.prefix(outputBytes).bindMemory(to: UInt16.self))
+                .map(UInt16.init(littleEndian:))
+        }
+        #expect(converted == [0x3f80, 0xc020, 0x3f80, 0x7fc0])
+
+        let root = temporaryRoot("fp32-bf16")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let copy = RangeCopy(
+            shardID: "source.bin",
+            sourceOffset: 0,
+            size: 16,
+            destinationPath: (root as NSString).appendingPathComponent("file.bin"),
+            destinationOffset: 0,
+            transform: .fp32ToBF16)
+        #expect(copy.destinationSize == 8)
+        let ranges = try RangeCopyPlanner.coalesce(copies: [copy], rangeChunkBytes: 8)
+        #expect(ranges.count == 2)
+        #expect(ranges[0].destinations[0].destinationOffset == 0)
+        #expect(ranges[0].destinations[0].destinationSize == 4)
+        #expect(ranges[1].destinations[0].destinationOffset == 4)
+        #expect(ranges[1].destinations[0].destinationSize == 4)
+    }
+
     private func temporaryRoot(_ tag: String) -> String {
         let path = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("tuff-range-plan-\(tag)-\(UUID().uuidString)")

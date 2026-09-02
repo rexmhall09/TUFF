@@ -33,10 +33,21 @@ trap 'rm -rf "$temporary_directory"' EXIT
 
 cd "$repository_root"
 ruby Scripts/check_brand_assets.rb
-swift build -c release
-binary_directory="$(swift build -c release --show-bin-path)"
+# This package only consumes the local package graph and its checked-out
+# dependencies. Disabling SwiftPM's command sandbox keeps release packaging
+# usable in restricted developer shells where the manifest sandbox cannot
+# create its compiler module cache.
+swift build -c release --disable-sandbox
+binary_directory="$(swift build -c release --disable-sandbox --show-bin-path)"
 
-required_binaries=(TUFF TUFFDecodeService)
+required_binaries=(
+  TUFF
+  TUFFDecodeService
+  TUFFCommand
+  TUFFCLI
+  TUFFRepack
+  TUFFServer
+)
 required_bundles=(
   TUFF_TUFFEngine.bundle
   TUFF_TUFFAppCore.bundle
@@ -60,21 +71,28 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" \
   "$app/Contents/Frameworks"
 signed_binaries="$temporary_directory/signed-binaries"
 mkdir -p "$signed_binaries"
-install -m 0755 "$binary_directory/TUFF" "$signed_binaries/TUFF"
-install -m 0755 "$binary_directory/TUFFDecodeService" \
-  "$signed_binaries/TUFFDecodeService"
+for name in "${required_binaries[@]}"; do
+  install -m 0755 "$binary_directory/$name" "$signed_binaries/$name"
+done
 if ! otool -l "$signed_binaries/TUFF" \
   | grep -Fq '@executable_path/../Frameworks'; then
   install_name_tool -add_rpath '@executable_path/../Frameworks' \
     "$signed_binaries/TUFF"
 fi
-codesign --force --sign - --timestamp=none "$signed_binaries/TUFF"
-codesign --force --sign - --timestamp=none "$signed_binaries/TUFFDecodeService"
-codesign --verify --strict --verbose=2 "$signed_binaries/TUFF"
-codesign --verify --strict --verbose=2 "$signed_binaries/TUFFDecodeService"
+for name in "${required_binaries[@]}"; do
+  codesign --force --sign - --timestamp=none "$signed_binaries/$name"
+  codesign --verify --strict --verbose=2 "$signed_binaries/$name"
+done
 install -m 0755 "$signed_binaries/TUFF" "$app/Contents/MacOS/TUFF"
 install -m 0755 "$signed_binaries/TUFFDecodeService" \
   "$app/Contents/MacOS/TUFFDecodeService"
+mkdir -p "$app/Contents/Resources/bin"
+install -m 0755 "$signed_binaries/TUFFCommand" \
+  "$app/Contents/Resources/bin/tuff"
+for name in TUFFCLI TUFFRepack TUFFServer; do
+  install -m 0755 "$signed_binaries/$name" \
+    "$app/Contents/Resources/bin/$name"
+done
 
 # Keep resource bundles in the standard sealed app resource directory. TUFF's
 # resource lookups prefer this location in a packaged app and fall back to
@@ -171,6 +189,12 @@ if [[ "$main_architectures" != "arm64" || "$service_architectures" != "arm64" ]]
   echo "release app must contain arm64-only executables" >&2
   exit 1
 fi
+for name in tuff TUFFCLI TUFFRepack TUFFServer; do
+  if [[ "$(lipo -archs "$app/Contents/Resources/bin/$name")" != "arm64" ]]; then
+    echo "release CLI must contain arm64-only executable: $name" >&2
+    exit 1
+  fi
+done
 
 # Sign after the complete bundle has been assembled so Info.plist and resources
 # are sealed as part of the app rather than leaving a standalone executable
@@ -191,6 +215,9 @@ mkdir -p "$extracted"
 ditto -x -k "$archive" "$extracted"
 codesign --verify --deep --strict --verbose=2 "$extracted/TUFF.app"
 test -f "$extracted/TUFF.app/Contents/Frameworks/Sparkle.framework/Sparkle"
+test -x "$extracted/TUFF.app/Contents/Resources/bin/tuff"
+"$extracted/TUFF.app/Contents/Resources/bin/tuff" --help \
+  | grep -Fq 'tuff prompt'
 otool -L "$extracted/TUFF.app/Contents/MacOS/TUFF" \
   | grep -Fq '@rpath/Sparkle.framework/Versions/B/Sparkle'
 

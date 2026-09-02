@@ -24,11 +24,16 @@ card states, and the model card remains authoritative.
 | Qwen3.6 35B-A3B | [`mlx-community/Qwen3.6-35B-A3B-4bit`](https://huggingface.co/mlx-community/Qwen3.6-35B-A3B-4bit) | `38740b847e4cb78f352aba30aa41c76e08e6eb46` | Apache-2.0 quantization of Alibaba's Qwen3.6 35B-A3B checkpoint |
 | GPT-OSS 20B | [`openai/gpt-oss-20b`](https://huggingface.co/openai/gpt-oss-20b) | `6cee5e81ee83917806bbde320786a8fb61efebee` | Apache-2.0 |
 | GPT-OSS 120B | [`openai/gpt-oss-120b`](https://huggingface.co/openai/gpt-oss-120b) | `b5c939de8f754692c1647ca79fbf85e8c1e70f8a` | Apache-2.0 |
+| MiniMax M2.7 | [`mlx-community/MiniMax-M2.7-4bit`](https://huggingface.co/mlx-community/MiniMax-M2.7-4bit) | `66d2e5cb7c5cda05251b4625c504af4b034df7ff` | Modified MIT terms linked by the model card |
 
 Google publishes Gemma 4 under the
 [Apache License 2.0](https://ai.google.dev/gemma/apache_2). The GPT-OSS
 checkpoints are the official OpenAI releases and are installed in their native
 MXFP4 form rather than requantized.
+
+MiniMax M2.7 is governed by the upstream
+[MiniMax model license](https://github.com/MiniMax-AI/MiniMax-M2.7/blob/main/LICENSE),
+which the pinned model card labels `modified-mit`.
 
 Downloaded weights remain a separate work governed by their source terms. Do
 not redistribute weights as part of TUFF releases.

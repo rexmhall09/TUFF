@@ -22,6 +22,8 @@ import Testing
             <= AppWindowLayout.minimumWidth)
         #expect(AppWindowLayout.defaultWidth >= AppWindowLayout.minimumWidth)
         #expect(AppWindowLayout.defaultHeight >= AppWindowLayout.minimumHeight)
+        #expect(AppWindowLayout.minimumWidth == 640)
+        #expect(AppWindowLayout.minimumHeight == 440)
         #expect(AppWindowLayout.sidebarMinimumWidth
             <= AppWindowLayout.sidebarIdealWidth)
         #expect(AppWindowLayout.sidebarIdealWidth

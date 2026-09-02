@@ -381,3 +381,105 @@ void attention_decode_combine(
         out_row[i] = half(acc * inv_d);
     }
 }
+
+// ============================================================================
+// attention_decode_simd_partial — pass 1 with one SIMD group per query head.
+//
+// The two kernels above give a whole 256-thread threadgroup to a single query
+// head, so every KV position costs a block reduction with two threadgroup
+// barriers, and the Q heads sharing a KV head each re-read that head's K and
+// V. At the decode shapes that dominates: measured 150 us per layer for E2B
+// (8 Q heads, 1 KV head, head_dim 256) against ~7 us of KV traffic.
+//
+// Here one threadgroup owns one (kv_head, chunk) pair and SIMD group `g`
+// owns query head `kv_head * q_per_kv + g`. Each lane holds head_dim / 32
+// components of Q in registers, the score reduction is a single `simd_sum`,
+// and the inner loop has no threadgroup barrier at all. The Q heads in a
+// threadgroup read the same K and V rows in the same cycle, so those loads
+// coalesce in cache instead of multiplying device traffic.
+//
+// Requires head_dim % 32 == 0 and q_per_kv <= kAttnSimdMaxQPerKV; the caller
+// falls back to the kernels above otherwise. The partial layout
+// (m/d per head-chunk, o per head-chunk-element) is unchanged, so
+// `attention_decode_combine` merges these partials as before.
+// ============================================================================
+
+constant constexpr uint kAttnSimdMaxQPerKV   = 8;
+constant constexpr uint kAttnSimdMaxPerLane  = kAttnMaxHeadDim / 32;
+
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_decode_simd_partial(
+    device const half*  Q             [[buffer(0)]],
+    device const half*  K             [[buffer(1)]],
+    device const half*  V             [[buffer(2)]],
+    device       float* m_out         [[buffer(3)]],   // [num_q_heads * num_chunks]
+    device       float* d_out         [[buffer(4)]],   // [num_q_heads * num_chunks]
+    device       float* o_out         [[buffer(5)]],   // [num_q_heads * num_chunks * head_dim]
+    constant     uint&  head_dim      [[buffer(6)]],
+    constant     uint&  num_q_heads   [[buffer(7)]],
+    constant     uint&  num_kv_heads  [[buffer(8)]],
+    constant     uint&  seq_len       [[buffer(9)]],
+    constant     uint&  kv_start      [[buffer(10)]],
+    constant     uint&  chunk_len     [[buffer(11)]],
+    constant     uint&  num_chunks    [[buffer(12)]],
+    constant     float& scale         [[buffer(13)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint simd_lane_id    [[thread_index_in_simdgroup]],
+    uint simd_group_id   [[simdgroup_index_in_threadgroup]]
+) {
+    const uint HD = attn_fc_head_dim(head_dim);
+    const uint NQ = attn_fc_num_q_heads(num_q_heads);
+    const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
+    const uint NC = attn_fc_num_chunks(num_chunks);
+    const uint q_per_kv = NQ / NKV;
+    const uint per_lane = HD / 32u;
+
+    const uint kv_head = tg_id / NC;
+    const uint chunk   = tg_id % NC;
+    if (simd_group_id >= q_per_kv) { return; }
+    const uint q_head = kv_head * q_per_kv + simd_group_id;
+
+    const uint p_start = kv_start + chunk * chunk_len;
+    uint p_end = p_start + chunk_len;
+    if (p_end > seq_len) { p_end = seq_len; }
+
+    // Lane `l` owns the contiguous slice [l * per_lane, +per_lane) so its K
+    // and V reads are one aligned vector each.
+    const uint base_i = simd_lane_id * per_lane;
+    float q_reg[kAttnSimdMaxPerLane];
+    device const half* Q_row = Q + uint(q_head) * HD + base_i;
+    for (uint i = 0; i < per_lane; ++i) { q_reg[i] = float(Q_row[i]); }
+
+    float o_local[kAttnSimdMaxPerLane];
+    for (uint i = 0; i < per_lane; ++i) { o_local[i] = 0.0f; }
+    float m_run = -INFINITY;
+    float d_run = 0.0f;
+
+    for (uint p = p_start; p < p_end; ++p) {
+        const uint phys_p = attn_ring_slot(p);
+        device const half* K_row = K + (phys_p * NKV + kv_head) * HD + base_i;
+        device const half* V_row = V + (phys_p * NKV + kv_head) * HD + base_i;
+
+        float partial = 0.0f;
+        float v_reg[kAttnSimdMaxPerLane];
+        for (uint i = 0; i < per_lane; ++i) {
+            partial = fma(q_reg[i], float(K_row[i]), partial);
+            v_reg[i] = float(V_row[i]);
+        }
+        const float s = simd_sum(partial) * attn_fc_scale(scale);
+
+        const float m_new = max(m_run, s);
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        const float p_exp = attn_softmax_exp(s - m_new);
+        d_run = d_run * alpha + p_exp;
+        for (uint i = 0; i < per_lane; ++i) {
+            o_local[i] = fma(o_local[i], alpha, p_exp * v_reg[i]);
+        }
+        m_run = m_new;
+    }
+
+    const uint base = uint(q_head) * NC + chunk;
+    if (simd_lane_id == 0) { m_out[base] = m_run; d_out[base] = d_run; }
+    device float* o_row = o_out + base * HD + base_i;
+    for (uint i = 0; i < per_lane; ++i) { o_row[i] = o_local[i]; }
+}

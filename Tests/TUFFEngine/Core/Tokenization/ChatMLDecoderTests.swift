@@ -143,6 +143,16 @@ struct ChatMLDecoderTests {
         #expect(text.contains("visible answer"))
     }
 
+    @Test("Bytes flushed by the closing thought token stay hidden")
+    func closingThoughtTokenKeepsItsFlushInTheThoughtChannel() throws {
+        let d = StructuredAssistantDecoder(
+            tokenizer: tok, allowedTools: [], promptOpensThinking: true)
+        let events = try d.consume(tokenID: tok.thinkEndID!, delta: "last thought")
+        #expect(thinkingText(events) == "last thought")
+        #expect(visibleText(events).isEmpty)
+        #expect(try d.consume(tokenID: 0, delta: "answer") == [.content("answer")])
+    }
+
     /// The same continuation without the flag is the pre-fix behaviour, kept so
     /// the flag is shown to be what makes the difference.
     @Test("Without the flag the same tokens leak into the answer")
@@ -160,5 +170,11 @@ struct ChatMLDecoderTests {
             tokenizer: tok, reasoning: .on))
         #expect(!StructuredAssistantDecoder.promptOpensThinking(
             tokenizer: tok, reasoning: .off))
+        #expect(StructuredAssistantDecoder.promptOpensThinking(
+            dialect: .minimax, reasoning: .off))
+        #expect(StructuredAssistantDecoder.promptOpensThinking(
+            dialect: .minimax, reasoning: .on))
+        #expect(!StructuredAssistantDecoder.promptOpensThinking(
+            dialect: .gemma, reasoning: .on))
     }
 }

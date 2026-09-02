@@ -74,6 +74,8 @@ public func run(args: Args,
         let architecture = try ManifestReader.resolveArchitecture(
             directoryURL: modelURL)
         let modelFamily = architecture.family
+        let effectiveThinking: ChatReasoning = modelFamily == .minimaxM2
+            ? .on : args.thinking
         if modelFamily == .gptOss, args.thinking != .off {
             throw ArgsError.unsupported(
                 flag: "--thinking", context: "GPT-OSS; use --reasoning")
@@ -100,7 +102,7 @@ public func run(args: Args,
                 messages: messages,
                 tokenizer: tokenizer,
                 architecture: architecture,
-                thinking: args.thinking,
+                thinking: effectiveThinking,
                 reasoningEffort: args.reasoningEffort,
                 currentDate: currentDate)
         case .multimodal(let messages, let images):
@@ -143,7 +145,7 @@ public func run(args: Args,
                 input: input, tokenizer: tokenizer, device: device,
                 family: modelFamily,
                 modelVariant: architecture.variant,
-                reasoning: args.thinking,
+                reasoning: effectiveThinking,
                 reasoningEffort: args.reasoningEffort,
                 currentDate: currentDate)
             effectiveArgs.prefillChunkTokens =
@@ -224,6 +226,10 @@ public func run(args: Args,
             context: context,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
+        if ProcessInfo.processInfo.environment["TUFF_KERNEL_BENCH"] == "1" {
+            stderr.write(Data(try runner.benchmarkDecodeKernels().utf8))
+            return RunResult(exitCode: 0)
+        }
         let scratch = try RawCompletionScratch(context: context,
                                                vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
@@ -266,7 +272,7 @@ public func run(args: Args,
                 tokenizer: tokenizer,
                 family: model.config.family,
                 modelVariant: model.config.variant,
-                reasoning: args.thinking)
+                reasoning: effectiveThinking)
             promptIds = rendered.effectiveTokenIDs
             multimodalInput = rendered
             guard promptIds.count < args.maxContext else {
@@ -283,7 +289,7 @@ public func run(args: Args,
         let assistantDecoder = StructuredAssistantDecoder(
             tokenizer: tokenizer, allowedTools: [],
             promptOpensThinking: StructuredAssistantDecoder.promptOpensThinking(
-                tokenizer: tokenizer, reasoning: args.thinking))
+                tokenizer: tokenizer, reasoning: effectiveThinking))
         var assistantDecodeError: Error?
         func writeAssistantEvents(_ events: [StructuredAssistantEvent]) {
             for event in events {
@@ -337,6 +343,11 @@ public func run(args: Args,
             lines += "  cb2 encode+commit: " + ms(runner.totalCb2Nanos) + " ms\n"
             lines += "  unaccounted (GPU waits): "
             lines += String(format: "%.1f", total - accounted) + " ms\n"
+            lines += "  gpu layer cbs: " + ms(runner.totalGPULayerNanos) + " ms over "
+            lines += "\(runner.totalGPULayerCommandBuffers) cbs\n"
+            lines += "  gpu head cbs:  " + ms(runner.totalGPUHeadNanos) + " ms\n"
+            lines += "  gpu routed cbs: " + ms(runner.totalGPURoutedNanos) + " ms\n"
+            lines += "  gpu shared cbs: " + ms(runner.totalGPUSharedNanos) + " ms\n"
             stderr.write(Data(lines.utf8))
         }
         if !args.quiet {
@@ -489,8 +500,13 @@ func parseInput(args: Args) throws -> PromptInput {
         return .raw(prompt)
     }
     if let chatPrompt = args.chatPrompt {
+        let textSystemMessages = args.systemPrompt.map {
+            [GFTokenizer.Message(role: .system, content: $0)]
+        } ?? []
         guard !args.images.isEmpty else {
-            return .messages([GFTokenizer.Message(role: .user, content: chatPrompt)])
+            return .messages(textSystemMessages + [
+                GFTokenizer.Message(role: .user, content: chatPrompt)
+            ])
         }
         var images: [UUID: URL] = [:]
         var content: [MultimodalContentPart] = []
@@ -501,7 +517,9 @@ func parseInput(args: Args) throws -> PromptInput {
         }
         if !chatPrompt.isEmpty { content.append(.text(chatPrompt)) }
         return .multimodal(
-            messages: [MultimodalMessage(role: .user, content: content)],
+            messages: (args.systemPrompt.map {
+                [MultimodalMessage(role: .system, content: [.text($0)])]
+            } ?? []) + [MultimodalMessage(role: .user, content: content)],
             images: images)
     }
     guard let path = args.messagesFile else {

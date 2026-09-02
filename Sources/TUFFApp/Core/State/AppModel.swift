@@ -80,6 +80,10 @@ public final class AppModel {
         get { settingsStore.runtimeOptions }
         set { settingsStore.runtimeOptions = newValue }
     }
+    public var automaticMemory: Bool {
+        get { settingsStore.automaticMemory }
+        set { settingsStore.automaticMemory = newValue }
+    }
     public var maxNewTokensOverride: Int? {
         get { settingsStore.maxNewTokensOverride }
         set { settingsStore.maxNewTokensOverride = newValue }
@@ -325,7 +329,11 @@ public final class AppModel {
             : MacAppSettings(modelProfiles: [
                 settingsProfileKey: .defaults(for: settingsProfileKey)
             ])
-        let modelSettings = settings.profile(for: settingsProfileKey)
+        let savedModelSettings = settings.profile(for: settingsProfileKey)
+        let modelSettings = AppAutomaticMemoryPlanner.applying(
+            savedModelSettings,
+            for: installer.descriptor,
+            on: deviceCapabilities)
         // Initialize AppModel's stored dependencies before writing through the
         // domain-store proxy properties below. Swift treats those computed
         // properties as accesses to self even though each store already has a
@@ -352,13 +360,15 @@ public final class AppModel {
             prefillEnabled: modelSettings.prefillEnabled,
             rdadvisePolicy: modelSettings.rdadvisePolicy,
             visionResidencyPolicy: .onDemand)
+        self.automaticMemory = modelSettings.automaticMemory
         self.maxContextTokens = modelSettings.contextTokens
         self.temperature = modelSettings.temperature
         self.topKEnabled = modelSettings.topKEnabled
         self.topK = modelSettings.topK
         self.topPEnabled = modelSettings.topPEnabled
         self.topP = modelSettings.topP
-        self.reasoning = modelSettings.defaultReasoning
+        self.reasoning = installer.descriptor.reasoningControl == .alwaysOn
+            ? .on : modelSettings.defaultReasoning
         self.reasoningEffort = modelSettings.defaultReasoningEffort
         self.preserveThinking = modelSettings.preserveThinking
         self.settingsStore.systemPrompt = modelSettings.systemPrompt
@@ -1290,10 +1300,53 @@ public final class AppModel {
         guard settingsPersistenceEnabled else {
             return .defaults(for: coordinator.descriptor.settingsProfileKey)
         }
-        return MacAppSettingsFileStore.loadOrCreate(
+        let saved = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: coordinator.directoryURL,
             profileKey: coordinator.descriptor.settingsProfileKey)
             .profile(for: coordinator.descriptor.settingsProfileKey)
+        return AppAutomaticMemoryPlanner.applying(
+            saved,
+            for: coordinator.descriptor,
+            on: deviceCapabilities)
+    }
+
+    public func automaticMemoryPlan(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppAutomaticMemoryPlan? {
+        AppAutomaticMemoryPlanner.plan(
+            for: coordinator.descriptor,
+            on: deviceCapabilities)
+    }
+
+    /// Switches Auto without discarding the manual memory profile underneath
+    /// it. Auto's resolved values drive the loaded runtime; the saved context,
+    /// cache, and prefill choices return when Auto is turned off.
+    public func setAutomaticMemory(
+        _ enabled: Bool,
+        for coordinator: ModelInstallCoordinator
+    ) {
+        guard settingsPersistenceEnabled else {
+            var profile = settingsProfile(for: coordinator)
+            profile.automaticMemory = enabled
+            updateSettingsProfile(profile, for: coordinator)
+            return
+        }
+        let profileKey = coordinator.descriptor.settingsProfileKey
+        var settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: coordinator.directoryURL,
+            profileKey: profileKey)
+        var stored = settings.profile(for: profileKey)
+        guard stored.automaticMemory != enabled else { return }
+        stored.automaticMemory = enabled
+        if coordinator.id == selectedModelID {
+            applySettingsProfile(stored)
+            persistSettings()
+        } else {
+            settings.setProfile(stored, for: profileKey)
+            try? MacAppSettingsFileStore.save(
+                settings,
+                forModelDirectory: coordinator.directoryURL)
+        }
     }
 
     public func updateSettingsProfile(
@@ -1311,7 +1364,10 @@ public final class AppModel {
         var settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: coordinator.directoryURL,
             profileKey: profileKey)
-        settings.setProfile(profile, for: profileKey)
+        let stored = Self.preservingManualMemorySettings(
+            in: profile,
+            from: settings.profile(for: profileKey))
+        settings.setProfile(stored, for: profileKey)
         try? MacAppSettingsFileStore.save(
             settings,
             forModelDirectory: coordinator.directoryURL)
@@ -2180,6 +2236,7 @@ public final class AppModel {
 
     private var currentSettingsProfile: AppModelSettingsProfile {
         AppModelSettingsProfile(
+            automaticMemory: automaticMemory,
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
             temperature: temperature,
@@ -2197,6 +2254,10 @@ public final class AppModel {
     }
 
     private func applySettingsProfile(_ profile: AppModelSettingsProfile) {
+        let profile = AppAutomaticMemoryPlanner.applying(
+            profile,
+            for: selectedDescriptor,
+            on: deviceCapabilities)
         runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: profile.expertCacheSlots,
             prefillEnabled: profile.prefillEnabled,
@@ -2206,13 +2267,15 @@ public final class AppModel {
             // `keepReady` written by an older build resurrect ~1 GB of resident
             // tower on a machine with no control that shows or clears it.
             visionResidencyPolicy: .onDemand)
+        automaticMemory = profile.automaticMemory
         maxContextTokens = profile.contextTokens
         temperature = profile.temperature
         topKEnabled = profile.topKEnabled
         topK = profile.topK
         topPEnabled = profile.topPEnabled
         topP = profile.topP
-        reasoning = profile.defaultReasoning
+        reasoning = selectedDescriptor.reasoningControl == .alwaysOn
+            ? .on : profile.defaultReasoning
         reasoningEffort = profile.defaultReasoningEffort
         preserveThinking = profile.preserveThinking
         settingsStore.systemPrompt = profile.systemPrompt
@@ -2225,7 +2288,10 @@ public final class AppModel {
         var settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory,
             profileKey: profileKey)
-        settings.setProfile(currentSettingsProfile, for: profileKey)
+        let stored = Self.preservingManualMemorySettings(
+            in: currentSettingsProfile,
+            from: settings.profile(for: profileKey))
+        settings.setProfile(stored, for: profileKey)
         settings.newlineShortcut = newlineShortcut
         settings.showPromptExamples = showPromptExamples
         settings.sentPromptBehavior = sentPromptBehavior
@@ -2235,6 +2301,18 @@ public final class AppModel {
         try? MacAppSettingsFileStore.save(
             settings,
             forModelDirectory: modelDirectory)
+    }
+
+    private static func preservingManualMemorySettings(
+        in effective: AppModelSettingsProfile,
+        from saved: AppModelSettingsProfile
+    ) -> AppModelSettingsProfile {
+        guard effective.automaticMemory else { return effective }
+        var stored = effective
+        stored.contextTokens = saved.contextTokens
+        stored.expertCacheSlots = saved.expertCacheSlots
+        stored.prefillEnabled = saved.prefillEnabled
+        return stored
     }
 
     func applyLoadState(_ state: AppModelLoadState) {
@@ -2659,11 +2737,13 @@ public final class AppModel {
         var draft = AppContextUsage.tokens(inText: composedPromptText)
         draft += AppContextUsage.tokens(
             forImages: imageAttachments.count, family: family)
-        if let systemPrompt = effectiveSystemPrompt {
-            draft += AppContextUsage.tokens(inText: systemPrompt)
-                + AppContextUsage.overheadTokensPerMessage
+        if draft > 0 {
+            if let systemPrompt = effectiveSystemPrompt {
+                draft += AppContextUsage.tokens(inText: systemPrompt)
+                    + AppContextUsage.overheadTokensPerMessage
+            }
+            draft += AppContextUsage.overheadTokensPerMessage
         }
-        if draft > 0 { draft += AppContextUsage.overheadTokensPerMessage }
         return AppContextUsage(
             historyTokens: history,
             draftTokens: draft,
@@ -2722,7 +2802,9 @@ public final class AppModel {
             imageAttachments: imageAttachments,
             maxNewTokens: maxNewTokensOverride ?? effective.maxContextTokens,
             maxContextTokens: effective.maxContextTokens,
-            reasoning: selectedDescriptor.family == .gptOss ? .off : reasoning,
+            reasoning: selectedDescriptor.family == .gptOss
+                ? .off
+                : (selectedDescriptor.reasoningControl == .alwaysOn ? .on : reasoning),
             reasoningEffort: selectedDescriptor.family == .gptOss
                 ? reasoningEffort : nil,
             preserveThinking: selectedDescriptor.family == .qwen36

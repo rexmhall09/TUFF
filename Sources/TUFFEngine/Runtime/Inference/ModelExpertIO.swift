@@ -120,8 +120,10 @@ extension Model {
     }
 
     public func routedExpertCacheSlotCount(layer _: Int) -> Int? {
-        guard case .pread(let slotCount) = streamingMode else { return nil }
-        return slotCount
+        // Match the allocation in `openLayerLocked`. Prefill uses this value
+        // to size overlapping fetch plans, so reporting the requested value
+        // could otherwise exceed the actual streamer's capacity.
+        effectiveExpertCacheSlotCount
     }
 
     public func routedExpertBuffers(for plan: RoutedExpertFetchPlan) throws -> [TensorView] {

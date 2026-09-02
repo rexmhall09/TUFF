@@ -145,6 +145,64 @@ import TUFFValidationSupport
         #expect(block == scalar)
     }
 
+    @Test func blockMiniMaxRouterMatchesRepeatedScalarRows() throws {
+        var rng = SplitMix64(seed: 0x4D32_7001)
+        let rows = 3
+        let hiddenStride = Self.d + 9
+        let weights = Self.makeStableWeights(rng: &rng)
+        let hidden = Self.makeHiddenBlock(
+            rows: rows, rowStride: hiddenStride, d: Self.d,
+            rng: &rng, sentinel: Float16(-17))
+        let effectiveScale = (0..<Self.d).map { _ in rng.uniform(0.5, 1.5) }
+        var correction = [Float](repeating: 0, count: Self.experts)
+        correction[0] = 1.5
+        correction[9] = 0.75
+
+        let ctx = try MetalContext()
+        let moe = try MoE(context: ctx)
+        let prefill = try PrefillRouter(context: ctx)
+        let buffers = try Self.makeBuffers(
+            ctx: ctx, weights: weights, hidden: hidden,
+            effectiveScale: effectiveScale,
+            perExpertScale: [Float](repeating: 1, count: Self.experts),
+            rows: rows, correction: correction)
+        var expectedIndices: [UInt32] = []
+        var expectedWeights: [Float16] = []
+        for row in 0..<rows {
+            let compact = Array(hidden[
+                (row * hiddenStride)..<(row * hiddenStride + Self.d)])
+            let result = try Self.runScalarMiniMax(
+                ctx: ctx, moe: moe, buffers: buffers, hiddenRow: compact)
+            expectedIndices.append(contentsOf: result.0)
+            expectedWeights.append(contentsOf: result.1)
+        }
+
+        guard let cb = ctx.queue.makeCommandBuffer() else {
+            throw RouterTestError.allocationFailed
+        }
+        prefill.encodeMiniMaxBlock(
+            commandBuffer: cb,
+            weights: buffers.weights, scales: buffers.scales,
+            biases: buffers.biases, hidden: buffers.hidden,
+            effectiveScale: buffers.effectiveScale,
+            correctionBias: buffers.correctionBias,
+            outIndices: buffers.blockIndices, outWeights: buffers.blockWeights,
+            queryCount: UInt32(rows), numExperts: UInt32(Self.experts),
+            d: UInt32(Self.d), topK: UInt32(Self.topK),
+            hiddenStrideElements: UInt32(hiddenStride))
+        cb.commit()
+        cb.waitUntilCompleted()
+        #expect(cb.error == nil)
+        #expect(Self.readUInt32(
+            buffers.blockIndices, count: rows * Self.topK) == expectedIndices)
+        Self.assertWeightsClose(
+            Fp16Buffer.readHalf(buffers.blockWeights, count: rows * Self.topK),
+            expectedWeights, tolerance: 5e-3)
+        Self.assertPaddingUnchanged(
+            buffer: buffers.hidden, original: hidden,
+            rows: rows, rowStride: hiddenStride, used: Self.d)
+    }
+
     private struct RouterBuffers {
         let weights: MTLBuffer
         let scales: MTLBuffer
@@ -152,6 +210,7 @@ import TUFFValidationSupport
         let hidden: MTLBuffer
         let effectiveScale: MTLBuffer
         let perExpertScale: MTLBuffer
+        let correctionBias: MTLBuffer
         let blockIndices: MTLBuffer
         let blockWeights: MTLBuffer
     }
@@ -161,10 +220,13 @@ import TUFFValidationSupport
                                     hidden: [Float16],
                                     effectiveScale: [Float],
                                     perExpertScale: [Float],
-                                    rows: Int) throws -> RouterBuffers {
+                                    rows: Int,
+                                    correction: [Float]? = nil) throws -> RouterBuffers {
         let packed = packWeights(weights)
         let effBits = effectiveScale.map { Quantization.bf16Bits($0) }
         let pesBits = perExpertScale.map { Quantization.bf16Bits($0) }
+        let correctionValues = correction
+            ?? [Float](repeating: 0, count: Self.experts)
         guard let wBuf = ctx.device.makeBuffer(bytes: packed.packed,
                                                length: packed.packed.count,
                                                options: .storageModeShared),
@@ -183,6 +245,9 @@ import TUFFValidationSupport
               let pBuf = ctx.device.makeBuffer(bytes: pesBits,
                                                length: pesBits.count * MemoryLayout<UInt16>.size,
                                                options: .storageModeShared),
+              let cBuf = ctx.device.makeBuffer(bytes: correctionValues,
+                                               length: correctionValues.count * MemoryLayout<Float>.size,
+                                               options: .storageModeShared),
               let idxBuf = ctx.device.makeBuffer(length: rows * Self.topK * MemoryLayout<UInt32>.size,
                                                  options: .storageModeShared),
               let wtBuf = ctx.device.makeBuffer(length: rows * Self.topK * MemoryLayout<Float16>.size,
@@ -195,8 +260,43 @@ import TUFFValidationSupport
                              hidden: hBuf,
                              effectiveScale: eBuf,
                              perExpertScale: pBuf,
+                             correctionBias: cBuf,
                              blockIndices: idxBuf,
                              blockWeights: wtBuf)
+    }
+
+    private static func runScalarMiniMax(ctx: MetalContext,
+                                         moe: MoE,
+                                         buffers: RouterBuffers,
+                                         hiddenRow: [Float16]) throws
+        -> ([UInt32], [Float16]) {
+        guard let hidden = ctx.device.makeBuffer(
+                  bytes: hiddenRow,
+                  length: hiddenRow.count * MemoryLayout<Float16>.size,
+                  options: .storageModeShared),
+              let indices = ctx.device.makeBuffer(
+                  length: Self.topK * MemoryLayout<UInt32>.size,
+                  options: .storageModeShared),
+              let weights = ctx.device.makeBuffer(
+                  length: Self.topK * MemoryLayout<Float16>.size,
+                  options: .storageModeShared),
+              let cb = ctx.queue.makeCommandBuffer() else {
+            throw RouterTestError.allocationFailed
+        }
+        moe.encodeRouterMiniMax(
+            commandBuffer: cb,
+            weights: buffers.weights, scales: buffers.scales,
+            biases: buffers.biases, hidden: hidden,
+            effectiveScale: buffers.effectiveScale,
+            correctionBias: buffers.correctionBias,
+            outIndices: indices, outWeights: weights,
+            numExperts: UInt32(Self.experts), d: UInt32(Self.d),
+            topK: UInt32(Self.topK))
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let error = cb.error { throw error }
+        return (readUInt32(indices, count: Self.topK),
+                Fp16Buffer.readHalf(weights, count: Self.topK))
     }
 
     private static func runScalarRouter(ctx: MetalContext,

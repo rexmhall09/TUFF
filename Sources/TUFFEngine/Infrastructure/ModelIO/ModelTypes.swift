@@ -9,6 +9,7 @@ public enum ModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case gptOss = "gpt-oss"
+    case minimaxM2 = "minimax-m2"
 }
 
 public enum ModelVariant: String, Sendable, Equatable {
@@ -19,12 +20,14 @@ public enum ModelVariant: String, Sendable, Equatable {
     case qwen36_35B_A3B = "qwen36-35b-a3b"
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
+    case minimaxM27 = "minimax-m2.7"
 
     static func legacyDefault(for family: ModelFamily) -> ModelVariant {
         switch family {
         case .gemma4: return .gemma4_26B_A4B
         case .qwen36: return .qwen36_35B_A3B
         case .gptOss: return .gptOss_20B
+        case .minimaxM2: return .minimaxM27
         }
     }
 }
@@ -438,6 +441,40 @@ public struct ArchConfig: Sendable, Equatable {
             convKernelSize: 4)
     )
 
+    /// MiniMax M2.7 4-bit MLX checkpoint. All decoder layers use full GQA,
+    /// whole-projection Q/K RMSNorm, and eight sigmoid-routed experts selected
+    /// with a learned correction bias. There is no shared expert branch.
+    public static let minimaxM27 = ArchConfig(
+        hiddenSize: 3_072,
+        intermediateSize: 1_536,
+        moeIntermediateSize: 1_536,
+        numHeads: 48,
+        numKVHeads: 8,
+        numFullKVHeads: 8,
+        headDim: 128,
+        fullHeadDim: 128,
+        vocabSize: 200_064,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0,
+        ropeTheta: 5_000_000,
+        fullRopeTheta: 5_000_000,
+        partialRotaryFactor: 0.5,
+        numLayers: 62,
+        numExperts: 256,
+        topKExperts: 8,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: [UInt8](repeating: 1, count: 62),
+        hiddenActivation: "silu",
+        family: .minimaxM2,
+        variant: .minimaxM27,
+        attentionScale: 1 / Double(128).squareRoot(),
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: false,
+        ropeNeoxSubdim: true)
+
     private static func qwen36LayerMask() -> [UInt8] {
         // Layer kinds: 2 = gated-DeltaNet linear, 1 = full attention on every
         // 4th layer ((i + 1) % 4 == 0).
@@ -543,6 +580,7 @@ public struct ArchConfig: Sendable, Equatable {
         .qwen36_35B_A3B: .qwen36_35B_A3B,
         .gptOss_20B: .gptOss_20B,
         .gptOss_120B: .gptOss_120B,
+        .minimaxM27: .minimaxM27,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -558,6 +596,12 @@ public struct ArchConfig: Sendable, Equatable {
         }
         shapes.append((m: numFullKVHeads * fullHeadDim, n: hiddenSize))
         shapes.append((m: hiddenSize, n: numHeads * fullHeadDim))
+        if headDim != fullHeadDim {
+            // Sliding-window layers project with the local head geometry.
+            shapes.append((m: numHeads * headDim, n: hiddenSize))
+            shapes.append((m: numKVHeads * headDim, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: numHeads * headDim))
+        }
         if hasLinearAttentionLayers {
             let la = linearAttention
             shapes.append((m: la.qkvDim, n: hiddenSize))
@@ -566,6 +610,11 @@ public struct ArchConfig: Sendable, Equatable {
         }
         shapes.append((m: intermediateSize, n: hiddenSize))
         shapes.append((m: hiddenSize, n: intermediateSize))
+        if maxFFNIntermediateSize != intermediateSize {
+            // E2B doubles its MLP width from layer 15 on.
+            shapes.append((m: maxFFNIntermediateSize, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: maxFFNIntermediateSize))
+        }
         if hiddenSizePerLayerInput > 0 {
             shapes.append((m: numLayers * hiddenSizePerLayerInput, n: hiddenSize))
             shapes.append((m: hiddenSizePerLayerInput, n: hiddenSize))
@@ -590,6 +639,11 @@ public struct ArchConfig: Sendable, Equatable {
     public func layerIsLinear(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 2 }
     public var hasLinearAttentionLayers: Bool { fullAttentionLayerMask.contains(2) }
     public var hasPerLayerInputs: Bool { hiddenSizePerLayerInput > 0 }
+    public var hasSharedExpert: Bool {
+        feedForwardKind == .dense || family == .gemma4 || family == .qwen36
+    }
+    public var usesProjectionWideQKNorm: Bool { family == .minimaxM2 }
+    public var usesSigmoidCorrectionRouter: Bool { family == .minimaxM2 }
 
     /// Index of the first layer whose feed-forward block is twice
     /// `intermediateSize` wide, or nil when every layer is the same width.

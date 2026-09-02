@@ -3,6 +3,9 @@ import TUFFModelCatalog
 import TUFFEngine
 
 public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
+    /// When enabled, TUFF resolves context/cache memory from this Mac's unified
+    /// memory and the selected model's measured working-set profile.
+    public var automaticMemory: Bool
     public var contextTokens: Int
     public var expertCacheSlots: Int
     public var temperature: Double
@@ -16,15 +19,15 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
     public var defaultReasoning: ChatReasoning
     public var defaultReasoningEffort: GPTOSSReasoningEffort
     public var preserveThinking: Bool
-    /// The system prompt sent ahead of every chat with this model. Empty means
-    /// none, which is what every model shipped with before v3: the tokenizer
-    /// has always rendered a system message and nothing in the app could put
-    /// one there.
+    /// The system prompt sent ahead of every chat with this model. Catalog
+    /// profiles start with TUFF's model-aware default; empty explicitly means
+    /// none.
     ///
     /// Decoded with a default so an archive written by an older build loads.
     public var systemPrompt: String = ""
 
-    public init(contextTokens: Int = AppContextLengthOption.eightK.tokens,
+    public init(automaticMemory: Bool = true,
+                contextTokens: Int = AppContextLengthOption.eightK.tokens,
                 expertCacheSlots: Int = 16,
                 temperature: Double = 0.2,
                 topKEnabled: Bool = true,
@@ -38,6 +41,7 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
                 defaultReasoningEffort: GPTOSSReasoningEffort = .medium,
                 preserveThinking: Bool = false,
                 systemPrompt: String = "") {
+        self.automaticMemory = automaticMemory
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
         self.temperature = temperature
@@ -68,7 +72,9 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
             topK: max(1, defaults.topK),
             topP: defaults.topP,
             prefillEnabled: defaults.expertCacheSlots
-                >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
+                >= RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill,
+            defaultReasoning: descriptor.reasoningControl == .alwaysOn ? .on : .off,
+            systemPrompt: descriptor.defaultSystemPrompt)
     }
 
     func isValid() -> Bool {
@@ -82,6 +88,7 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case automaticMemory
         case contextTokens
         case expertCacheSlots
         case temperature
@@ -100,6 +107,8 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        automaticMemory = try container.decodeIfPresent(
+            Bool.self, forKey: .automaticMemory) ?? true
         contextTokens = try container.decode(Int.self, forKey: .contextTokens)
         expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
         temperature = try container.decode(Double.self, forKey: .temperature)
@@ -127,7 +136,7 @@ typealias MacModelSettings = AppModelSettingsProfile
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 4
+    static let currentVersion = 6
     static let defaultProfileKey = TUFFModelCatalog.default.id.rawValue
 
     var version: Int = currentVersion
@@ -214,6 +223,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     }
 
     init(version: Int = currentVersion,
+         automaticMemory: Bool = true,
          contextTokens: Int = AppContextLengthOption.eightK.tokens,
          expertCacheSlots: Int = 16,
          temperature: Double = 0.2,
@@ -233,6 +243,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          modelProfiles: [String: AppModelSettingsProfile]? = nil) {
         self.version = version
         self.modelProfiles = modelProfiles ?? [Self.defaultProfileKey: AppModelSettingsProfile(
+            automaticMemory: automaticMemory,
             contextTokens: contextTokens,
             expertCacheSlots: expertCacheSlots,
             temperature: temperature,
@@ -242,7 +253,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             topP: topP,
             prefillEnabled: prefillEnabled,
             visionResidencyPolicy: visionResidencyPolicy,
-            rdadvisePolicy: rdadvisePolicy)]
+            rdadvisePolicy: rdadvisePolicy,
+            systemPrompt: AppModelSettingsProfile.defaults(
+                for: Self.defaultProfileKey).systemPrompt)]
         self.newlineShortcut = newlineShortcut
         self.showPromptExamples = showPromptExamples
         self.sentPromptBehavior = sentPromptBehavior
@@ -382,6 +395,18 @@ enum MacAppSettingsFileStore {
                             continue
                         }
                         profile.prefillEnabled = false
+                        settings.modelProfiles[key] = profile
+                    }
+                }
+                if settings.version < 5 {
+                    for key in Array(settings.modelProfiles.keys) {
+                        guard var profile = settings.modelProfiles[key],
+                              profile.systemPrompt.isEmpty,
+                              let id = TUFFModelID(rawValue: key),
+                              let descriptor = TUFFModelCatalog.model(id: id) else {
+                            continue
+                        }
+                        profile.systemPrompt = descriptor.defaultSystemPrompt
                         settings.modelProfiles[key] = profile
                     }
                 }

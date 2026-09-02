@@ -4,6 +4,7 @@ public struct Args: Equatable, Sendable {
     public var model: String
     public var prompt: String?
     public var chatPrompt: String?
+    public var systemPrompt: String?
     public var messagesFile: String?
     public var images: [String]
     public var visionPack: String?
@@ -31,6 +32,7 @@ public struct Args: Equatable, Sendable {
     public init(model: String,
                 prompt: String? = nil,
                 chatPrompt: String? = nil,
+                systemPrompt: String? = nil,
                 messagesFile: String? = nil,
                 images: [String] = [],
                 visionPack: String? = nil,
@@ -55,6 +57,7 @@ public struct Args: Equatable, Sendable {
         self.model = model
         self.prompt = prompt
         self.chatPrompt = chatPrompt
+        self.systemPrompt = systemPrompt
         self.messagesFile = messagesFile
         self.images = images
         self.visionPack = visionPack
@@ -121,6 +124,7 @@ extension Args {
       --model <dir>             Path to a .gturbo model directory.
       --prompt <string>         Raw-completion prompt.
       --chat-prompt <string>    Single-turn instruction chat; pairs with --image
+      --system-prompt <string>  System message for a single-turn chat.
       --messages-file <path>    JSON chat messages with role and content fields.
       --image <path>            Attach an image; repeatable. Needs --chat-prompt
                                 and an installed companion pack.
@@ -196,6 +200,7 @@ extension Args {
         var model: String?
         var prompt: String?
         var chatPrompt: String?
+        var systemPrompt: String?
         var messagesFile: String?
         var images: [String] = []
         var visionPack: String?
@@ -234,6 +239,8 @@ extension Args {
                 prompt = try takeValue(argv, &index, flag: flag)
             case "--chat-prompt":
                 chatPrompt = try takeValue(argv, &index, flag: flag)
+            case "--system-prompt":
+                systemPrompt = try takeValue(argv, &index, flag: flag)
             case "--image":
                 images.append(try takeValue(argv, &index, flag: flag))
             case "--vision-pack":
@@ -364,6 +371,9 @@ extension Args {
         if prompt != nil, reasoningEffort != nil {
             throw ArgsError.mutuallyExclusive("--prompt", "--reasoning")
         }
+        if systemPrompt != nil, chatPrompt == nil {
+            throw ArgsError.requiredMissing("--chat-prompt")
+        }
         if thinking != .off, reasoningEffort != nil {
             throw ArgsError.mutuallyExclusive("--thinking", "--reasoning")
         }
@@ -391,6 +401,7 @@ extension Args {
         let arguments = Args(model: model,
                              prompt: prompt,
                              chatPrompt: chatPrompt,
+                             systemPrompt: systemPrompt,
                              messagesFile: messagesFile,
                              images: images,
                              visionPack: visionPack,

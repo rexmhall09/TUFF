@@ -99,6 +99,9 @@ final class ResidentBufferSet {
         let regionFileOffset: UInt64
     }
 
+    /// Target size of one mmap'd resident region. See the note in `init`.
+    static let preferredRegionBytes: UInt64 = 64 << 20
+
     private let buffers: [ResidentBuffer]
     private let regionByTensorName: [String: Int]
 
@@ -106,11 +109,19 @@ final class ResidentBufferSet {
          index: ResidentIndex,
          device: MTLDevice,
          fileDescriptor: Int32? = nil) throws {
+        // Metal's per-encoder cost for a bound buffer grows with the buffer's
+        // size (measured: ~3 us for a 64 KB or 256 MB buffer, ~10-25 us for a
+        // 1-2.6 GB buffer, per dispatch). Decode issues hundreds of dispatches
+        // per token, so the resident weights are mapped as many moderately
+        // sized regions instead of one model-wide buffer. Tensors larger than
+        // the target still get a region of their own.
         let plans = try Self.planRegions(
             entries: Array(index.entries.values),
             payloadOffset: index.header.indexSize,
             payloadSize: index.header.residentSize,
-            maximumLength: UInt64(device.maxBufferLength))
+            maximumLength: min(UInt64(device.maxBufferLength),
+                               Self.preferredRegionBytes),
+            hardMaximumLength: UInt64(device.maxBufferLength))
 
         var opened: [ResidentBuffer] = []
         opened.reserveCapacity(plans.count)
@@ -142,11 +153,17 @@ final class ResidentBufferSet {
 
     /// Pure planning step kept separate so boundary and oversized-tensor
     /// behavior can be tested without allocating large Metal buffers.
+    /// `maximumLength` is the preferred cap for a region; a single tensor
+    /// wider than it still gets its own region as long as it fits Metal's
+    /// `hardMaximumLength` (defaults to the preferred cap, so existing
+    /// callers keep their strict-limit semantics).
     static func planRegions(entries: [ResidentIndexEntry],
                             payloadOffset: UInt64,
                             payloadSize: UInt64,
-                            maximumLength: UInt64) throws -> [RegionPlan] {
-        guard maximumLength > 0 else {
+                            maximumLength: UInt64,
+                            hardMaximumLength: UInt64? = nil) throws -> [RegionPlan] {
+        let hardMaximumLength = hardMaximumLength ?? maximumLength
+        guard maximumLength > 0, hardMaximumLength >= maximumLength else {
             throw ModelError.residentBufferWrapFailed
         }
         let (payloadEnd, payloadOverflow) = payloadOffset.addingReportingOverflow(payloadSize)
@@ -194,9 +211,9 @@ final class ResidentBufferSet {
             guard let start = starts.min(), let finish = ends.max() else {
                 throw ModelError.indexCorrupt(detail: "\(entry.name) has no resident bytes")
             }
-            guard finish - start <= maximumLength else {
+            guard finish - start <= hardMaximumLength else {
                 throw ModelError.indexCorrupt(
-                    detail: "\(entry.name) spans \(finish - start) bytes, exceeding Metal's maximum buffer length \(maximumLength)")
+                    detail: "\(entry.name) spans \(finish - start) bytes, exceeding Metal's maximum buffer length \(hardMaximumLength)")
             }
             return SpannedEntry(entry: entry, start: start, end: finish)
         }.sorted {
