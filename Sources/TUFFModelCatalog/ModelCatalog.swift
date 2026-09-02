@@ -242,6 +242,10 @@ public struct TUFFDeviceCapabilities: Codable, Equatable, Sendable {
     public let unifiedMemoryBytes: UInt64
     /// Free, inactive, and speculative pages reclaimable when TUFF launched.
     /// Nil for synthetic/test capability descriptions and older archives.
+    ///
+    /// Recorded as a diagnostic only. It used to cap `safeAppMemoryBudgetBytes`,
+    /// which made the budget depend on whatever else was open at launch and
+    /// refused models a Mac was qualified for; see that property.
     public let availableMemoryBytes: UInt64?
     public let macOSMajorVersion: Int
     public let appleSiliconGeneration: Int
@@ -267,24 +271,24 @@ public struct TUFFDeviceCapabilities: Codable, Equatable, Sendable {
             appleSiliconGeneration: generation)
     }
 
-    /// Memory TUFF can use while retaining a system/other-app reserve. It caps
-    /// the machine-tier budget with one launch-time availability snapshot, so
-    /// another large application is respected without making the active model
-    /// profile oscillate as page counts change during generation.
+    /// Share of installed unified memory TUFF plans against.
+    public static let safeAppMemoryShareNumerator: UInt64 = 3
+    public static let safeAppMemoryShareDenominator: UInt64 = 4
+
+    /// Memory TUFF can use while retaining a system reserve: a fixed 75% of
+    /// installed unified memory.
+    ///
+    /// This was previously capped by how much memory happened to be
+    /// reclaimable when the app launched. That made the budget depend on
+    /// whatever else was open at the time, and on a 16 GB Mac it routinely
+    /// refused the very models that were qualified on 16 GB — the machine
+    /// could host them, but the snapshot said otherwise. Weights are
+    /// memory-mapped and their pages are evictable, so the kernel can reclaim
+    /// under pressure; a fixed share of installed memory describes what the
+    /// machine is, which is the thing a model requirement is written against.
     public var safeAppMemoryBudgetBytes: UInt64 {
-        let reserve = max(2 * TUFFModelCatalog.oneGiB, unifiedMemoryBytes / 5)
-        let capacityBudget = unifiedMemoryBytes > reserve
-            ? unifiedMemoryBytes - reserve : 0
-        guard let availableMemoryBytes else { return capacityBudget }
-        // Keep at least 1 GiB (or 10% on a roomier machine) of the pages that
-        // were reclaimable at launch. Capturing this once makes Auto respond
-        // to other applications without oscillating throughout a session.
-        let availableReserve = max(
-            TUFFModelCatalog.oneGiB,
-            availableMemoryBytes / 10)
-        let availabilityBudget = availableMemoryBytes > availableReserve
-            ? availableMemoryBytes - availableReserve : 0
-        return min(capacityBudget, availabilityBudget)
+        unifiedMemoryBytes / Self.safeAppMemoryShareDenominator
+            * Self.safeAppMemoryShareNumerator
     }
 
     private static func hostAvailableMemoryBytes() -> UInt64? {

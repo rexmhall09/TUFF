@@ -6,9 +6,9 @@ struct ModelActionBanner: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        if model.hasOutputTranscript,
-           let action = model.presentation.conversationAction {
-            HStack(spacing: 10) {
+        if let action = model.presentation.conversationAction,
+           model.hasOutputTranscript {
+            banner(tint: iconColor(for: action)) {
                 Image(systemName: iconName(for: action))
                     .foregroundStyle(iconColor(for: action))
                     .accessibilityHidden(true)
@@ -22,19 +22,42 @@ struct ModelActionBanner: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background {
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14)
-                            .stroke(iconColor(for: action).opacity(0.5), lineWidth: 1)
-                    }
+        } else if let notice = model.presentation.conversationNotice {
+            // Shown whether or not anything has been said yet: this is the
+            // state where the composer refuses and there is no button to
+            // press, so the reason has to be on screen from the start.
+            banner(tint: .orange) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+                Text(notice)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
             }
-            .accessibilityElement(children: .contain)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
+    }
+
+    @ViewBuilder
+    private func banner(
+        tint: Color,
+        @ViewBuilder content: () -> some View
+    ) -> some View {
+        HStack(spacing: 10) {
+            content()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(tint.opacity(0.5), lineWidth: 1)
+                }
+        }
+        .accessibilityElement(children: .contain)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private func message(for action: AppModelAction) -> String {

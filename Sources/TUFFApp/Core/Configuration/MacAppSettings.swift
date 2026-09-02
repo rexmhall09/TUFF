@@ -6,6 +6,9 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
     /// When enabled, TUFF resolves context/cache memory from this Mac's unified
     /// memory and the selected model's measured working-set profile.
     public var automaticMemory: Bool
+    /// How Auto spends the spare budget: on generation speed, on context
+    /// length, or between the two.
+    public var automaticMemoryProfile: AppAutomaticMemoryProfile
     public var contextTokens: Int
     public var expertCacheSlots: Int
     public var temperature: Double
@@ -27,6 +30,7 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
     public var systemPrompt: String = ""
 
     public init(automaticMemory: Bool = true,
+                automaticMemoryProfile: AppAutomaticMemoryProfile = .balanced,
                 contextTokens: Int = AppContextLengthOption.eightK.tokens,
                 expertCacheSlots: Int = 16,
                 temperature: Double = 0.2,
@@ -42,6 +46,7 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
                 preserveThinking: Bool = false,
                 systemPrompt: String = "") {
         self.automaticMemory = automaticMemory
+        self.automaticMemoryProfile = automaticMemoryProfile
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
         self.temperature = temperature
@@ -89,6 +94,7 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case automaticMemory
+        case automaticMemoryProfile
         case contextTokens
         case expertCacheSlots
         case temperature
@@ -109,6 +115,10 @@ public struct AppModelSettingsProfile: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         automaticMemory = try container.decodeIfPresent(
             Bool.self, forKey: .automaticMemory) ?? true
+        // Archives written before the profiles existed resolved Auto the way
+        // Speed does, so that is what they decode to.
+        automaticMemoryProfile = try container.decodeIfPresent(
+            AppAutomaticMemoryProfile.self, forKey: .automaticMemoryProfile) ?? .speed
         contextTokens = try container.decode(Int.self, forKey: .contextTokens)
         expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
         temperature = try container.decode(Double.self, forKey: .temperature)
@@ -147,6 +157,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var loadModelOnLaunch: Bool = false
     var accentColorMode: AppAccentColorMode = .appDefault
     var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
+    /// Lets this Mac download and load models its measured capabilities say it
+    /// cannot host, and load a model at manual settings above Auto's budget.
+    /// Applies to every model, because it is a statement about the person's
+    /// willingness to risk swapping, not about one checkpoint.
+    var bypassModelRestrictions: Bool = false
 
     // Source compatibility for the v1 app and focused tests. These map only to
     // Gemma's stable profile; app code uses `profile(for:)` explicitly.
@@ -200,6 +215,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case loadModelOnLaunch
         case accentColorMode
         case customAccentColorHex
+        case bypassModelRestrictions
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -240,6 +256,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          loadModelOnLaunch: Bool = false,
          accentColorMode: AppAccentColorMode = .appDefault,
          customAccentColorHex: String = AppHexColor.defaultPurple.hexString,
+         bypassModelRestrictions: Bool = false,
          modelProfiles: [String: AppModelSettingsProfile]? = nil) {
         self.version = version
         self.modelProfiles = modelProfiles ?? [Self.defaultProfileKey: AppModelSettingsProfile(
@@ -262,6 +279,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.loadModelOnLaunch = loadModelOnLaunch
         self.accentColorMode = accentColorMode
         self.customAccentColorHex = customAccentColorHex
+        self.bypassModelRestrictions = bypassModelRestrictions
     }
 
     init(from decoder: Decoder) throws {
@@ -284,6 +302,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             customAccentColorHex = try container.decodeIfPresent(
                 String.self, forKey: .customAccentColorHex)
                 ?? AppHexColor.defaultPurple.hexString
+            bypassModelRestrictions = try container.decodeIfPresent(
+                Bool.self, forKey: .bypassModelRestrictions) ?? false
             return
         }
 

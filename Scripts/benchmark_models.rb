@@ -18,6 +18,12 @@ BENCHMARK_MODELS = {
     sampling: %w[--temperature 1.0 --top-k 64 --top-p 0.95],
     runtime: %w[--expert-cache-slots 16 --prefill on --prefill-chunk-tokens auto --rdadvise off]
   },
+  "gemma4-12b-qat" => {
+    path: "scratch/gemma4-12b-qat.gturbo",
+    chat: %w[--thinking off],
+    sampling: %w[--temperature 1.0 --top-k 64 --top-p 0.95],
+    runtime: %w[--expert-cache-slots 16 --prefill on --prefill-chunk-tokens auto --rdadvise off]
+  },
   "gemma4" => {
     path: "scratch/gemma4.gturbo",
     chat: %w[--thinking off],
@@ -53,6 +59,7 @@ BENCHMARK_MODELS = {
 BENCHMARK_MODEL_LABELS = {
   "gemma4-e2b" => "Gemma 4 E2B IT",
   "gemma4-e4b" => "Gemma 4 E4B IT",
+  "gemma4-12b-qat" => "Gemma 4 12B IT QAT",
   "gemma4" => "Gemma 4 26B-A4B IT",
   "qwen36" => "Qwen3.6 35B-A3B",
   "gpt-oss-20b" => "GPT-OSS 20B",

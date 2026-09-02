@@ -35,6 +35,12 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
     /// "Installed · Not loaded" with a `.load` action, and the banner rendered a
     /// fully enabled button that did nothing for the whole transfer.
     public var isVisionCompanionOperationInProgress: Bool
+    /// Why an installed model cannot be loaded, when something other than a
+    /// missing download is in the way — settings above the memory budget, or
+    /// hardware requirements this Mac does not meet. Without it the app
+    /// resolved to "Installed · Not loaded" and offered a Load button that was
+    /// disabled, with the reason visible only in the Settings memory section.
+    public var loadBlockedReason: String?
 
     public init(requiresInstallation: Bool,
                 installState: AppModelInstallState,
@@ -47,7 +53,8 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
                 livePrefillDone: Int = 0,
                 livePrefillTotal: Int = 0,
                 lastStopReason: AppStopReason? = nil,
-                isVisionCompanionOperationInProgress: Bool = false) {
+                isVisionCompanionOperationInProgress: Bool = false,
+                loadBlockedReason: String? = nil) {
         self.requiresInstallation = requiresInstallation
         self.installState = installState
         self.installReadiness = installReadiness
@@ -60,6 +67,7 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
         self.livePrefillTotal = livePrefillTotal
         self.lastStopReason = lastStopReason
         self.isVisionCompanionOperationInProgress = isVisionCompanionOperationInProgress
+        self.loadBlockedReason = loadBlockedReason
     }
 }
 
@@ -83,6 +91,13 @@ public struct AppPresentationState: Equatable, Sendable {
         self.showsActivity = showsActivity
         self.primaryAction = primaryAction
         self.secondaryAction = secondaryAction
+    }
+
+    /// A message the conversation should show even though there is no button
+    /// to offer with it.
+    public var conversationNotice: String? {
+        guard primaryAction == nil, severity == .warning else { return nil }
+        return detail
     }
 
     public var conversationAction: AppModelAction? {
@@ -192,6 +207,12 @@ public struct AppPresentationState: Equatable, Sendable {
                             secondaryAction: .unload)
             }
             return Self(label: "Ready", severity: .success, secondaryAction: .unload)
+        }
+
+        if let reason = snapshot.loadBlockedReason {
+            return Self(label: "Cannot load at these settings",
+                        detail: reason,
+                        severity: .warning)
         }
 
         return Self(label: "Installed · Not loaded", primaryAction: .load)

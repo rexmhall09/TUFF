@@ -54,8 +54,11 @@ import Testing
         #expect(request.temperature == 0.2)
         #expect(request.topK == 64)
         #expect(request.topP == 0.95)
-        #expect(request.maxNewTokens == 8_192,
-                "the reply limit follows the default context, 8K since 2026-08-17")
+        // The reply limit follows the resolved context. Auto's Balanced
+        // profile is the default, so on a roomy Mac that is above the
+        // checkpoint's qualified 8K rather than equal to it.
+        #expect(request.maxNewTokens == model.maxContextTokens)
+        #expect(request.maxNewTokens >= 8_192)
         #expect(request.repetitionPenalty == 1)
         #expect(!request.isPureGreedy)
         let selected = try #require(
@@ -172,16 +175,19 @@ import Testing
     }
 
     @MainActor
-    @Test func contextChangeMarksReadySessionStale() {
+    @Test func contextChangeMarksReadySessionStale() throws {
         let model = makeAppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
         #expect(!model.hasStaleLoadedRuntime)
-        // Away from the default, which is 8K: setting the value it already has
+        // Away from whatever Auto resolved: setting the value it already has
         // would prove nothing.
-        model.maxContextTokens = AppContextLengthOption.sixteenK.tokens
+        let other = AppContextLengthOption.allCases
+            .map(\.tokens)
+            .first { $0 != model.maxContextTokens }
+        model.maxContextTokens = try #require(other)
         #expect(model.hasStaleLoadedRuntime)
     }
 

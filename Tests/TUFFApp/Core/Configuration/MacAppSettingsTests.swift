@@ -358,6 +358,45 @@ import TUFFModelCatalog
         #expect(migrated.profile(for: key).expertCacheSlots == 24)
     }
 
+    /// An archive written before the Auto profiles existed keeps the behavior
+    /// it was saved with. Auto used to resolve exactly what Speed resolves, so
+    /// decoding to Balanced would silently hand those people more context than
+    /// the build they saved from had chosen.
+    @Test func anArchiveWithoutAnAutoProfileDecodesAsSpeed() throws {
+        var object = try #require(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(AppModelSettingsProfile()))
+            as? [String: Any])
+        object.removeValue(forKey: "automaticMemoryProfile")
+        let decoded = try JSONDecoder().decode(
+            AppModelSettingsProfile.self,
+            from: try JSONSerialization.data(withJSONObject: object))
+
+        #expect(decoded.automaticMemoryProfile == .speed)
+    }
+
+    @Test(arguments: AppAutomaticMemoryProfile.allCases)
+    func theAutoProfileRoundTrips(_ profile: AppAutomaticMemoryProfile) throws {
+        var written = AppModelSettingsProfile()
+        written.automaticMemoryProfile = profile
+        let decoded = try JSONDecoder().decode(
+            AppModelSettingsProfile.self,
+            from: try JSONEncoder().encode(written))
+
+        #expect(decoded.automaticMemoryProfile == profile)
+        #expect(decoded == written)
+    }
+
+    @Test func bypassingRestrictionsRoundTripsAndDefaultsOff() throws {
+        #expect(!MacAppSettings().bypassModelRestrictions)
+
+        var written = MacAppSettings()
+        written.bypassModelRestrictions = true
+        let decoded = try JSONDecoder().decode(
+            MacAppSettings.self, from: try JSONEncoder().encode(written))
+
+        #expect(decoded.bypassModelRestrictions)
+    }
+
     @MainActor
     @Test func systemPromptSurvivesAnAppModelRelaunch() throws {
         let root = try makeTemporaryRoot()
@@ -457,7 +496,8 @@ import TUFFModelCatalog
         model.updateSettingsProfile(qwenProfile, for: qwen)
 
         #expect(model.selectedModelID != qwen.id)
-        #expect(model.maxContextTokens == 8_192)
+        // Gemma's own resolved context, not the 32K just written to Qwen.
+        #expect(model.maxContextTokens != 32_768)
         #expect(model.temperature == 0.2)
         let saved = model.settingsProfile(for: qwen)
         #expect(saved.contextTokens == 32_768)
@@ -612,7 +652,8 @@ import TUFFModelCatalog
             model.installs.first { $0.id == model.selectedModelID })
 
         #expect(model.automaticMemory)
-        #expect(model.maxContextTokens == 8_192)
+        // Auto overrode the saved 32K and 24 slots with its own plan.
+        #expect(model.maxContextTokens != 32_768)
         #expect(model.runtimeOptions.expertCacheSlots == 128)
         #expect(model.runtimeOptions.prefillEnabled)
 

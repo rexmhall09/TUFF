@@ -170,13 +170,45 @@ profile. MiniMax M2.7 always reasons, so TUFF labels it as always on and keeps
 its thought channel separate from the visible answer instead of presenting a
 switch the checkpoint cannot honor.
 
-TUFF reads physical unified memory with `hw.memsize` plus reclaimable memory at
-app launch, then checks the selected model, context length, KV layout, cache
-slots, and a system reserve. Auto spends safe spare capacity on more resident
-experts, reducing SSD reads during generation; its manual context, cache, and
-prefill controls remain visible but disabled until Auto is turned off. Models
-that are not safe for a Mac stay visible but gray, with Download and Load
-disabled and an explanation. Disk space is checked separately.
+TUFF reads physical unified memory with `hw.memsize` and plans against 75% of
+it, leaving the rest to macOS and other applications. It then checks the
+selected model, its context length, KV layout, and cache slots against that
+budget. Models a Mac does not meet the requirements for stay visible but gray,
+with Download and Load disabled and an explanation. Disk space is checked
+separately.
+
+Auto has three profiles, because the two things spare memory can buy are not
+worth the same. Resident expert slots cut SSD reads during generation; context
+tokens buy a longer conversation and make nothing faster.
+
+| Profile | Context | Rest of the budget |
+| --- | --- | --- |
+| Speed | The checkpoint's qualified length | Resident experts |
+| Balanced | Up to twice that length | Resident experts |
+| Context | The longest that fits | Resident experts |
+
+Balanced is the default. A dense model has no expert cache, so for it the
+profiles differ in context alone, which is the honest answer: extra memory
+cannot make a dense model generate faster. Each profile is labelled in Settings
+with the context it would actually resolve on this Mac. The manual context,
+cache, and prefill controls stay visible but disabled until Auto is turned off,
+and turning it off restores that model's saved choices.
+
+### Running past the limits
+
+**Bypass model restrictions**, in Settings, removes both gates: models this Mac
+does not meet the requirements for become downloadable and loadable, and a
+model whose manual context and cache exceed the budget will load. The
+requirement is still shown, in orange, because bypassing is a decision to
+proceed rather than a claim that the Mac is big enough. A model that does not
+fit will swap heavily, and macOS may terminate TUFF while it loads or
+generates. Nothing is damaged and the download stays on disk.
+
+With restrictions in force, a model whose settings exceed the budget now says
+so in the conversation, naming the settings responsible and how to proceed.
+Previously it simply refused to load and the only explanation was in the
+Settings memory section, which is not where someone trying to send a message is
+looking.
 
 The memory limits above come from real model runs. They are not guesses based
 on parameter count. GPT-OSS 120B completed a coherent 4K-context run on my 16 GB
@@ -195,19 +227,39 @@ variance.
 One short question, `What is the capital of France?`, one process per model.
 Decode rate excludes install, load, and prefill. Every model answered correctly:
 
-| Model | Decode | Prefill | Peak RSS | Measured on |
-| --- | ---: | ---: | ---: | --- |
-| Gemma 4 E2B IT | 40.30 tok/s | 0.54 s | 324 MiB | v4.0.0 |
-| Gemma 4 E4B IT | 17.05 tok/s | 1.02 s | 374 MiB | v3.0.3 |
-| Gemma 4 26B-A4B IT | 7.82 tok/s | 6.92 s | 1,844 MiB | v3.0.3 |
-| Qwen3.6 35B-A3B | 7.15 tok/s | 9.65 s | 1,406 MiB | v3.0.3 |
-| GPT-OSS 20B | 3.73 tok/s | 13.32 s | 1,932 MiB | v3.0.3 |
-| GPT-OSS 120B | 0.49 tok/s | 47.58 s | 1,659 MiB | v3.0.3 |
+Every rate is the **best of three runs**, because this fanless Mac shares its
+GPU with the window server and the sweep ran while the machine was also driving
+a desktop session. Repeated runs of one binary on one model spanned 19.1 to
+37.9 tokens per second; the slow runs measured that interference, and the first
+run of any model also faults its memory-mapped weights in from SSD. Every
+individual run is recorded alongside the summary.
 
-The v3.0.3 rows are carried over. v4.0.0 reworked decode, and only the models
-installed on this machine when the release was cut were re-measured, so the
-other rows are stale rather than wrong. Reproduce any row with
-`Scripts/benchmark_simple.rb`.
+| Model | Decode | Prefill | Peak RSS |
+| --- | ---: | ---: | ---: |
+| Gemma 4 E2B IT | 30.34 tok/s | 0.56 s | 324 MiB |
+| Gemma 4 E4B IT | 28.96 tok/s | 1.08 s | 324 MiB |
+| Gemma 4 12B IT QAT | 0.04 tok/s | 14.55 s | 324 MiB |
+| Gemma 4 26B-A4B IT | 7.07 tok/s | 11.03 s | 1,758 MiB |
+| Qwen3.6 35B-A3B | 6.11 tok/s | 15.61 s | 1,417 MiB |
+| GPT-OSS 20B | 2.36 tok/s | 19.03 s | 2,616 MiB |
+| GPT-OSS 120B | 0.19 tok/s | 66.47 s | 2,430 MiB |
+
+These are conservative for that reason: the same build measured 40.30 tokens
+per second on Gemma 4 E2B on an otherwise idle machine. Treat the ordering
+across models as the signal and each absolute figure as a floor. Reproduce any
+row with `Scripts/benchmark_simple.rb --repeat 3`.
+
+MiniMax M2.7 is absent because it was the one catalog model not installed on
+this Mac when the release was cut; its 120 GiB install is still downloading and
+its row will follow. Nothing about it changed in this release.
+
+**Gemma 4 12B QAT is the outlier, and the figure is real.** It is 10 GB of
+dense weights, so every token reads all 10 GB, and on a 16 GB Mac those pages
+cannot stay resident: each token re-reads them from SSD, about 25 seconds per
+token. It loads and answers correctly, and it is not usable at this size on
+this machine. A Mac with more memory does not have this problem. Sequential
+paging advice was tried against it and measured no better, so the runtime still
+maps weights with random advice.
 
 #### What v4.0.0 changed about decode
 

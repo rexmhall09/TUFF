@@ -53,6 +53,12 @@ final class ResidentBuffer {
         }
         let base = mapped!
 
+        // Random, not sequential. Sequential advice was measured on the model
+        // that suffers most from re-faulting — Gemma 4 12B QAT, 10 GB of dense
+        // weights on a 16 GB Mac — and was no better there (0.049 and 0.063
+        // against 0.072 tokens per second), because it also invites the kernel
+        // to drop pages behind the read position, which hurts every model that
+        // does fit in memory.
         _ = posix_madvise(base, mappedLen, POSIX_MADV_RANDOM)
 
         let sliceStart = base.advanced(by: sliceShift)

@@ -3,15 +3,18 @@ import TUFFModelCatalog
 
 /// The concrete memory settings Auto resolves for one model on one Mac.
 public struct AppAutomaticMemoryPlan: Equatable, Sendable {
+    public let profile: AppAutomaticMemoryProfile
     public let contextTokens: Int
     public let expertCacheSlots: Int
     public let estimatedWorkingSetBytes: UInt64
     public let safeBudgetBytes: UInt64
 
-    public init(contextTokens: Int,
+    public init(profile: AppAutomaticMemoryProfile = .balanced,
+                contextTokens: Int,
                 expertCacheSlots: Int,
                 estimatedWorkingSetBytes: UInt64,
                 safeBudgetBytes: UInt64) {
+        self.profile = profile
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
         self.estimatedWorkingSetBytes = estimatedWorkingSetBytes
@@ -19,41 +22,65 @@ public struct AppAutomaticMemoryPlan: Equatable, Sendable {
     }
 }
 
-/// Resolves a stable per-model memory profile from the Mac's detected unified
-/// memory. Auto preserves the checkpoint's qualified context length and spends
-/// additional safe capacity on routed-expert slots, where RAM directly avoids
-/// SSD reads during decode. Dense models keep their qualified defaults because
-/// a larger KV reservation does not make token generation faster.
+/// Resolves a per-model memory profile from the Mac's detected unified memory
+/// and the checkpoint's measured working-set profile.
+///
+/// Every profile ends by spending whatever budget is left on routed-expert
+/// slots, because that is the only memory that reduces work during
+/// generation; they differ in how much context they take first. A dense model
+/// has no expert cache, so for it the profiles differ in context alone — which
+/// is the honest answer, since extra memory cannot make a dense model faster.
 public enum AppAutomaticMemoryPlanner {
     public static func plan(
         for descriptor: AppModelInstallDescriptor,
-        on device: TUFFDeviceCapabilities
+        on device: TUFFDeviceCapabilities,
+        profile: AppAutomaticMemoryProfile = .balanced
     ) -> AppAutomaticMemoryPlan? {
         guard let id = descriptor.catalogID,
               let catalog = TUFFModelCatalog.model(id: id) else { return nil }
 
-        let context = catalog.runtimeDefaults.contextTokens
         let budget = device.safeAppMemoryBudgetBytes
         let memory = catalog.memory
-        var slots = catalog.runtimeDefaults.expertCacheSlots
+        let qualifiedContext = catalog.runtimeDefaults.contextTokens
+        let slotOptions = descriptor.usesExpertCache
+            ? descriptor.usefulExpertCacheSlotCounts.sorted()
+            : [catalog.runtimeDefaults.expertCacheSlots]
+        // Always leave a runnable answer: hardware eligibility, not Auto, is
+        // the gate on a model this Mac cannot host at all.
+        let smallestSlots = slotOptions.first ?? catalog.runtimeDefaults.expertCacheSlots
 
-        if descriptor.usesExpertCache {
-            let candidates = descriptor.usefulExpertCacheSlotCounts
-            if let smallest = candidates.first {
-                // Always leave a runnable result. Hardware eligibility remains
-                // the hard gate if even this model's minimum cannot fit.
-                slots = smallest
-                for candidate in candidates {
-                    let estimate = memory.estimatedWorkingSetBytes(
-                        contextTokens: context,
-                        expertCacheSlots: candidate)
-                    guard estimate <= budget else { break }
-                    slots = candidate
-                }
-            }
+        func fits(context: Int, slots: Int) -> Bool {
+            memory.estimatedWorkingSetBytes(contextTokens: context,
+                                            expertCacheSlots: slots) <= budget
+        }
+
+        // Context ceiling for this profile, expressed in tokens.
+        let contextCeiling = profile.contextGrowthLimit.map {
+            qualifiedContext * $0
+        } ?? Int.max
+        let contextOptions = AppContextLengthOption.allCases
+            .map(\.tokens)
+            .filter { $0 <= contextCeiling }
+            .sorted()
+
+        // Longest context this profile allows that still fits beside the
+        // model's minimum cache. Never drop below the qualified default: that
+        // is the length the checkpoint was validated at.
+        var context = qualifiedContext
+        for candidate in contextOptions where candidate > context {
+            guard fits(context: candidate, slots: smallestSlots) else { break }
+            context = candidate
+        }
+
+        // Spend the remaining budget on resident experts.
+        var slots = smallestSlots
+        for candidate in slotOptions where candidate > slots {
+            guard fits(context: context, slots: candidate) else { break }
+            slots = candidate
         }
 
         return AppAutomaticMemoryPlan(
+            profile: profile,
             contextTokens: context,
             expertCacheSlots: slots,
             estimatedWorkingSetBytes: memory.estimatedWorkingSetBytes(
@@ -68,7 +95,9 @@ public enum AppAutomaticMemoryPlanner {
         on device: TUFFDeviceCapabilities
     ) -> AppModelSettingsProfile {
         guard profile.automaticMemory,
-              let plan = plan(for: descriptor, on: device) else { return profile }
+              let plan = plan(for: descriptor,
+                              on: device,
+                              profile: profile.automaticMemoryProfile) else { return profile }
         var resolved = profile
         resolved.contextTokens = plan.contextTokens
         resolved.expertCacheSlots = plan.expertCacheSlots

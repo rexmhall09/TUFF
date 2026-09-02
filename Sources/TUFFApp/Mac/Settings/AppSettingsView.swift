@@ -84,11 +84,32 @@ struct AppSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Section("Model restrictions") {
+                Toggle("Bypass model restrictions",
+                       isOn: bypassModelRestrictionsBinding)
+                Text("TUFF normally hides Download and Load for models this Mac "
+                    + "does not meet the requirements for, and refuses to load "
+                    + "any model whose context and expert cache exceed "
+                    + "\(MetricFormat.storage(model.deviceCapabilities.safeAppMemoryBudgetBytes)), "
+                    + "the share of this Mac's memory it plans against. Turning "
+                    + "this on removes both gates.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if model.bypassModelRestrictions {
+                    Label("A model that does not fit will swap heavily, and macOS "
+                        + "can terminate TUFF while it is loading or generating. "
+                        + "Nothing is damaged, and the download stays on disk.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
             Section("Startup") {
                 Toggle("Load the selected model at launch",
                        isOn: loadModelOnLaunchBinding)
-                Text("TUFF will only load when the model is installed and its "
-                    + "saved memory profile is safe for this Mac.")
+                Text("TUFF will only load when the model is installed and it "
+                    + "is allowed to load — a memory profile within budget, or "
+                    + "restrictions bypassed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -162,11 +183,21 @@ struct AppSettingsView: View {
     private var memorySettings: some View {
         Section("Memory") {
             Toggle("Auto", isOn: automaticMemoryBinding)
-            if selectedProfile.automaticMemory,
-               let plan = model.automaticMemoryPlan(for: selectedProfileInstall) {
-                Text(automaticMemorySummary(plan))
+            if selectedProfile.automaticMemory {
+                Picker("Auto profile", selection: automaticMemoryProfileBinding) {
+                    ForEach(AppAutomaticMemoryProfile.allCases) { profile in
+                        Text(profileLabel(profile)).tag(profile)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(selectedProfile.automaticMemoryProfile.explanation)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let plan = model.automaticMemoryPlan(for: selectedProfileInstall) {
+                    Text(automaticMemorySummary(plan))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Group {
                 Picker("Context", selection: profileBinding(\.contextTokens)) {
@@ -209,6 +240,15 @@ struct AppSettingsView: View {
                 Label(explanation, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
+                Text(model.bypassModelRestrictions
+                     ? "Bypass model restrictions is on, so TUFF will still load "
+                        + "this. If the Mac runs out of memory the app may be "
+                        + "terminated by the system."
+                     : "TUFF will not load the model at these settings. Lower "
+                        + "Context or Expert cache, switch this model to Auto, "
+                        + "or turn on Bypass model restrictions in General.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -412,6 +452,34 @@ struct AppSettingsView: View {
         }
     }
 
+    /// Each profile is labelled with the context it would actually resolve on
+    /// this Mac, so the choice is between concrete outcomes rather than words.
+    private func profileLabel(_ profile: AppAutomaticMemoryProfile) -> String {
+        guard let plan = model.automaticMemoryPlan(
+            for: selectedProfileInstall, profile: profile) else {
+            return profile.title
+        }
+        let context = AppContextLengthOption(rawValue: plan.contextTokens)?.shortLabel
+            ?? "\(plan.contextTokens)"
+        return "\(profile.title) · \(context)"
+    }
+
+    private var automaticMemoryProfileBinding: Binding<AppAutomaticMemoryProfile> {
+        Binding {
+            selectedProfile.automaticMemoryProfile
+        } set: { newValue in
+            var profile = selectedProfile
+            profile.automaticMemoryProfile = newValue
+            model.updateSettingsProfile(profile, for: selectedProfileInstall)
+        }
+    }
+
+    private var bypassModelRestrictionsBinding: Binding<Bool> {
+        Binding { model.bypassModelRestrictions } set: {
+            model.bypassModelRestrictions = $0
+        }
+    }
+
     private var automaticMemoryBinding: Binding<Bool> {
         Binding {
             selectedProfile.automaticMemory
@@ -455,11 +523,14 @@ struct AppSettingsView: View {
         let detected = MetricFormat.storage(model.deviceCapabilities.unifiedMemoryBytes)
         let selected = MetricFormat.storage(plan.estimatedWorkingSetBytes)
         let budget = MetricFormat.storage(plan.safeBudgetBytes)
-        let available = model.deviceCapabilities.availableMemoryBytes.map {
-            " \(MetricFormat.storage($0)) was available at launch."
-        } ?? ""
-        return "Detected \(detected) unified memory.\(available) TUFF selected "
-            + "\(selected) of its \(budget) safe app budget for this model."
+        let slots = selectedProfileInstall.descriptor.usesExpertCache
+            ? " and \(plan.expertCacheSlots) expert-cache slots"
+            : ""
+        let context = AppContextLengthOption(rawValue: plan.contextTokens)?.shortLabel
+            ?? "\(plan.contextTokens)"
+        return "Detected \(detected) unified memory, of which TUFF plans against "
+            + "\(budget). This model gets \(context) of context\(slots), an "
+            + "estimated \(selected)."
     }
 
     private var newlineShortcutBinding: Binding<AppNewlineShortcut> {

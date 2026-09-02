@@ -84,6 +84,20 @@ public final class AppModel {
         get { settingsStore.automaticMemory }
         set { settingsStore.automaticMemory = newValue }
     }
+    public var automaticMemoryProfile: AppAutomaticMemoryProfile {
+        get { settingsStore.automaticMemoryProfile }
+        set { settingsStore.automaticMemoryProfile = newValue }
+    }
+    /// Lets this Mac install and load models its measured capabilities refuse,
+    /// and load a model at manual settings above Auto's safe budget.
+    public var bypassModelRestrictions: Bool {
+        get { settingsStore.bypassModelRestrictions }
+        set {
+            guard settingsStore.bypassModelRestrictions != newValue else { return }
+            settingsStore.bypassModelRestrictions = newValue
+            persistSettings()
+        }
+    }
     public var maxNewTokensOverride: Int? {
         get { settingsStore.maxNewTokensOverride }
         set { settingsStore.maxNewTokensOverride = newValue }
@@ -361,6 +375,7 @@ public final class AppModel {
             rdadvisePolicy: modelSettings.rdadvisePolicy,
             visionResidencyPolicy: .onDemand)
         self.automaticMemory = modelSettings.automaticMemory
+        self.automaticMemoryProfile = modelSettings.automaticMemoryProfile
         self.maxContextTokens = modelSettings.contextTokens
         self.temperature = modelSettings.temperature
         self.topKEnabled = modelSettings.topKEnabled
@@ -378,6 +393,7 @@ public final class AppModel {
         self.loadModelOnLaunch = settings.loadModelOnLaunch
         self.accentColorMode = settings.accentColorMode
         self.customAccentColorHex = settings.customAccentColorHex
+        self.settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
 
         // The injected installer owns the passed-in directory and becomes the
@@ -473,7 +489,7 @@ public final class AppModel {
         guard !isRunning, !loadState.isLoading,
               !serverStore.isBusy,
               coordinator.id != selectedModelID,
-              hardwareEligibility(for: coordinator).isCompatible else { return false }
+              hardwareRequirementsSatisfied(for: coordinator) else { return false }
         // A transfer keeps writing beside its original text model. Wait for it
         // to reach a saved state before changing selection; once prepared, the
         // target model itself can be selected for activation.
@@ -692,8 +708,8 @@ public final class AppModel {
     }
 
     public var canLoadModel: Bool {
-        isModelInstalled && selectedModelHardwareEligibility.isCompatible
-            && selectedContextHardwareEligibility.isCompatible
+        isModelInstalled && hardwareRequirementsSatisfied(for: selectedInstall)
+            && memoryRequirementsSatisfied
             && !isRunning && !serverStore.isBusy
             && !isVisionCompanionOperationInProgress
             && (loadState == .notLoaded || loadState.isFailed)
@@ -705,8 +721,8 @@ public final class AppModel {
     }
 
     public var canReloadModel: Bool {
-        isModelInstalled && selectedModelHardwareEligibility.isCompatible
-            && selectedContextHardwareEligibility.isCompatible
+        isModelInstalled && hardwareRequirementsSatisfied(for: selectedInstall)
+            && memoryRequirementsSatisfied
             && !isRunning && !serverStore.isBusy
             && !isVisionCompanionOperationInProgress
             && loadState.isReady && hasStaleLoadedRuntime
@@ -767,6 +783,40 @@ public final class AppModel {
         coordinator.descriptor.hardwareEligibility(on: deviceCapabilities)
     }
 
+    /// Whether this model's measured hardware requirements are satisfied, or
+    /// deliberately waived. Every gate that used to read
+    /// `hardwareEligibility(for:).isCompatible` reads this instead, so one
+    /// switch covers download, selection, and load rather than three.
+    public func hardwareRequirementsSatisfied(
+        for coordinator: ModelInstallCoordinator
+    ) -> Bool {
+        bypassModelRestrictions || hardwareEligibility(for: coordinator).isCompatible
+    }
+
+    /// Whether the selected model's current context and cache fit the safe
+    /// budget, or the person has chosen to run past it.
+    public var memoryRequirementsSatisfied: Bool {
+        bypassModelRestrictions || selectedContextHardwareEligibility.isCompatible
+    }
+
+    /// Why the selected model cannot be loaded right now, in words that name
+    /// the setting responsible. Nil when nothing is blocking it. Without this
+    /// a model whose context was set above the budget simply refused to load
+    /// with no visible reason anywhere outside the Settings memory section.
+    public var loadBlockedReason: String? {
+        guard isModelInstalled, !bypassModelRestrictions else { return nil }
+        if let explanation = selectedModelHardwareEligibility.explanation {
+            return explanation
+                + " Turn on Bypass model restrictions in Settings to run it anyway."
+        }
+        if let explanation = selectedContextHardwareEligibility.explanation {
+            return explanation
+                + " Lower Context or Expert cache in Settings, switch that model "
+                + "to Auto, or turn on Bypass model restrictions to run it anyway."
+        }
+        return nil
+    }
+
     public func contextEligibility(
         for coordinator: ModelInstallCoordinator,
         contextTokens: Int,
@@ -779,7 +829,7 @@ public final class AppModel {
     }
 
     public func canInstallModel(_ coordinator: ModelInstallCoordinator) -> Bool {
-        hardwareEligibility(for: coordinator).isCompatible
+        hardwareRequirementsSatisfied(for: coordinator)
             && coordinator.canInstall && !isRunning && !loadState.isLoading
             && !isVisionCompanionOperationInProgress
     }
@@ -897,7 +947,7 @@ public final class AppModel {
     ) -> Bool {
         guard isVisionRuntimeSupported,
               coordinator.descriptor.supportsImageInput,
-              hardwareEligibility(for: coordinator).isCompatible else { return false }
+              hardwareRequirementsSatisfied(for: coordinator) else { return false }
         // A layout with nowhere to put a companion cannot be repaired by
         // downloading one, so do not offer to.
         let status = visionInstallationStatus(for: coordinator)
@@ -1141,7 +1191,8 @@ public final class AppModel {
             livePrefillDone: livePrefillDone,
             livePrefillTotal: livePrefillTotal,
             lastStopReason: diagnostics?.stopReason,
-            isVisionCompanionOperationInProgress: isVisionCompanionOperationInProgress))
+            isVisionCompanionOperationInProgress: isVisionCompanionOperationInProgress,
+            loadBlockedReason: loadBlockedReason))
     }
 
     public var currentProcessMemoryBytes: UInt64? {
@@ -1313,9 +1364,20 @@ public final class AppModel {
     public func automaticMemoryPlan(
         for coordinator: ModelInstallCoordinator
     ) -> AppAutomaticMemoryPlan? {
+        automaticMemoryPlan(for: coordinator,
+                            profile: settingsProfile(for: coordinator).automaticMemoryProfile)
+    }
+
+    /// The plan a given Auto profile would resolve for this model, so the
+    /// settings picker can label each choice with what it would actually do.
+    public func automaticMemoryPlan(
+        for coordinator: ModelInstallCoordinator,
+        profile: AppAutomaticMemoryProfile
+    ) -> AppAutomaticMemoryPlan? {
         AppAutomaticMemoryPlanner.plan(
             for: coordinator.descriptor,
-            on: deviceCapabilities)
+            on: deviceCapabilities,
+            profile: profile)
     }
 
     /// Switches Auto without discarding the manual memory profile underneath
@@ -2232,11 +2294,13 @@ public final class AppModel {
         loadModelOnLaunch = settings.loadModelOnLaunch
         accentColorMode = settings.accentColorMode
         customAccentColorHex = settings.customAccentColorHex
+        settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
     }
 
     private var currentSettingsProfile: AppModelSettingsProfile {
         AppModelSettingsProfile(
             automaticMemory: automaticMemory,
+            automaticMemoryProfile: automaticMemoryProfile,
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
             temperature: temperature,
@@ -2268,6 +2332,7 @@ public final class AppModel {
             // tower on a machine with no control that shows or clears it.
             visionResidencyPolicy: .onDemand)
         automaticMemory = profile.automaticMemory
+        automaticMemoryProfile = profile.automaticMemoryProfile
         maxContextTokens = profile.contextTokens
         temperature = profile.temperature
         topKEnabled = profile.topKEnabled
@@ -2298,6 +2363,7 @@ public final class AppModel {
         settings.loadModelOnLaunch = loadModelOnLaunch
         settings.accentColorMode = accentColorMode
         settings.customAccentColorHex = customAccentColorHex
+        settings.bypassModelRestrictions = bypassModelRestrictions
         try? MacAppSettingsFileStore.save(
             settings,
             forModelDirectory: modelDirectory)

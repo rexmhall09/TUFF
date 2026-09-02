@@ -145,7 +145,10 @@ struct ModelCatalogRow: View {
         } message: {
             Text("Text generation will keep working. Restoring image input requires downloading this add-on again.")
         }
-        .saturation(hardwareEligibility.isCompatible ? 1 : 0)
+        // Grey means "this Mac cannot run it". With restrictions bypassed the
+        // card stays in colour, because the buttons work, and the requirement
+        // is still stated below in orange.
+        .saturation(requirementsSatisfied ? 1 : 0)
     }
 
     private var header: some View {
@@ -241,6 +244,12 @@ struct ModelCatalogRow: View {
             if !hardwareEligibility.isCompatible,
                let explanation = hardwareEligibility.explanation {
                 warning(explanation, symbol: "memorychip")
+                if model.bypassModelRestrictions {
+                    warning("Restrictions are bypassed, so this can still be "
+                            + "downloaded and loaded. It may swap heavily or be "
+                            + "terminated by macOS.",
+                            symbol: "exclamationmark.triangle")
+                }
             }
             if let requirement = install.requirement, !install.isInstalled,
                !requirement.canInstall {
@@ -508,8 +517,14 @@ struct ModelCatalogRow: View {
         model.hardwareEligibility(for: install)
     }
 
+    private var requirementsSatisfied: Bool {
+        model.hardwareRequirementsSatisfied(for: install)
+    }
+
     private var downloadHelp: String {
-        if let explanation = hardwareEligibility.explanation { return explanation }
+        if !requirementsSatisfied, let explanation = hardwareEligibility.explanation {
+            return explanation
+        }
         if let requirement = install.requirement, !requirement.canInstall {
             return "Requires \(MetricFormat.storage(requirement.shortfallBytes)) more disk space."
         }
@@ -517,7 +532,9 @@ struct ModelCatalogRow: View {
     }
 
     private var selectionHelp: String {
-        if let explanation = hardwareEligibility.explanation { return explanation }
+        if !requirementsSatisfied, let explanation = hardwareEligibility.explanation {
+            return explanation
+        }
         return install.isInstalled
             ? "Load and generate with this model"
             : "Make this the model the app loads once it is installed"

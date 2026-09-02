@@ -421,6 +421,7 @@ public final class AppModelLibraryStore {
 public final class AppSettingsStore {
     public var runtimeOptions = AppRuntimeOptions()
     public var automaticMemory = true
+    public var automaticMemoryProfile: AppAutomaticMemoryProfile = .balanced
     public var maxNewTokensOverride: Int?
     public var reasoning: ChatReasoning = .off
     public var reasoningEffort: GPTOSSReasoningEffort = .medium
@@ -437,6 +438,8 @@ public final class AppSettingsStore {
     public var loadModelOnLaunch = false
     public var accentColorMode: AppAccentColorMode = .appDefault
     public var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
+    /// App-wide escape hatch from the hardware and memory gates.
+    public var bypassModelRestrictions = false
     /// The selected model's system prompt, loaded from its profile.
     public var systemPrompt = ""
 
