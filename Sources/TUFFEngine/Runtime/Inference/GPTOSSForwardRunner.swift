@@ -50,7 +50,6 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private let routedIndices: MTLBuffer
     private let expertScratch: GPTOSSExpertScratchBuffers
     private let speculativeTargetTokenBuffer: MTLBuffer
-    private let speculativeHeadLogits: MTLBuffer
     private var lastLogitsBuffer: MTLBuffer?
     private var speculativeStartPosition: Int?
     private var speculativeProcessedTokens = 0
@@ -169,9 +168,6 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         speculativeTargetTokenBuffer = try sharedBuffer(
             elements: 8, stride: MemoryLayout<UInt32>.stride,
             label: "gptoss.speculativeTargets")
-        speculativeHeadLogits = try sharedBuffer(
-            elements: config.vocabSize, stride: MemoryLayout<Float16>.stride,
-            label: "gptoss.speculativeHeadLogits")
         expertScratch = try GPTOSSExpertScratchBuffers.allocate(
             device: context.device,
             layout: GPTOSSExpertScratchLayout(
@@ -239,8 +235,8 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         collectingSpeculativeMetrics = true
         defer { collectingSpeculativeMetrics = false }
 
-        let boundaryToken = try currentGreedyToken(from: currentLogits)
         let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let boundaryToken = try currentGreedyToken(from: currentLogits)
         do {
             try await executePrefillChunk(
                 tokens: tokens[...],
@@ -687,21 +683,17 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 outOffset: normedOffset + row * normedStride,
                 d: UInt32(config.hiddenSize),
                 eps: 1e-5)
-            bf16.encodeHalf(
-                commandBuffer: headCB,
-                weights: model.lmHead,
-                input: normed,
-                inputOffset: normedOffset + row * normedStride,
-                output: speculativeHeadLogits,
-                rows: config.vocabSize,
-                columns: config.hiddenSize)
-            argmax.encode(
-                commandBuffer: headCB,
-                values: speculativeHeadLogits,
-                count: config.vocabSize,
-                output: outputTokens,
-                outputOffset: row * MemoryLayout<UInt32>.stride)
         }
+        bf16.encodeHalfArgmaxRows(
+            commandBuffer: headCB,
+            weights: model.lmHead,
+            input: normed,
+            inputOffset: normedOffset,
+            inputStrideElements: normedStride / MemoryLayout<Float16>.stride,
+            output: outputTokens,
+            rowCount: rowCount,
+            rows: config.vocabSize,
+            columns: config.hiddenSize)
         headCB.commit()
         try waitForCompletion(headCB)
         totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - headStart

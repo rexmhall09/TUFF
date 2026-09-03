@@ -21,10 +21,10 @@ PROMPTS = {
   "code-continuation" => File.join(PROMPT_ROOT, "code-continuation.txt"),
   "long-context" => File.join(PROMPT_ROOT, "long-context.txt")
 }.freeze
-BLOCKS = [nil, 2, 4, 6, 8].freeze
+BLOCKS = [nil, "auto", 2, 4, 6, 8].freeze
 
 FOOTER = /\[stop=(\S+) prefill=(\d+)tok\/([0-9.]+)s new=(\d+)tok decode=([0-9.]+)s tok\/s=([0-9.]+)\]/
-SPEC_FOOTER = /\[spec rounds=(\d+) proposed=(\d+) accepted=(\d+) acceptance=([0-9.]+) rejected=(\d+) corrections=(\d+) verifyTokens=(\d+) verifyMs=([0-9.]+) draftMs=([0-9.]+) verifyReads=(\d+) verifyBytes=(\d+) verifyCacheHits=(\d+) verifyCacheMisses=(\d+) fallbacks=(\d+)\]/
+SPEC_FOOTER = /\[spec rounds=(\d+) proposed=(\d+) accepted=(\d+) acceptance=([0-9.]+) rejected=(\d+) corrections=(\d+) verifyTokens=(\d+) verifyMs=([0-9.]+) draftMs=([0-9.]+) verifyReads=(\d+) verifyBytes=(\d+) verifyCacheHits=(\d+) verifyCacheMisses=(\d+) verifyCBs=(\d+) blockMin=(\d+) blockMax=(\d+) fallbacks=(\d+) autoDisabled=(true|false)\]/
 PHASE = /  (cb1 encode\+commit|expert io await|cb2 encode\+commit|gpu layer cbs|gpu head cbs|gpu routed cbs|gpu shared cbs):\s+([0-9.]+) ms(?: over (\d+) cbs)?/
 MAX_RSS = /\s*(\d+)\s+maximum resident set size/
 
@@ -74,7 +74,9 @@ def command_for(model_path, prompt, block_size, max_new, max_context)
     "--rdadvise", "off"
   ]
   command.insert(7, "--reasoning", "low") if gpt_oss
-  if block_size
+  if block_size == "auto"
+    command += ["--speculative", "auto", "--speculative-draft-tokens", "8"]
+  elsif block_size
     command += ["--speculative", "greedy", "--speculative-draft-tokens", block_size.to_s]
   end
   command
@@ -120,7 +122,11 @@ def parse_measurement(stderr, block_size)
         "verification_expert_bytes" => spec[11].to_i,
         "verification_expert_cache_hits" => spec[12].to_i,
         "verification_expert_cache_misses" => spec[13].to_i,
-        "fallback_decodes" => spec[14].to_i
+        "verification_command_buffers" => spec[14].to_i,
+        "minimum_block_tokens" => spec[15].to_i,
+        "maximum_block_tokens" => spec[16].to_i,
+        "fallback_decodes" => spec[17].to_i,
+        "adaptive_disabled" => spec[18] == "true"
       }
     else
       nil
@@ -196,7 +202,11 @@ def summarize(measurements)
         "verification_expert_bytes" => median(spec_rows.map { |row| row.fetch("verification_expert_bytes") }),
         "verification_expert_cache_hits" => median(spec_rows.map { |row| row.fetch("verification_expert_cache_hits") }),
         "verification_expert_cache_misses" => median(spec_rows.map { |row| row.fetch("verification_expert_cache_misses") }),
-        "fallback_decodes" => median(spec_rows.map { |row| row.fetch("fallback_decodes") })
+        "verification_command_buffers" => median(spec_rows.map { |row| row.fetch("verification_command_buffers") }),
+        "minimum_block_tokens" => median(spec_rows.map { |row| row.fetch("minimum_block_tokens") }),
+        "maximum_block_tokens" => median(spec_rows.map { |row| row.fetch("maximum_block_tokens") }),
+        "fallback_decodes" => median(spec_rows.map { |row| row.fetch("fallback_decodes") }),
+        "adaptive_disabled" => spec_rows.any? { |row| row.fetch("adaptive_disabled") }
       }
     end
   }

@@ -161,7 +161,10 @@ extension Args {
                                  expert pool, so larger chunks read less; auto
                                  picks the smallest size that covers the prompt.
       --rdadvise <s>             Read-advice policy: off, default, bounded, or adaptive (default off).
-      --speculative <off|greedy> Enable opt-in greedy speculative decoding (default off).
+      --speculative <off|greedy|auto>
+                                Opt-in greedy speculation; auto starts at two
+                                tokens and adapts to measured acceptance/cost
+                                (default off).
       --speculative-draft-tokens <n>
                                 Candidate block size, 1...8 (default 4).
       --help                     Show this message.

@@ -184,4 +184,80 @@ import TUFFValidationSupport
         #expect(actual == expected)
         #expect(actual.allSatisfy { abs($0) > Float(Float16.greatestFiniteMagnitude) })
     }
+
+    @Test func batchedArgmaxMatchesPerRowProjectionAndArgmax() throws {
+        let context = try MetalContext()
+        let kernel = try BF16GEMV(context: context, maxRows: 4,
+                                  maxVocabularyRows: 64)
+        let argmax = try FP16Argmax(context: context)
+        let rows = 37
+        let columns = 64
+        let batch = 4
+        let stride = columns + 5
+        let weights = (0..<(rows * columns)).map { index in
+            Quantization.bf16Bits(Float((index * 19 + 7) % 101 - 50) / 64)
+        }
+        let inputs = (0..<(batch * stride)).map { index in
+            index % stride < columns
+                ? Float16(Float((index * 13 + 3) % 67 - 33) / 32)
+                : Float16(91)
+        }
+        let weightBuffer = try #require(context.device.makeBuffer(
+            bytes: weights,
+            length: weights.count * MemoryLayout<UInt16>.stride,
+            options: .storageModeShared))
+        let inputBuffer = try #require(Fp16Buffer.make(
+            context.device, halves: [Float16(-17), Float16(23)] + inputs))
+        let oldLogits = try #require(Fp16Buffer.make(
+            context.device, count: batch * rows))
+        let oldTokens = try #require(context.device.makeBuffer(
+            length: batch * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared))
+        let newTokens = try #require(context.device.makeBuffer(
+            length: (batch + 1) * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared))
+        let weightsView = Self.view(weightBuffer, elements: weights.count,
+                                    rows: rows, columns: columns)
+        let inputOffset = 2 * MemoryLayout<Float16>.stride
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        for row in 0..<batch {
+            let inputRowOffset = inputOffset
+                + row * stride * MemoryLayout<Float16>.stride
+            let logitsOffset = row * rows * MemoryLayout<Float16>.stride
+            kernel.encodeHalf(commandBuffer: commandBuffer,
+                              weights: weightsView,
+                              input: inputBuffer,
+                              inputOffset: inputRowOffset,
+                              output: oldLogits,
+                              outputOffset: logitsOffset,
+                              rows: rows,
+                              columns: columns)
+            argmax.encode(commandBuffer: commandBuffer,
+                          values: oldLogits,
+                          valuesOffset: logitsOffset,
+                          count: rows,
+                          output: oldTokens,
+                          outputOffset: row * MemoryLayout<UInt32>.stride)
+        }
+        kernel.encodeHalfArgmaxRows(
+            commandBuffer: commandBuffer,
+            weights: weightsView,
+            input: inputBuffer,
+            inputOffset: inputOffset,
+            inputStrideElements: stride,
+            output: newTokens,
+            outputOffset: MemoryLayout<UInt32>.stride,
+            rowCount: batch,
+            rows: rows,
+            columns: columns)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try checkCommandBufferError(commandBuffer.error)
+
+        let oldPointer = oldTokens.contents().assumingMemoryBound(to: UInt32.self)
+        let newPointer = newTokens.contents().assumingMemoryBound(to: UInt32.self)
+        for row in 0..<batch {
+            #expect(newPointer[row + 1] == oldPointer[row])
+        }
+    }
 }

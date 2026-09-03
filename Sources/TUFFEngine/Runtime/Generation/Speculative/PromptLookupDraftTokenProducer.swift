@@ -36,6 +36,14 @@ public final class PromptLookupDraftTokenProducer: DraftTokenProducer,
             let suffixStart = history.count - nGram
             let searchStart = max(0, suffixStart - maximumSearchTokens)
             if suffixStart <= searchStart { continue }
+
+            // Prefer the occurrence with the longest available continuation,
+            // not merely the newest occurrence. The newest match is often
+            // adjacent to the current suffix and can contribute only one or
+            // two tokens even though an older identical context has a full
+            // block behind it.
+            var bestCandidateStart: Int?
+            var bestContinuationCount = 0
             for candidateStart in stride(from: suffixStart - 1,
                                           through: searchStart,
                                           by: -1) {
@@ -50,10 +58,19 @@ public final class PromptLookupDraftTokenProducer: DraftTokenProducer,
 
                 let continuationStart = candidateStart + nGram
                 guard continuationStart < history.count else { continue }
-                let continuationEnd = min(history.count,
-                                          continuationStart + maxTokens)
+                let continuationCount = min(maxTokens,
+                                            history.count - continuationStart)
+                if continuationCount > bestContinuationCount
+                    || (continuationCount == bestContinuationCount
+                        && candidateStart > (bestCandidateStart ?? -1)) {
+                    bestCandidateStart = candidateStart
+                    bestContinuationCount = continuationCount
+                }
+            }
+            if let bestCandidateStart, bestContinuationCount > 0 {
+                let continuationStart = bestCandidateStart + nGram
                 return DraftProposal(tokenIDs: Array(
-                    history[continuationStart..<continuationEnd]))
+                    history[continuationStart..<(continuationStart + bestContinuationCount)]))
             }
         }
         return DraftProposal(tokenIDs: [])

@@ -26,4 +26,14 @@ import Testing
         #expect(proposal.count == 2)
         #expect(proposal.tokenIDs == [1, 2])
     }
+
+    @Test func prefersAnOlderMatchWithAFullerContinuation() async throws {
+        let drafter = PromptLookupDraftTokenProducer()
+        let proposal = try await drafter.propose(
+            history: [1, 2, 3, 1, 2, 3, 4, 5, 6, 1, 2, 3],
+            maxTokens: 7,
+            startPosition: 12)
+
+        #expect(proposal.tokenIDs == [1, 2, 3, 4, 5, 6, 1])
+    }
 }

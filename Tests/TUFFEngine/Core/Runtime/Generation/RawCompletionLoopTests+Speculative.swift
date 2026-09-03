@@ -245,6 +245,31 @@ extension RawCompletionLoopTests {
         #expect(speculative.speculative.correctionTokens == 0)
     }
 
+    @Test func automaticSpeculationGrowsFromAConservativeBlock() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let prompt = tokenizer.encode("go", addBOS: true)
+        let target = ["a", "b", "c", "d", "e", "f", "g"].map {
+            oneToken($0, tokenizer: tokenizer)
+        } + [tokenizer.eosID]
+
+        let (result, producer) = try await runScriptedCase(
+            targetTokenIDs: target,
+            tokenizer: tokenizer,
+            promptIDs: prompt,
+            config: GenerationConfig(
+                maxNewTokens: 20,
+                temperature: 0,
+                speculative: SpeculativeDecodeConfig(mode: .auto,
+                                                     draftTokens: 8)))
+
+        #expect(result.kvBackedTokenIDs == prompt + Array(target.dropLast()))
+        #expect(result.uncommittedBoundaryTokenIDs == [tokenizer.eosID])
+        #expect(result.speculative.minimumVerificationBlockTokens == 2)
+        #expect(result.speculative.maximumVerificationBlockTokens == 4)
+        #expect(!result.speculative.adaptiveDisabled)
+        #expect(producer.commitCounts == [2, 4])
+    }
+
     @Test func firstRejectionDoesNotLeakDraftTokens() async throws {
         let tokenizer = try await GFTokenizer.load()
         let prompt = tokenizer.encode("go", addBOS: true)
@@ -350,6 +375,50 @@ extension RawCompletionLoopTests {
         #expect(result.uncommittedBoundaryTokenIDs == [target[1]])
         #expect(result.kvPosition == prompt.count + 1)
         #expect(producer.commitCounts == [1])
+    }
+
+    @Test func eosInsideAcceptedBlockStopsWithoutAnExtraTargetDecode() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let prompt = tokenizer.encode("go", addBOS: true)
+        let target = [oneToken("a", tokenizer: tokenizer), tokenizer.eosID,
+                      oneToken("b", tokenizer: tokenizer)]
+        let (result, producer) = try await runScriptedCase(
+            targetTokenIDs: target, tokenizer: tokenizer, promptIDs: prompt,
+            config: GenerationConfig(
+                maxNewTokens: 20, temperature: 0,
+                speculative: SpeculativeDecodeConfig(mode: .greedy,
+                                                     draftTokens: 4)))
+
+        #expect(result.reason == .eos)
+        #expect(result.newTokens == 2)
+        #expect(result.kvBackedTokenIDs == prompt + [target[0]])
+        #expect(result.uncommittedBoundaryTokenIDs == [tokenizer.eosID])
+        #expect(result.kvPosition == prompt.count + 1)
+        #expect(producer.commitCounts == [1])
+        #expect(producer.produceCalls == prompt.count)
+    }
+
+    @Test func eosCorrectionStopsWithoutAnExtraTargetDecode() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let prompt = tokenizer.encode("go", addBOS: true)
+        let a = oneToken("a", tokenizer: tokenizer)
+        let bad = oneToken("z", tokenizer: tokenizer)
+        let target = [a, tokenizer.eosID, oneToken("b", tokenizer: tokenizer)]
+        let (result, producer) = try await runScriptedCase(
+            targetTokenIDs: target, tokenizer: tokenizer, promptIDs: prompt,
+            config: GenerationConfig(
+                maxNewTokens: 20, temperature: 0,
+                speculative: SpeculativeDecodeConfig(mode: .greedy,
+                                                     draftTokens: 4)),
+            overrides: [[a, bad, bad, bad]])
+
+        #expect(result.reason == .eos)
+        #expect(result.newTokens == 2)
+        #expect(result.kvBackedTokenIDs == prompt + [a])
+        #expect(result.uncommittedBoundaryTokenIDs == [tokenizer.eosID])
+        #expect(result.kvPosition == prompt.count + 1)
+        #expect(producer.commitCounts == [1])
+        #expect(producer.produceCalls == prompt.count)
     }
 
     @Test func nonGreedyGenerationDoesNotSilentlyUseGreedySpeculation() async throws {

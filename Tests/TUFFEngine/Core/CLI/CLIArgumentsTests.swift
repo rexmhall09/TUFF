@@ -98,6 +98,12 @@ import TUFFEngine
         #expect(arguments.speculativeMode == .greedy)
         #expect(arguments.speculativeDraftTokens == 8)
 
+        let automatic = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--speculative", "auto",
+        ])
+        #expect(automatic.speculativeMode == .auto)
+
         for value in ["0", "9"] {
             #expect(throws: ArgsError.invalidValue(
                 flag: "--speculative-draft-tokens", value: value)) {

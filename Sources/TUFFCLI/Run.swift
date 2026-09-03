@@ -289,7 +289,7 @@ public func run(args: Args,
         }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         let config = makeConfig(maxNewTokens: effectiveMaxNew)
-        let draftProducer: (any DraftTokenProducer)? = args.speculativeMode == .greedy
+        let draftProducer: (any DraftTokenProducer)? = args.speculativeMode != .off
             ? PromptLookupDraftTokenProducer()
             : nil
         let assistantDecoder = StructuredAssistantDecoder(
@@ -382,7 +382,11 @@ public func run(args: Args,
                     + "verifyBytes=\(expertBytes) "
                     + "verifyCacheHits=\(speculative.verificationExpertCacheHits) "
                     + "verifyCacheMisses=\(speculative.verificationExpertCacheMisses) "
-                    + "fallbacks=\(speculative.normalFallbackDecodes)]\n"
+                    + "verifyCBs=\(speculative.verificationCommandBuffers) "
+                    + "blockMin=\(speculative.minimumVerificationBlockTokens) "
+                    + "blockMax=\(speculative.maximumVerificationBlockTokens) "
+                    + "fallbacks=\(speculative.normalFallbackDecodes) "
+                    + "autoDisabled=\(speculative.adaptiveDisabled)]\n"
                 stderr.write(Data(line.utf8))
             }
         }

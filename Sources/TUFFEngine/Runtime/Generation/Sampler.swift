@@ -89,7 +89,9 @@ public struct GenerationConfig: Sendable {
             throw GeneratorError.invalidGenerationConfig(
                 "topP below one requires topK; full-vocabulary nucleus sampling is not implemented")
         }
-        guard !speculative.isEnabled || speculative.mode == .greedy else {
+        guard !speculative.isEnabled
+                || speculative.mode == .greedy
+                || speculative.mode == .auto else {
             throw GeneratorError.invalidGenerationConfig(
                 "only greedy speculative decoding is currently supported")
         }

@@ -122,6 +122,40 @@ import Testing
         #expect(verifier.verifyCalls == 0)
     }
 
+    @Test func adaptiveControllerStartsSmallAndGrowsAfterProfitableRounds() {
+        var controller = SpeculativeDecodeController(
+            config: SpeculativeDecodeConfig(mode: .auto, draftTokens: 8))
+
+        #expect(controller.blockSize(remainingTokens: 32) == 2)
+        controller.record(proposedTokens: 2,
+                          acceptedTokens: 2,
+                          verificationWallNanos: 1,
+                          draftWallNanos: 0,
+                          boundaryAdvanceNanos: 100)
+        #expect(controller.nextBlockTokens == 4)
+        controller.record(proposedTokens: 4,
+                          acceptedTokens: 4,
+                          verificationWallNanos: 1,
+                          draftWallNanos: 0,
+                          boundaryAdvanceNanos: 100)
+        #expect(controller.nextBlockTokens == 8)
+        #expect(controller.isEnabled)
+    }
+
+    @Test func adaptiveControllerDisablesAfterZeroAcceptance() {
+        var controller = SpeculativeDecodeController(
+            config: SpeculativeDecodeConfig(mode: .auto, draftTokens: 8))
+
+        controller.record(proposedTokens: 4,
+                          acceptedTokens: 0,
+                          verificationWallNanos: 1_000,
+                          draftWallNanos: 1,
+                          boundaryAdvanceNanos: 100)
+
+        #expect(controller.disabled)
+        #expect(controller.blockSize(remainingTokens: 8) == 0)
+    }
+
     final class TransactionalVerifier: SpeculativeVerificationRunner,
         @unchecked Sendable {
         let targetTokenIDs: [Int32]

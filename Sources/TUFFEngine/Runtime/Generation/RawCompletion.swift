@@ -296,8 +296,12 @@ public func runRawCompletion(producer: any LogitProducer,
         && multimodalInput == nil
         && draftProducer != nil
         && speculativeVerifier?.supportsSpeculativeVerification == true
+    let speculativeUnavailableForAuto = config.speculative.mode == .auto
+        && !speculativeEnabled
+    var speculativeController = SpeculativeDecodeController(
+        config: config.speculative)
     let speculativeDecoder = SpeculativeDecoder(
-        maximumBlockTokens: min(config.speculative.draftTokens, 8))
+        maximumBlockTokens: speculativeController.maximumBlockTokens)
     if speculativeEnabled {
         draftProducer?.reset()
     }
@@ -315,6 +319,8 @@ public func runRawCompletion(producer: any LogitProducer,
     var speculativeCorrectionTokens = 0
     var speculativeVerificationBlocks = 0
     var speculativeVerificationTokens = 0
+    var speculativeMinimumBlockTokens = 0
+    var speculativeMaximumBlockTokens = 0
     var speculativeVerificationWallNanos: UInt64 = 0
     var speculativeVerificationCommandBuffers: UInt64 = 0
     var speculativeVerificationExpertReads: UInt64 = 0
@@ -367,7 +373,9 @@ public func runRawCompletion(producer: any LogitProducer,
     /// Advance target state after a token has been made visible and committed
     /// to history. This is shared by the scalar path and the correction/bonus
     /// token after a speculative block.
-    func advanceAfterCommittedToken(_ tokenID: Int32) async throws {
+    @discardableResult
+    func advanceAfterCommittedToken(_ tokenID: Int32) async throws -> UInt64 {
+        let advanceStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         prefillSeed = nil
         fusedTokenReady = false
         if !fusedGreedy, let epilogueProducer {
@@ -386,6 +394,7 @@ public func runRawCompletion(producer: any LogitProducer,
         }
         position += 1
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
+        return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - advanceStart
     }
 
     func nextScalarToken() throws -> Int32 {
@@ -408,26 +417,39 @@ public func runRawCompletion(producer: any LogitProducer,
         }
     }
 
-    while true {
+    generationLoop: while true {
         try Task.checkCancellation()
 
         if speculativeEnabled,
+           speculativeController.isEnabled,
            generated < config.maxNewTokens,
            let draftProducer,
            let speculativeVerifier {
             let remaining = config.maxNewTokens - generated
+            let blockTokens = speculativeController.blockSize(
+                remainingTokens: remaining)
+            guard blockTokens > 0 else { continue }
             let draftStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let proposal = try await draftProducer.propose(
                 history: history,
-                maxTokens: min(config.speculative.draftTokens, remaining),
+                maxTokens: blockTokens,
                 startPosition: position)
-            speculativeDraftWallNanos &+=
-                clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - draftStart
+            let draftWallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                - draftStart
+            speculativeDraftWallNanos &+= draftWallNanos
             try Task.checkCancellation()
 
             if !proposal.isEmpty {
                 speculativeRounds += 1
                 speculativeProposedTokens += proposal.count
+                if speculativeMinimumBlockTokens == 0 {
+                    speculativeMinimumBlockTokens = proposal.count
+                } else {
+                    speculativeMinimumBlockTokens = min(
+                        speculativeMinimumBlockTokens, proposal.count)
+                }
+                speculativeMaximumBlockTokens = max(
+                    speculativeMaximumBlockTokens, proposal.count)
                 let roundStartPosition = position
                 let plan: SpeculativeRoundPlan
                 do {
@@ -464,7 +486,6 @@ public func runRawCompletion(producer: any LogitProducer,
 
                 var committedCandidateCount = 0
                 do {
-                    var finished = false
                     for index in 0..<plan.decision.acceptedDraftCount {
                         try Task.checkCancellation()
                         if emitToken(proposal.tokenIDs[index]) {
@@ -475,12 +496,8 @@ public func runRawCompletion(producer: any LogitProducer,
                             try speculativeVerifier.commitSpeculativePrefix(
                                 committedCandidateCount)
                             position = roundStartPosition + committedCandidateCount
-                            finished = true
-                            break
+                            break generationLoop
                         }
-                    }
-                    if finished {
-                        break
                     }
 
                     try speculativeVerifier.commitSpeculativePrefix(
@@ -491,9 +508,20 @@ public func runRawCompletion(producer: any LogitProducer,
                     // token matched it is the one-token bonus prediction.
                     let nextToken = plan.decision.nextTargetToken
                     if !emitToken(nextToken) {
-                        break
+                        // The correction/bonus token is visible but is the
+                        // uncommitted boundary for EOS, stop, cancellation,
+                        // or max-token termination. The speculative tail was
+                        // already committed to the accepted prefix above.
+                        break generationLoop
                     }
-                    try await advanceAfterCommittedToken(nextToken)
+                    let boundaryAdvanceNanos = try await advanceAfterCommittedToken(
+                        nextToken)
+                    speculativeController.record(
+                        proposedTokens: proposal.count,
+                        acceptedTokens: plan.decision.acceptedDraftCount,
+                        verificationWallNanos: plan.verification.metrics.wallNanos,
+                        draftWallNanos: draftWallNanos,
+                        boundaryAdvanceNanos: boundaryAdvanceNanos)
                     continue
                 } catch {
                     // Tokens already emitted from the accepted prefix must stay
@@ -510,7 +538,7 @@ public func runRawCompletion(producer: any LogitProducer,
 
         let tokenID = try nextScalarToken()
         guard emitToken(tokenID) else { break }
-        try await advanceAfterCommittedToken(tokenID)
+        _ = try await advanceAfterCommittedToken(tokenID)
     }
 
     return RawDecodeResult(prefillTokens: promptIds.count,
@@ -531,6 +559,10 @@ public func runRawCompletion(producer: any LogitProducer,
                                correctionTokens: speculativeCorrectionTokens,
                                verificationBlocks: speculativeVerificationBlocks,
                                verificationTokens: speculativeVerificationTokens,
+                               minimumVerificationBlockTokens:
+                                   speculativeMinimumBlockTokens,
+                               maximumVerificationBlockTokens:
+                                   speculativeMaximumBlockTokens,
                                verificationWallNanos: speculativeVerificationWallNanos,
                                verificationCommandBuffers:
                                    speculativeVerificationCommandBuffers,
@@ -543,7 +575,9 @@ public func runRawCompletion(producer: any LogitProducer,
                                verificationExpertCacheMisses:
                                    speculativeVerificationExpertCacheMisses,
                                draftWallNanos: speculativeDraftWallNanos,
-                               normalFallbackDecodes: speculativeFallbackDecodes))
+                               normalFallbackDecodes: speculativeFallbackDecodes,
+                               adaptiveDisabled: speculativeUnavailableForAuto
+                                   || speculativeController.disabled))
 }
 
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
