@@ -1,6 +1,6 @@
 # Speculative decoding proof of concept
 
-Status: staged implementation note, 2026-09-02
+Status: implemented opt-in greedy POC, 2026-09-02
 
 ## What the current runtime exposes
 
@@ -46,19 +46,19 @@ sampler fast paths.
 
 ## Production implementation sequence
 
-1. Land pure acceptance logic, proposal/result types, and transaction tests.
-2. Add the raw-completion greedy loop with exact token-by-token visible output
+1. Landed pure acceptance logic, proposal/result types, and transaction tests.
+2. Added the raw-completion greedy loop with exact token-by-token visible output
    handling. Stop/EOS/cancellation/max-token boundaries commit only the
    already-safe prefix and leave the boundary token uncommitted, matching the
    current loop.
-3. Extend the affine prefill head with a bounded GPU argmax buffer containing
+3. Extended the affine prefill head with a bounded GPU argmax buffer containing
    one token per verification row. Reuse `executePrefillChunk` without changing
    public prefill seed behavior.
-4. Add the same explicit verifier to GPT-OSS, using its existing grouped
+4. Added the same explicit verifier to GPT-OSS, using its existing grouped
    prefill expert path. The initial implementation may use bounded GPU logits
    for per-row head evaluation if no row-argmax kernel is available, but it must
    read only row argmax IDs back to Swift.
-5. Add a prompt-lookup/n-gram drafter and a benchmark command. It requires no
+5. Added a prompt-lookup/n-gram drafter and a benchmark command. It requires no
    second model or tokenizer and is useful for measuring verifier economics
    before a trained drafter exists.
 
@@ -74,7 +74,11 @@ The matrix is baseline plus block sizes 2/4/6/8 on a resident control and an
 SSD-streamed MoE model, with repetitive prose, normal prose, code, and long
 context prompts. A verifier-only microbenchmark compares one block pass with
 the same number of scalar target calls. Results are recorded with the current
-commit and binary identity so resumed measurements cannot mix revisions.
+commit and binary identity so resumed measurements cannot mix revisions. The
+POC reports expert-cache-plan misses, estimated expert bytes, hits, and misses
+inside verification; exact Metal command-buffer/GPU counters remain
+unavailable. The supplied real-model harness has not run in this checkout
+because no `.gturbo` model directories are installed.
 
 ## AngelSpec / DFly boundary
 

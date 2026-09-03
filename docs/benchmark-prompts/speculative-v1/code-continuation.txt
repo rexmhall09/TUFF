@@ -1,0 +1,5 @@
+Continue this Swift function with a concise implementation:
+
+func median(_ values: [Double]) -> Double {
+    guard !values.isEmpty else { return 0 }
+    let sorted = values.sorted()
