@@ -51,6 +51,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private let expertScratch: GPTOSSExpertScratchBuffers
     private let speculativeTargetTokenBuffer: MTLBuffer
     private var lastLogitsBuffer: MTLBuffer?
+    private var cachedSpeculativeBoundaryToken: Int32?
     private var speculativeStartPosition: Int?
     private var speculativeProcessedTokens = 0
     private var collectingSpeculativeMetrics = false
@@ -187,6 +188,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     func reset() {
         kv.reset()
         lastLogitsBuffer = nil
+        cachedSpeculativeBoundaryToken = nil
         speculativeStartPosition = nil
         speculativeProcessedTokens = 0
     }
@@ -199,6 +201,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 "GPT-OSS continuation expected KV position \(expectedPosition), current \(kv.position)")
         }
         lastLogitsBuffer = nil
+        cachedSpeculativeBoundaryToken = nil
         speculativeStartPosition = nil
         speculativeProcessedTokens = 0
     }
@@ -244,7 +247,13 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         defer { collectingSpeculativeMetrics = false }
 
         let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let boundaryToken = try currentGreedyToken(from: currentLogits)
+        let boundaryToken: Int32
+        if let cachedSpeculativeBoundaryToken {
+            boundaryToken = cachedSpeculativeBoundaryToken
+        } else {
+            boundaryToken = try currentGreedyToken(from: currentLogits)
+            cachedSpeculativeBoundaryToken = boundaryToken
+        }
         do {
             try await executePrefillChunk(
                 tokens: tokens[...],
@@ -325,11 +334,17 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         speculativeStartPosition = nil
         speculativeProcessedTokens = 0
         lastLogitsBuffer = nil
+        cachedSpeculativeBoundaryToken = nil
     }
 
     func speculativeBoundaryToken() async throws -> Int32? {
         guard let currentLogits = lastLogitsBuffer else { return nil }
-        return try currentGreedyToken(from: currentLogits)
+        if let cachedSpeculativeBoundaryToken {
+            return cachedSpeculativeBoundaryToken
+        }
+        let token = try currentGreedyToken(from: currentLogits)
+        cachedSpeculativeBoundaryToken = token
+        return token
     }
 
     func prefillChunked(tokens: ArraySlice<Int32>,
@@ -726,6 +741,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         headCB.commit()
         try waitForCompletion(headCB)
         lastLogitsBuffer = logits
+        cachedSpeculativeBoundaryToken = nil
         totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - headStart
     }
 
@@ -738,18 +754,19 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         precondition((1...Self.prefillQueryCapacity).contains(rowCount))
         let headStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let headCB = context.queue.makeCommandBuffer()!
-        for row in 0..<rowCount {
-            rms.encodeFloatBF16W(
-                commandBuffer: headCB,
-                x: hidden,
-                xOffset: hiddenOffset + row * hiddenStride,
-                weight: model.finalNorm.buffer,
-                weightOffset: Int(model.finalNorm.offset),
-                out: normed,
-                outOffset: normedOffset + row * normedStride,
-                d: UInt32(config.hiddenSize),
-                eps: 1e-5)
-        }
+        rms.encodeFloatBF16WRows(
+            commandBuffer: headCB,
+            x: hidden,
+            xOffset: hiddenOffset,
+            xStrideElements: hiddenStride / MemoryLayout<Float>.stride,
+            weight: model.finalNorm.buffer,
+            weightOffset: Int(model.finalNorm.offset),
+            out: normed,
+            outOffset: normedOffset,
+            outStrideElements: normedStride / MemoryLayout<Float16>.stride,
+            rows: rowCount,
+            d: UInt32(config.hiddenSize),
+            eps: 1e-5)
         bf16.encodeHalfArgmaxRows(
             commandBuffer: headCB,
             weights: model.lmHead,
