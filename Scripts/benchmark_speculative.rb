@@ -26,6 +26,7 @@ BLOCKS = [nil, "auto", 2, 4, 6, 8].freeze
 FOOTER = /\[stop=(\S+) prefill=(\d+)tok\/([0-9.]+)s new=(\d+)tok decode=([0-9.]+)s tok\/s=([0-9.]+)\]/
 SPEC_FOOTER = /\[spec rounds=(\d+) proposed=(\d+) accepted=(\d+) acceptance=([0-9.]+) rejected=(\d+) corrections=(\d+) verifyTokens=(\d+) verifyMs=([0-9.]+) draftMs=([0-9.]+) verifyReads=(\d+) verifyBytes=(\d+) verifyCacheHits=(\d+) verifyCacheMisses=(\d+) verifyCBs=(\d+) blockMin=(\d+) blockMax=(\d+) fallbacks=(\d+) autoDisabled=(true|false)\]/
 PHASE = /  (cb1 encode\+commit|expert io await|cb2 encode\+commit|gpu layer cbs|gpu head cbs|gpu routed cbs|gpu shared cbs):\s+([0-9.]+) ms(?: over (\d+) cbs)?/
+EXPERT_IO = /  routed expert (reads|bytes|cache hits|cache misses):\s+(\d+)/
 MAX_RSS = /\s*(\d+)\s+maximum resident set size/
 
 def median(values)
@@ -99,6 +100,10 @@ def parse_measurement(stderr, block_size)
       "command_buffers" => command_buffers&.to_i
     }
   end
+  expert_io = {}
+  stderr.scan(EXPERT_IO) do |label, value|
+    expert_io[label] = value.to_i
+  end
   {
     "stop_reason" => footer[1],
     "prompt_tokens" => footer[2].to_i,
@@ -107,6 +112,10 @@ def parse_measurement(stderr, block_size)
     "decode_seconds" => footer[5].to_f,
     "decode_tokens_per_second" => footer[6].to_f,
     "peak_rss_bytes" => rss[1].to_i,
+    "routed_expert_reads" => expert_io.fetch("reads", 0),
+    "routed_expert_bytes" => expert_io.fetch("bytes", 0),
+    "routed_expert_cache_hits" => expert_io.fetch("cache hits", 0),
+    "routed_expert_cache_misses" => expert_io.fetch("cache misses", 0),
     "speculative" => if spec
       {
         "rounds" => spec[1].to_i,
@@ -185,6 +194,10 @@ def summarize(measurements)
     "median_decode_seconds" => median(measurements.map { |row| row.fetch("decode_seconds") }),
     "median_decode_tokens_per_second" => median(measurements.map { |row| row.fetch("decode_tokens_per_second") }),
     "median_peak_rss_bytes" => median(measurements.map { |row| row.fetch("peak_rss_bytes") }),
+    "median_routed_expert_reads" => median(measurements.map { |row| row.fetch("routed_expert_reads") }),
+    "median_routed_expert_bytes" => median(measurements.map { |row| row.fetch("routed_expert_bytes") }),
+    "median_routed_expert_cache_hits" => median(measurements.map { |row| row.fetch("routed_expert_cache_hits") }),
+    "median_routed_expert_cache_misses" => median(measurements.map { |row| row.fetch("routed_expert_cache_misses") }),
     "median_speculative" => if spec_rows.empty?
       nil
     else
@@ -221,11 +234,12 @@ def write_markdown(path, report)
     "Each condition has one warmup and repeated fresh-process measurements; medians are reported.",
     "The baseline is scalar greedy decode. Speculative conditions use the prompt-lookup drafter.",
     "",
-    "| Model | Prompt | Condition | Prompt tokens | Decode tok/s | Decode s | Peak RSS MiB | Acceptance | Verify ms | Verify reads | Verify bytes |",
-    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    "| Model | Prompt | Condition | Prompt tokens | Decode tok/s | vs baseline | Decode s | Peak RSS MiB | Acceptance | Verify ms | Total expert reads | Total expert bytes |",
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
   ]
   report.fetch("models").each do |model, prompts|
     prompts.each do |prompt_name, conditions|
+      baseline_tps = conditions.fetch("baseline").fetch("summary").fetch("median_decode_tokens_per_second")
       conditions.each do |label, detail|
         summary = detail.fetch("summary")
         spec = summary["median_speculative"]
@@ -236,12 +250,13 @@ def write_markdown(path, report)
           label,
           summary.fetch("prompt_tokens"),
           summary.fetch("median_decode_tokens_per_second"),
+          summary.fetch("median_decode_tokens_per_second") / baseline_tps,
           summary.fetch("median_decode_seconds"),
           summary.fetch("median_peak_rss_bytes") / 1_048_576.0,
           spec ? format("%.3f", spec.fetch("acceptance_rate")) : "n/a",
           spec ? format("%.2f", spec.fetch("verification_ms")) : "n/a",
-          spec ? spec.fetch("verification_expert_reads") : "n/a",
-          spec ? spec.fetch("verification_expert_bytes") : "n/a"
+          summary.fetch("median_routed_expert_reads"),
+          summary.fetch("median_routed_expert_bytes")
         )
       end
     end

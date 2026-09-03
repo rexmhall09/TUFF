@@ -70,6 +70,12 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private(set) var totalCb2Nanos: UInt64 = 0
     private(set) var totalHeadNanos: UInt64 = 0
     private(set) var prefillExpertGroupCount = 0
+    /// Decode-only routed-expert traffic. A read is a cache miss that required
+    /// an SSD-backed expert fetch; cache hits are reported separately.
+    private(set) var totalRoutedExpertReads: UInt64 = 0
+    private(set) var totalRoutedExpertBytes: UInt64 = 0
+    private(set) var totalRoutedExpertCacheHits: UInt64 = 0
+    private(set) var totalRoutedExpertCacheMisses: UInt64 = 0
 
     init(model: Model, context: MetalContext, maxContext: Int,
          runtimeConfiguration: RuntimeConfiguration) throws {
@@ -232,6 +238,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         speculativeExpertBytes = 0
         speculativeExpertCacheHits = 0
         speculativeExpertCacheMisses = 0
+        let prefillExpertGroupsBefore = prefillExpertGroupCount
         collectingSpeculativeMetrics = true
         defer { collectingSpeculativeMetrics = false }
 
@@ -260,6 +267,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         }
         speculativeStartPosition = startPosition
         speculativeProcessedTokens = tokens.count
+        let expertGroupCount = prefillExpertGroupCount - prefillExpertGroupsBefore
         return SpeculativeVerificationResult(
             startPosition: startPosition,
             proposedTokenIDs: tokens,
@@ -268,6 +276,10 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             newPosition: startPosition + tokens.count,
             metrics: SpeculativeVerificationMetrics(
                 wallNanos: wallNanos,
+                // One embedding CB, one CB per layer, one CB per streamed
+                // expert group, and one batched output-head CB.
+                targetCommandBuffers: UInt64(2 + config.numLayers
+                                              + expertGroupCount),
                 expertReads: speculativeExpertReads,
                 expertBytes: speculativeExpertBytes,
                 expertCacheHits: speculativeExpertCacheHits,
@@ -277,6 +289,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private func recordSpeculativeFetch(layer: Int,
                                         plan: RoutedExpertFetchPlan?) {
         guard collectingSpeculativeMetrics, let plan else { return }
+        recordDecodeExpertFetch(layer: layer, plan: plan)
         let misses = plan.misses.count
         speculativeExpertReads &+= UInt64(misses)
         speculativeExpertCacheMisses &+= UInt64(misses)
@@ -284,6 +297,18 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         if let bytes = try? model.routedExpertAdviceByteEstimate(
             layer: layer, missCount: misses) {
             speculativeExpertBytes &+= bytes
+        }
+    }
+
+    private func recordDecodeExpertFetch(layer: Int,
+                                         plan: RoutedExpertFetchPlan) {
+        let misses = plan.misses.count
+        totalRoutedExpertReads &+= UInt64(misses)
+        totalRoutedExpertCacheMisses &+= UInt64(misses)
+        totalRoutedExpertCacheHits &+= UInt64(plan.hits)
+        if let bytes = try? model.routedExpertAdviceByteEstimate(
+            layer: layer, missCount: misses) {
+            totalRoutedExpertBytes &+= bytes
         }
     }
 
@@ -556,6 +581,9 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             let plannedFetch = try model.planRoutedExperts(
                 layer: layer, experts: expertIDs)
             recordSpeculativeFetch(layer: layer, plan: plannedFetch)
+            if !collectingSpeculativeMetrics, let plannedFetch {
+                recordDecodeExpertFetch(layer: layer, plan: plannedFetch)
+            }
             let blobs: [TensorView]
             if let plannedFetch {
                 blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
@@ -829,8 +857,16 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         let experts = (0..<config.topKExperts).map { Int(indexPointer[$0]) }
 
         let ioStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let blobs = try await model.fetchRoutedExperts(
+        let plannedFetch = try model.planRoutedExperts(
             layer: layer, experts: experts)
+        let blobs: [TensorView]
+        if let plannedFetch {
+            recordDecodeExpertFetch(layer: layer, plan: plannedFetch)
+            blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+        } else {
+            blobs = try await model.fetchRoutedExperts(
+                layer: layer, experts: experts)
+        }
         totalIoNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - ioStart
 
         let cb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)

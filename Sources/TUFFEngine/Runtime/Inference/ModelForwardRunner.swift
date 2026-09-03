@@ -198,6 +198,30 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         case .gptOss(let runner): return runner.totalHeadNanos
         }
     }
+    public var totalRoutedExpertReads: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalRoutedExpertReads
+        case .gptOss(let runner): return runner.totalRoutedExpertReads
+        }
+    }
+    public var totalRoutedExpertBytes: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalRoutedExpertBytes
+        case .gptOss(let runner): return runner.totalRoutedExpertBytes
+        }
+    }
+    public var totalRoutedExpertCacheHits: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalRoutedExpertCacheHits
+        case .gptOss(let runner): return runner.totalRoutedExpertCacheHits
+        }
+    }
+    public var totalRoutedExpertCacheMisses: UInt64 {
+        switch backend {
+        case .affine(let runner): return runner.totalRoutedExpertCacheMisses
+        case .gptOss(let runner): return runner.totalRoutedExpertCacheMisses
+        }
+    }
 
     var gptOssPrefillExpertGroupCount: Int {
         switch backend {

@@ -355,6 +355,10 @@ public func run(args: Args,
             lines += "  gpu head cbs:  " + ms(runner.totalGPUHeadNanos) + " ms\n"
             lines += "  gpu routed cbs: " + ms(runner.totalGPURoutedNanos) + " ms\n"
             lines += "  gpu shared cbs: " + ms(runner.totalGPUSharedNanos) + " ms\n"
+            lines += "  routed expert reads: \(runner.totalRoutedExpertReads)\n"
+            lines += "  routed expert bytes: \(runner.totalRoutedExpertBytes)\n"
+            lines += "  routed expert cache hits: \(runner.totalRoutedExpertCacheHits)\n"
+            lines += "  routed expert cache misses: \(runner.totalRoutedExpertCacheMisses)\n"
             stderr.write(Data(lines.utf8))
         }
         if !args.quiet {

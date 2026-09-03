@@ -240,6 +240,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private var speculativeExpertBytes: UInt64 = 0
     private var speculativeExpertCacheHits: UInt64 = 0
     private var speculativeExpertCacheMisses: UInt64 = 0
+    private var speculativeTargetCommandBuffers: UInt64 = 0
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -600,6 +601,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     public private(set) var totalGPULayerCommandBuffers: UInt64 = 0
     public private(set) var totalGPURoutedNanos: UInt64 = 0
     public private(set) var totalGPUSharedNanos: UInt64 = 0
+    /// Decode-only routed-expert traffic. A read is a cache miss that required
+    /// an SSD-backed expert fetch; cache hits are reported separately.
+    public private(set) var totalRoutedExpertReads: UInt64 = 0
+    public private(set) var totalRoutedExpertBytes: UInt64 = 0
+    public private(set) var totalRoutedExpertCacheHits: UInt64 = 0
+    public private(set) var totalRoutedExpertCacheMisses: UInt64 = 0
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
     /// The Qwen Gated-DeltaNet state is recurrent rather than rewindable KV,
@@ -705,6 +712,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         speculativeExpertBytes = 0
         speculativeExpertCacheHits = 0
         speculativeExpertCacheMisses = 0
+        speculativeTargetCommandBuffers = 0
         collectingSpeculativeMetrics = true
         defer { collectingSpeculativeMetrics = false }
 
@@ -753,6 +761,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             newPosition: startPosition + tokens.count,
             metrics: SpeculativeVerificationMetrics(
                 wallNanos: wallNanos,
+                targetCommandBuffers: speculativeTargetCommandBuffers,
                 expertReads: speculativeExpertReads,
                 expertBytes: speculativeExpertBytes,
                 expertCacheHits: speculativeExpertCacheHits,
@@ -766,12 +775,42 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             ? fetch.plannedMissSlots.count
             : fetch.expertIDs.count
         let hits = fetch.usedPlannedFetch ? fetch.plannedHits : 0
+        recordDecodeExpertFetch(layer: layer, misses: misses, hits: hits)
         speculativeExpertReads &+= UInt64(misses)
         speculativeExpertCacheMisses &+= UInt64(misses)
         speculativeExpertCacheHits &+= UInt64(hits)
         if let bytes = try? model.routedExpertAdviceByteEstimate(
             layer: layer, missCount: misses) {
             speculativeExpertBytes &+= bytes
+        }
+    }
+
+    private func makePrefillCommandBuffer() -> MTLCommandBuffer? {
+        let commandBuffer = ctx.queue.makeCommandBuffer()
+        if collectingSpeculativeMetrics, commandBuffer != nil {
+            speculativeTargetCommandBuffers &+= 1
+        }
+        return commandBuffer
+    }
+
+    private func recordDecodeExpertFetch(layer: Int,
+                                         plan: RoutedExpertFetchPlan?) {
+        guard let plan else { return }
+        recordDecodeExpertFetch(layer: layer,
+                                misses: plan.misses.count,
+                                hits: plan.hits)
+    }
+
+    private func recordDecodeExpertFetch(layer: Int,
+                                         misses: Int,
+                                         hits: Int) {
+        guard misses >= 0, hits >= 0 else { return }
+        totalRoutedExpertReads &+= UInt64(misses)
+        totalRoutedExpertCacheMisses &+= UInt64(misses)
+        totalRoutedExpertCacheHits &+= UInt64(hits)
+        if let bytes = try? model.routedExpertAdviceByteEstimate(
+            layer: layer, missCount: misses) {
+            totalRoutedExpertBytes &+= bytes
         }
     }
 
@@ -1290,7 +1329,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
         prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
 
-        guard var cb = ctx.queue.makeCommandBuffer() else {
+        guard var cb = makePrefillCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
         if let embeddingOverride {
@@ -1948,7 +1987,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         tileExpertCount: routeTileExpertCount,
                         expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
 
-                    guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+                    guard let sharedCB = makePrefillCommandBuffer() else {
                         throw ModelError.residentBufferWrapFailed
                     }
                     if let sharedProj = sharedExpertProjections[L] {
@@ -2124,7 +2163,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             hiddenStrideElements: UInt32(D),
                             binding: fetch.binding,
                             offsets: routedOffsets)
-                        guard let tileCB = ctx.queue.makeCommandBuffer() else {
+                        guard let tileCB = makePrefillCommandBuffer() else {
                             throw ModelError.residentBufferWrapFailed
                         }
                         _ = prefillGroupedMoE.encodeStreamedBatched(
@@ -2150,7 +2189,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     while !pendingTiles.isEmpty {
                         try drainOldestPendingTile()
                     }
-                    guard let tailCB = ctx.queue.makeCommandBuffer() else {
+                    guard let tailCB = makePrefillCommandBuffer() else {
                         throw ModelError.residentBufferWrapFailed
                     }
                     prefillMoE.encodeReduceTokenMajor(commandBuffer: tailCB,
@@ -2199,7 +2238,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         try waitForCompletion(tailCB)
                     }
                     if L + 1 < cfg.numLayers {
-                        guard let nextCB = ctx.queue.makeCommandBuffer() else {
+                        guard let nextCB = makePrefillCommandBuffer() else {
                             throw ModelError.residentBufferWrapFailed
                         }
                         cb = nextCB
@@ -2215,7 +2254,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         if writeFinalHead {
             let finalNorm = model.finalNorm
             let lm = model.lmHead
-            guard let finalCB = ctx.queue.makeCommandBuffer() else {
+            guard let finalCB = makePrefillCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
             if let speculativeTargetTokens {
@@ -2722,6 +2761,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let plannedFetch = canPlanPhase1HitSplit
                 ? try model.planRoutedExperts(layer: L, experts: experts)
                 : nil
+            recordDecodeExpertFetch(layer: L, plan: plannedFetch)
             var phase1HitCB: MTLCommandBuffer?
             var phase1HitSplitArgBuf: MTLBuffer?
             var phase1HitSplitRoutedBufs: [MTLBuffer] = []
