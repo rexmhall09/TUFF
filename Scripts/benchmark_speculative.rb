@@ -193,10 +193,10 @@ rescue RuntimeError
 end
 
 def summarize(measurements)
-  spec_pairs = measurements.filter_map do |row|
+  spec_pairs = measurements.map do |row|
     spec = row["speculative"]
     spec ? [row, spec] : nil
-  end
+  end.compact
   spec_rows = spec_pairs.map(&:last)
   {
     "prompt_tokens" => measurements.first.fetch("prompt_tokens"),
