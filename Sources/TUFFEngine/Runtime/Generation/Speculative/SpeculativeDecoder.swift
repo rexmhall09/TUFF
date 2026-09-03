@@ -42,6 +42,7 @@ public struct SpeculativeDecodeController: Sendable, Equatable {
     public private(set) var disabled: Bool
 
     private var scalarNanosPerToken: Double?
+    private var scalarExpertBytesPerToken: Double?
     private var unprofitableRounds = 0
 
     public init(config: SpeculativeDecodeConfig) {
@@ -69,7 +70,9 @@ public struct SpeculativeDecodeController: Sendable, Equatable {
                                 acceptedTokens: Int,
                                 verificationWallNanos: UInt64,
                                 draftWallNanos: UInt64,
-                                boundaryAdvanceNanos: UInt64?) {
+                                boundaryAdvanceNanos: UInt64?,
+                                verificationExpertBytes: UInt64 = 0,
+                                boundaryExpertBytes: UInt64? = nil) {
         guard mode == .auto, !disabled, proposedTokens > 0 else { return }
 
         if let boundaryAdvanceNanos {
@@ -80,6 +83,15 @@ public struct SpeculativeDecodeController: Sendable, Equatable {
                 self.scalarNanosPerToken = scalarNanosPerToken * 0.75 + sample * 0.25
             } else {
                 scalarNanosPerToken = sample
+            }
+        }
+        if let boundaryExpertBytes, boundaryExpertBytes > 0 {
+            let sample = Double(boundaryExpertBytes)
+            if let scalarExpertBytesPerToken {
+                self.scalarExpertBytesPerToken =
+                    scalarExpertBytesPerToken * 0.75 + sample * 0.25
+            } else {
+                scalarExpertBytesPerToken = sample
             }
         }
 
@@ -101,9 +113,19 @@ public struct SpeculativeDecodeController: Sendable, Equatable {
         let unprofitable = scalarBaseline.map {
             speculativeNanos > $0 * 1.05
         } ?? false
+        let unprofitableExpertIO: Bool
+        if verificationExpertBytes > 0,
+           let scalarExpertBytesPerToken {
+            let scalarBytes = scalarExpertBytesPerToken
+                * Double(acceptedTokens + 1)
+            unprofitableExpertIO = Double(verificationExpertBytes)
+                > scalarBytes * 1.05
+        } else {
+            unprofitableExpertIO = false
+        }
         let lowAcceptance = acceptance < 0.5
 
-        if lowAcceptance || unprofitable {
+        if lowAcceptance || unprofitable || unprofitableExpertIO {
             unprofitableRounds += 1
             if nextBlockTokens > 2 {
                 nextBlockTokens = max(2, nextBlockTokens / 2)
@@ -141,6 +163,9 @@ public struct SpeculativeDecodeMetrics: Sendable, Equatable {
     public let verificationExpertBytes: UInt64
     public let verificationExpertCacheHits: UInt64
     public let verificationExpertCacheMisses: UInt64
+    public let fastBoundaryChecks: Int
+    public let fastBoundaryRejects: Int
+    public let fastBoundaryCheckWallNanos: UInt64
     public let draftWallNanos: UInt64
     public let normalFallbackDecodes: Int
     public let adaptiveDisabled: Bool
@@ -160,6 +185,9 @@ public struct SpeculativeDecodeMetrics: Sendable, Equatable {
                 verificationExpertBytes: UInt64 = 0,
                 verificationExpertCacheHits: UInt64 = 0,
                 verificationExpertCacheMisses: UInt64 = 0,
+                fastBoundaryChecks: Int = 0,
+                fastBoundaryRejects: Int = 0,
+                fastBoundaryCheckWallNanos: UInt64 = 0,
                 draftWallNanos: UInt64 = 0,
                 normalFallbackDecodes: Int = 0,
                 adaptiveDisabled: Bool = false) {
@@ -178,6 +206,9 @@ public struct SpeculativeDecodeMetrics: Sendable, Equatable {
         self.verificationExpertBytes = verificationExpertBytes
         self.verificationExpertCacheHits = verificationExpertCacheHits
         self.verificationExpertCacheMisses = verificationExpertCacheMisses
+        self.fastBoundaryChecks = fastBoundaryChecks
+        self.fastBoundaryRejects = fastBoundaryRejects
+        self.fastBoundaryCheckWallNanos = fastBoundaryCheckWallNanos
         self.draftWallNanos = draftWallNanos
         self.normalFallbackDecodes = normalFallbackDecodes
         self.adaptiveDisabled = adaptiveDisabled

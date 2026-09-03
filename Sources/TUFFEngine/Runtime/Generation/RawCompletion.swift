@@ -289,6 +289,7 @@ public func runRawCompletion(producer: any LogitProducer,
     let epilogueProducer = config.repetitionPenalty == 1.0
         ? producer as? any EpilogueFusingLogitProducer
         : nil
+    let targetCostReporter = producer as? any SpeculativeTargetCostReporting
     var fusedTokenReady = false
     let speculativeVerifier = producer as? any SpeculativeVerificationRunner
     let speculativeEnabled = config.speculative.isEnabled
@@ -327,6 +328,9 @@ public func runRawCompletion(producer: any LogitProducer,
     var speculativeVerificationExpertBytes: UInt64 = 0
     var speculativeVerificationExpertCacheHits: UInt64 = 0
     var speculativeVerificationExpertCacheMisses: UInt64 = 0
+    var speculativeFastBoundaryChecks = 0
+    var speculativeFastBoundaryRejects = 0
+    var speculativeFastBoundaryCheckWallNanos: UInt64 = 0
     var speculativeDraftWallNanos: UInt64 = 0
     var speculativeFallbackDecodes = 0
 
@@ -374,8 +378,11 @@ public func runRawCompletion(producer: any LogitProducer,
     /// to history. This is shared by the scalar path and the correction/bonus
     /// token after a speculative block.
     @discardableResult
-    func advanceAfterCommittedToken(_ tokenID: Int32) async throws -> UInt64 {
+    func advanceAfterCommittedToken(_ tokenID: Int32) async throws
+        -> (wallNanos: UInt64, expertReads: UInt64, expertBytes: UInt64) {
         let advanceStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let expertReadsBefore = targetCostReporter?.totalRoutedExpertReads ?? 0
+        let expertBytesBefore = targetCostReporter?.totalRoutedExpertBytes ?? 0
         prefillSeed = nil
         fusedTokenReady = false
         if !fusedGreedy, let epilogueProducer {
@@ -394,7 +401,14 @@ public func runRawCompletion(producer: any LogitProducer,
         }
         position += 1
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
-        return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - advanceStart
+        let expertReadsAfter = targetCostReporter?.totalRoutedExpertReads ?? 0
+        let expertBytesAfter = targetCostReporter?.totalRoutedExpertBytes ?? 0
+        return (
+            wallNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - advanceStart,
+            expertReads: expertReadsAfter >= expertReadsBefore
+                ? expertReadsAfter - expertReadsBefore : 0,
+            expertBytes: expertBytesAfter >= expertBytesBefore
+                ? expertBytesAfter - expertBytesBefore : 0)
     }
 
     func nextScalarToken() throws -> Int32 {
@@ -450,6 +464,48 @@ public func runRawCompletion(producer: any LogitProducer,
                 }
                 speculativeMaximumBlockTokens = max(
                     speculativeMaximumBlockTokens, proposal.count)
+
+                let boundaryCheckStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let boundaryToken = try await speculativeVerifier
+                    .speculativeBoundaryToken()
+                speculativeFastBoundaryCheckWallNanos &+=
+                    clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - boundaryCheckStart
+                if boundaryToken != nil {
+                    speculativeFastBoundaryChecks += 1
+                }
+                if let boundaryToken,
+                   proposal.tokenIDs[0] != boundaryToken {
+                    // The target prediction at this boundary is already
+                    // available. There is no reason to stream or write a
+                    // speculative tail when the first candidate cannot be
+                    // accepted. This is especially important for SSD-backed
+                    // MoE targets, where a doomed block would otherwise pay
+                    // for every routed expert before discovering the mismatch.
+                    speculativeFastBoundaryRejects += 1
+                    speculativeRejectedTokens += proposal.count
+                    speculativeCorrectionTokens += 1
+
+                    if !emitToken(boundaryToken) {
+                        speculativeController.record(
+                            proposedTokens: proposal.count,
+                            acceptedTokens: 0,
+                            verificationWallNanos: 0,
+                            draftWallNanos: draftWallNanos,
+                            boundaryAdvanceNanos: nil)
+                        break generationLoop
+                    }
+                    let boundaryAdvance = try await advanceAfterCommittedToken(
+                        boundaryToken)
+                    speculativeController.record(
+                        proposedTokens: proposal.count,
+                        acceptedTokens: 0,
+                        verificationWallNanos: 0,
+                        draftWallNanos: draftWallNanos,
+                        boundaryAdvanceNanos: boundaryAdvance.wallNanos,
+                        boundaryExpertBytes: boundaryAdvance.expertBytes)
+                    continue
+                }
+
                 let roundStartPosition = position
                 let plan: SpeculativeRoundPlan
                 do {
@@ -514,14 +570,17 @@ public func runRawCompletion(producer: any LogitProducer,
                         // already committed to the accepted prefix above.
                         break generationLoop
                     }
-                    let boundaryAdvanceNanos = try await advanceAfterCommittedToken(
+                    let boundaryAdvance = try await advanceAfterCommittedToken(
                         nextToken)
                     speculativeController.record(
                         proposedTokens: proposal.count,
                         acceptedTokens: plan.decision.acceptedDraftCount,
                         verificationWallNanos: plan.verification.metrics.wallNanos,
                         draftWallNanos: draftWallNanos,
-                        boundaryAdvanceNanos: boundaryAdvanceNanos)
+                        boundaryAdvanceNanos: boundaryAdvance.wallNanos,
+                        verificationExpertBytes:
+                            plan.verification.metrics.expertBytes,
+                        boundaryExpertBytes: boundaryAdvance.expertBytes)
                     continue
                 } catch {
                     // Tokens already emitted from the accepted prefix must stay
@@ -574,6 +633,12 @@ public func runRawCompletion(producer: any LogitProducer,
                                    speculativeVerificationExpertCacheHits,
                                verificationExpertCacheMisses:
                                    speculativeVerificationExpertCacheMisses,
+                               fastBoundaryChecks:
+                                   speculativeFastBoundaryChecks,
+                               fastBoundaryRejects:
+                                   speculativeFastBoundaryRejects,
+                               fastBoundaryCheckWallNanos:
+                                   speculativeFastBoundaryCheckWallNanos,
                                draftWallNanos: speculativeDraftWallNanos,
                                normalFallbackDecodes: speculativeFallbackDecodes,
                                adaptiveDisabled: speculativeUnavailableForAuto

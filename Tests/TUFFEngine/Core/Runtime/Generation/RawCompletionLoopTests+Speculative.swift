@@ -23,6 +23,7 @@ extension RawCompletionLoopTests {
         private(set) var commitCounts: [Int] = []
         private(set) var produceCalls = 0
         var cancelDuringVerification = false
+        var exposeBoundaryToken = false
 
         private var activeStart: Int?
         private var activeCount = 0
@@ -94,6 +95,11 @@ extension RawCompletionLoopTests {
                 processedTokens: tokens.count,
                 newPosition: cursor,
                 metrics: SpeculativeVerificationMetrics(targetCommandBuffers: 1))
+        }
+
+        func speculativeBoundaryToken() async throws -> Int32? {
+            guard exposeBoundaryToken else { return nil }
+            return targetToken(at: max(0, cursor - promptCount))
         }
 
         func commitSpeculativePrefix(_ count: Int) throws {
@@ -179,6 +185,7 @@ extension RawCompletionLoopTests {
         start: RawCompletionStart = .reset,
         initialCursor: Int = 0,
         cancelDuringVerification: Bool = false,
+        exposeBoundaryToken: Bool = false,
         draftProducer: ScriptedDraftProducer? = nil
     ) async throws -> (RawDecodeResult, ScriptedSpeculativeTarget) {
         let context = try MetalContext()
@@ -188,6 +195,7 @@ extension RawCompletionLoopTests {
             targetTokenIDs: targetTokenIDs,
             initialCursor: initialCursor)
         producer.cancelDuringVerification = cancelDuringVerification
+        producer.exposeBoundaryToken = exposeBoundaryToken
         let scratch = try RawCompletionScratch(context: context,
                                                 vocab: tokenizer.vocabSize)
         let drafter = draftProducer ?? ScriptedDraftProducer(
@@ -293,6 +301,32 @@ extension RawCompletionLoopTests {
         #expect(result.speculative.correctionTokens == 1)
         #expect(producer.commitCounts == [0, 3])
         #expect(!result.kvBackedTokenIDs.contains(bad))
+    }
+
+    @Test func firstBoundaryMismatchSkipsFullVerification() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let prompt = tokenizer.encode("go", addBOS: true)
+        let target = [oneToken("a", tokenizer: tokenizer), tokenizer.eosID]
+        let bad = oneToken("z", tokenizer: tokenizer)
+        let (result, producer) = try await runScriptedCase(
+            targetTokenIDs: target,
+            tokenizer: tokenizer,
+            promptIDs: prompt,
+            config: GenerationConfig(
+                maxNewTokens: 1,
+                temperature: 0,
+                speculative: SpeculativeDecodeConfig(mode: .greedy,
+                                                     draftTokens: 4)),
+            overrides: [[bad, bad, bad, bad]],
+            exposeBoundaryToken: true)
+
+        #expect(result.newTokens == 1)
+        #expect(result.uncommittedBoundaryTokenIDs == [target[0]])
+        #expect(result.speculative.rounds == 1)
+        #expect(result.speculative.fastBoundaryChecks == 1)
+        #expect(result.speculative.fastBoundaryRejects == 1)
+        #expect(result.speculative.verificationBlocks == 0)
+        #expect(producer.produceCalls == prompt.count)
     }
 
     @Test func partialAcceptanceCommitsOnlyTheMatchingPrefix() async throws {

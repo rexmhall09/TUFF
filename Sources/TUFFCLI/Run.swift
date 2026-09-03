@@ -376,6 +376,9 @@ public func run(args: Args,
                 let draftMs = String(
                     format: "%.2f",
                     Double(speculative.draftWallNanos) / 1e6)
+                let boundaryMs = String(
+                    format: "%.2f",
+                    Double(speculative.fastBoundaryCheckWallNanos) / 1e6)
                 let expertBytes = speculative.verificationExpertBytes
                 let line = "[spec rounds=\(speculative.rounds) proposed=\(speculative.proposedTokens) "
                     + "accepted=\(speculative.acceptedTokens) acceptance=\(rate) "
@@ -390,6 +393,9 @@ public func run(args: Args,
                     + "blockMin=\(speculative.minimumVerificationBlockTokens) "
                     + "blockMax=\(speculative.maximumVerificationBlockTokens) "
                     + "fallbacks=\(speculative.normalFallbackDecodes) "
+                    + "boundaryMs=\(boundaryMs) "
+                    + "boundaryChecks=\(speculative.fastBoundaryChecks) "
+                    + "boundaryRejects=\(speculative.fastBoundaryRejects) "
                     + "autoDisabled=\(speculative.adaptiveDisabled)]\n"
                 stderr.write(Data(line.utf8))
             }

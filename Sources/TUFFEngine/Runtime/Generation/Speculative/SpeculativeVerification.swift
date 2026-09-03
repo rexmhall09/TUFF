@@ -25,6 +25,15 @@ public struct SpeculativeVerificationMetrics: Sendable, Equatable {
     }
 }
 
+/// Optional decode-only target telemetry used by the adaptive policy. A
+/// backend that streams routed experts can expose these monotonically
+/// increasing counters without coupling generation policy to its I/O model.
+/// Resident models may return zero for both values.
+public protocol SpeculativeTargetCostReporting: Sendable {
+    var totalRoutedExpertReads: UInt64 { get }
+    var totalRoutedExpertBytes: UInt64 { get }
+}
+
 /// Target predictions for a verified block.
 ///
 /// `targetTokenIDs[0]` is the target prediction at `startPosition`, before the
@@ -80,10 +89,17 @@ public protocol SpeculativeVerificationRunner: LogitProducer {
         -> SpeculativeVerificationResult
 
     func commitSpeculativePrefix(_ count: Int) throws
+
+    /// Return the target's already-available greedy prediction at the current
+    /// KV boundary when the backend can do so cheaply. A nil result leaves the
+    /// normal full-block verification path unchanged.
+    func speculativeBoundaryToken() async throws -> Int32?
 }
 
 public extension SpeculativeVerificationRunner {
     var supportsSpeculativeVerification: Bool { true }
+
+    func speculativeBoundaryToken() async throws -> Int32? { nil }
 }
 
 /// The first POC's greedy acceptance rule. For a mismatch, the target token at

@@ -156,6 +156,24 @@ import Testing
         #expect(controller.blockSize(remainingTokens: 8) == 0)
     }
 
+    @Test func adaptiveControllerStopsWhenExpertTrafficIsUnprofitable() {
+        var controller = SpeculativeDecodeController(
+            config: SpeculativeDecodeConfig(mode: .auto, draftTokens: 8))
+
+        for _ in 0..<2 {
+            controller.record(proposedTokens: 2,
+                              acceptedTokens: 2,
+                              verificationWallNanos: 1,
+                              draftWallNanos: 0,
+                              boundaryAdvanceNanos: 100,
+                              verificationExpertBytes: 400,
+                              boundaryExpertBytes: 100)
+        }
+
+        #expect(controller.disabled)
+        #expect(controller.blockSize(remainingTokens: 8) == 0)
+    }
+
     final class TransactionalVerifier: SpeculativeVerificationRunner,
         @unchecked Sendable {
         let targetTokenIDs: [Int32]

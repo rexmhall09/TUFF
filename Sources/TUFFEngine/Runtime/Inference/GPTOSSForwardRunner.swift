@@ -326,6 +326,11 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         lastLogitsBuffer = nil
     }
 
+    func speculativeBoundaryToken() async throws -> Int32? {
+        guard let currentLogits = lastLogitsBuffer else { return nil }
+        return try currentGreedyToken(from: currentLogits)
+    }
+
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
                         outputMode _: PrefillOutputMode,

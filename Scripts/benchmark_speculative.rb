@@ -24,7 +24,7 @@ PROMPTS = {
 BLOCKS = [nil, "auto", 2, 4, 6, 8].freeze
 
 FOOTER = /\[stop=(\S+) prefill=(\d+)tok\/([0-9.]+)s new=(\d+)tok decode=([0-9.]+)s tok\/s=([0-9.]+)\]/
-SPEC_FOOTER = /\[spec rounds=(\d+) proposed=(\d+) accepted=(\d+) acceptance=([0-9.]+) rejected=(\d+) corrections=(\d+) verifyTokens=(\d+) verifyMs=([0-9.]+) draftMs=([0-9.]+) verifyReads=(\d+) verifyBytes=(\d+) verifyCacheHits=(\d+) verifyCacheMisses=(\d+) verifyCBs=(\d+) blockMin=(\d+) blockMax=(\d+) fallbacks=(\d+) autoDisabled=(true|false)\]/
+SPEC_FOOTER = /\[spec rounds=(\d+) proposed=(\d+) accepted=(\d+) acceptance=([0-9.]+) rejected=(\d+) corrections=(\d+) verifyTokens=(\d+) verifyMs=([0-9.]+) draftMs=([0-9.]+) verifyReads=(\d+) verifyBytes=(\d+) verifyCacheHits=(\d+) verifyCacheMisses=(\d+) verifyCBs=(\d+) blockMin=(\d+) blockMax=(\d+) fallbacks=(\d+)(?: boundaryMs=([0-9.]+) boundaryChecks=(\d+) boundaryRejects=(\d+))? autoDisabled=(true|false)\]/
 PHASE = /  (cb1 encode\+commit|expert io await|cb2 encode\+commit|gpu layer cbs|gpu head cbs|gpu routed cbs|gpu shared cbs):\s+([0-9.]+) ms(?: over (\d+) cbs)?/
 EXPERT_IO = /  routed expert (reads|bytes|cache hits|cache misses):\s+(\d+)/
 MAX_RSS = /\s*(\d+)\s+maximum resident set size/
@@ -33,6 +33,11 @@ def median(values)
   sorted = values.sort
   middle = sorted.length / 2
   sorted.length.odd? ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2.0
+end
+
+def per_generated_token(row, key)
+  generated = row.fetch("generated_tokens")
+  generated.zero? ? 0.0 : row.fetch(key).to_f / generated
 end
 
 def capture(*command)
@@ -135,7 +140,10 @@ def parse_measurement(stderr, block_size)
         "minimum_block_tokens" => spec[15].to_i,
         "maximum_block_tokens" => spec[16].to_i,
         "fallback_decodes" => spec[17].to_i,
-        "adaptive_disabled" => spec[18] == "true"
+        "fast_boundary_check_ms" => spec[18]&.to_f || 0.0,
+        "fast_boundary_checks" => spec[19]&.to_i || 0,
+        "fast_boundary_rejects" => spec[20]&.to_i || 0,
+        "adaptive_disabled" => (spec[21] || spec[18]) == "true"
       }
     else
       nil
@@ -185,7 +193,11 @@ rescue RuntimeError
 end
 
 def summarize(measurements)
-  spec_rows = measurements.map { |row| row["speculative"] }.compact
+  spec_pairs = measurements.filter_map do |row|
+    spec = row["speculative"]
+    spec ? [row, spec] : nil
+  end
+  spec_rows = spec_pairs.map(&:last)
   {
     "prompt_tokens" => measurements.first.fetch("prompt_tokens"),
     "generated_tokens" => measurements.map { |row| row.fetch("generated_tokens") },
@@ -198,6 +210,10 @@ def summarize(measurements)
     "median_routed_expert_bytes" => median(measurements.map { |row| row.fetch("routed_expert_bytes") }),
     "median_routed_expert_cache_hits" => median(measurements.map { |row| row.fetch("routed_expert_cache_hits") }),
     "median_routed_expert_cache_misses" => median(measurements.map { |row| row.fetch("routed_expert_cache_misses") }),
+    "median_routed_expert_reads_per_generated_token" => median(
+      measurements.map { |row| per_generated_token(row, "routed_expert_reads") }),
+    "median_routed_expert_bytes_per_generated_token" => median(
+      measurements.map { |row| per_generated_token(row, "routed_expert_bytes") }),
     "median_speculative" => if spec_rows.empty?
       nil
     else
@@ -216,6 +232,24 @@ def summarize(measurements)
         "verification_expert_cache_hits" => median(spec_rows.map { |row| row.fetch("verification_expert_cache_hits") }),
         "verification_expert_cache_misses" => median(spec_rows.map { |row| row.fetch("verification_expert_cache_misses") }),
         "verification_command_buffers" => median(spec_rows.map { |row| row.fetch("verification_command_buffers") }),
+        "fast_boundary_check_ms" => median(spec_rows.map { |row| row.fetch("fast_boundary_check_ms", 0.0) }),
+        "fast_boundary_checks" => median(spec_rows.map { |row| row.fetch("fast_boundary_checks", 0) }),
+        "fast_boundary_rejects" => median(spec_rows.map { |row| row.fetch("fast_boundary_rejects", 0) }),
+        "verification_tokens_per_generated_token" => median(
+          spec_pairs.map do |row, spec|
+            generated = row.fetch("generated_tokens")
+            generated.zero? ? 0.0 : spec.fetch("verification_tokens").to_f / generated
+          end),
+        "verification_expert_reads_per_generated_token" => median(
+          spec_pairs.map do |row, spec|
+            generated = row.fetch("generated_tokens")
+            generated.zero? ? 0.0 : spec.fetch("verification_expert_reads").to_f / generated
+          end),
+        "verification_expert_bytes_per_generated_token" => median(
+          spec_pairs.map do |row, spec|
+            generated = row.fetch("generated_tokens")
+            generated.zero? ? 0.0 : spec.fetch("verification_expert_bytes").to_f / generated
+          end),
         "minimum_block_tokens" => median(spec_rows.map { |row| row.fetch("minimum_block_tokens") }),
         "maximum_block_tokens" => median(spec_rows.map { |row| row.fetch("maximum_block_tokens") }),
         "fallback_decodes" => median(spec_rows.map { |row| row.fetch("fallback_decodes") }),
@@ -234,8 +268,8 @@ def write_markdown(path, report)
     "Each condition has one warmup and repeated fresh-process measurements; medians are reported.",
     "The baseline is scalar greedy decode. Speculative conditions use the prompt-lookup drafter.",
     "",
-    "| Model | Prompt | Condition | Prompt tokens | Decode tok/s | vs baseline | Decode s | Peak RSS MiB | Acceptance | Verify ms | Total expert reads | Total expert bytes |",
-    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    "| Model | Prompt | Condition | Prompt tokens | Decode tok/s | vs baseline | Decode s | Peak RSS MiB | Acceptance | Verify ms | Expert reads/token | Expert MiB/token | Total expert reads | Total expert bytes |",
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
   ]
   report.fetch("models").each do |model, prompts|
     prompts.each do |prompt_name, conditions|
@@ -244,7 +278,7 @@ def write_markdown(path, report)
         summary = detail.fetch("summary")
         spec = summary["median_speculative"]
         lines << format(
-          "| %s | %s | %s | %d | %.3f | %.3f | %.1f | %s | %s | %s | %s |",
+          "| %s | %s | %s | %d | %.3f | %.3f | %.1f | %s | %s | %s | %.2f | %.2f | %s | %s |",
           model,
           prompt_name,
           label,
@@ -255,6 +289,8 @@ def write_markdown(path, report)
           summary.fetch("median_peak_rss_bytes") / 1_048_576.0,
           spec ? format("%.3f", spec.fetch("acceptance_rate")) : "n/a",
           spec ? format("%.2f", spec.fetch("verification_ms")) : "n/a",
+          summary.fetch("median_routed_expert_reads_per_generated_token"),
+          summary.fetch("median_routed_expert_bytes_per_generated_token") / 1_048_576.0,
           summary.fetch("median_routed_expert_reads"),
           summary.fetch("median_routed_expert_bytes")
         )

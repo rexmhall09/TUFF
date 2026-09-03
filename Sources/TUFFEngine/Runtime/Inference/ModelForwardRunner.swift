@@ -5,7 +5,8 @@ import Metal
 /// BF16/MXFP4 layer graph after the model has passed normal load validation.
 public final class ModelForwardRunner: ChunkedPrefillRunner,
     MultimodalPrefillRunner, ContextWindowReporting, EpilogueFusingLogitProducer,
-    ContinuableLogitProducer, SpeculativeVerificationRunner, GreedyHeadReporting,
+    ContinuableLogitProducer, SpeculativeVerificationRunner,
+    SpeculativeTargetCostReporting, GreedyHeadReporting,
     @unchecked Sendable {
     private enum Backend {
         case affine(RealForwardRunner)
@@ -73,6 +74,15 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         switch backend {
         case .affine(let runner): try runner.commitSpeculativePrefix(count)
         case .gptOss(let runner): try runner.commitSpeculativePrefix(count)
+        }
+    }
+
+    public func speculativeBoundaryToken() async throws -> Int32? {
+        switch backend {
+        case .affine(let runner):
+            return try await runner.speculativeBoundaryToken()
+        case .gptOss(let runner):
+            return try await runner.speculativeBoundaryToken()
         }
     }
 

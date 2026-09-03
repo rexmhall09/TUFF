@@ -768,6 +768,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 expertCacheMisses: speculativeExpertCacheMisses))
     }
 
+    public func speculativeBoundaryToken() async throws -> Int32? {
+        guard supportsSpeculativeVerification else { return nil }
+        return Int32(bitPattern: lastGreedyToken)
+    }
+
     private func recordSpeculativeFetch(layer: Int,
                                         fetch: PrefillStreamedTileFetchResult) {
         guard collectingSpeculativeMetrics else { return }
