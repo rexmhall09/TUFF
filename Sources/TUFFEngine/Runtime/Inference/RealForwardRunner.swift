@@ -235,6 +235,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private var prefillScratch: PrefillChunkScratchBuffers?
     private var speculativeStartPosition: Int?
     private var speculativeProcessedTokens = 0
+    private var collectingSpeculativeMetrics = false
+    private var speculativeExpertReads: UInt64 = 0
+    private var speculativeExpertBytes: UInt64 = 0
+    private var speculativeExpertCacheHits: UInt64 = 0
+    private var speculativeExpertCacheMisses: UInt64 = 0
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -696,6 +701,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 "speculative verification could not allocate bounded prefill scratch")
         }
 
+        speculativeExpertReads = 0
+        speculativeExpertBytes = 0
+        speculativeExpertCacheHits = 0
+        speculativeExpertCacheMisses = 0
+        collectingSpeculativeMetrics = true
+        defer { collectingSpeculativeMetrics = false }
+
         let candidatePointer = speculativeTokenBuffer
             .contents().assumingMemoryBound(to: UInt32.self)
         for (index, token) in tokens.enumerated() {
@@ -739,7 +751,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             targetTokenIDs: targetTokens,
             processedTokens: tokens.count,
             newPosition: startPosition + tokens.count,
-            metrics: SpeculativeVerificationMetrics(wallNanos: wallNanos))
+            metrics: SpeculativeVerificationMetrics(
+                wallNanos: wallNanos,
+                expertReads: speculativeExpertReads,
+                expertBytes: speculativeExpertBytes,
+                expertCacheHits: speculativeExpertCacheHits,
+                expertCacheMisses: speculativeExpertCacheMisses))
+    }
+
+    private func recordSpeculativeFetch(layer: Int,
+                                        fetch: PrefillStreamedTileFetchResult) {
+        guard collectingSpeculativeMetrics else { return }
+        let misses = fetch.usedPlannedFetch
+            ? fetch.plannedMissSlots.count
+            : fetch.expertIDs.count
+        let hits = fetch.usedPlannedFetch ? fetch.plannedHits : 0
+        speculativeExpertReads &+= UInt64(misses)
+        speculativeExpertCacheMisses &+= UInt64(misses)
+        speculativeExpertCacheHits &+= UInt64(hits)
+        if let bytes = try? model.routedExpertAdviceByteEstimate(
+            layer: layer, missCount: misses) {
+            speculativeExpertBytes &+= bytes
+        }
     }
 
     public func commitSpeculativePrefix(_ count: Int) throws {
@@ -2071,6 +2104,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             routes: routes,
                             plannedFetch: plannedFetch,
                             avoidingSlots: Set(pendingTiles.flatMap(\.fetch.plannedAssignedSlots)))
+                        recordSpeculativeFetch(layer: L, fetch: fetch)
                         try fetch.binding.validateCoversPairs(routes.sortedPairs,
                                                               pairStart: Int(tile.pairStart),
                                                               pairCount: Int(tile.pairCount))

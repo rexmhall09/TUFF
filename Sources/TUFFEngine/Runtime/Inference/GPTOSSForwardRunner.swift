@@ -54,6 +54,11 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private var lastLogitsBuffer: MTLBuffer?
     private var speculativeStartPosition: Int?
     private var speculativeProcessedTokens = 0
+    private var collectingSpeculativeMetrics = false
+    private var speculativeExpertReads: UInt64 = 0
+    private var speculativeExpertBytes: UInt64 = 0
+    private var speculativeExpertCacheHits: UInt64 = 0
+    private var speculativeExpertCacheMisses: UInt64 = 0
 
     let maxContext: Int
     /// Decode-phase totals only, matching `RealForwardRunner` and what
@@ -227,6 +232,13 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 "GPT-OSS has no target logits at the current boundary")
         }
 
+        speculativeExpertReads = 0
+        speculativeExpertBytes = 0
+        speculativeExpertCacheHits = 0
+        speculativeExpertCacheMisses = 0
+        collectingSpeculativeMetrics = true
+        defer { collectingSpeculativeMetrics = false }
+
         let boundaryToken = try currentGreedyToken(from: currentLogits)
         let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         do {
@@ -258,7 +270,25 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             targetTokenIDs: targetTokens,
             processedTokens: tokens.count,
             newPosition: startPosition + tokens.count,
-            metrics: SpeculativeVerificationMetrics(wallNanos: wallNanos))
+            metrics: SpeculativeVerificationMetrics(
+                wallNanos: wallNanos,
+                expertReads: speculativeExpertReads,
+                expertBytes: speculativeExpertBytes,
+                expertCacheHits: speculativeExpertCacheHits,
+                expertCacheMisses: speculativeExpertCacheMisses))
+    }
+
+    private func recordSpeculativeFetch(layer: Int,
+                                        plan: RoutedExpertFetchPlan?) {
+        guard collectingSpeculativeMetrics, let plan else { return }
+        let misses = plan.misses.count
+        speculativeExpertReads &+= UInt64(misses)
+        speculativeExpertCacheMisses &+= UInt64(misses)
+        speculativeExpertCacheHits &+= UInt64(plan.hits)
+        if let bytes = try? model.routedExpertAdviceByteEstimate(
+            layer: layer, missCount: misses) {
+            speculativeExpertBytes &+= bytes
+        }
     }
 
     func commitSpeculativePrefix(_ count: Int) throws {
@@ -527,8 +557,16 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             let groupEnd = min(orderedExperts.count, groupStart + groupSize)
             let expertIDs = Array(orderedExperts[groupStart..<groupEnd])
             prefillExpertGroupCount += 1
-            let blobs = try await model.fetchRoutedExperts(
+            let plannedFetch = try model.planRoutedExperts(
                 layer: layer, experts: expertIDs)
+            recordSpeculativeFetch(layer: layer, plan: plannedFetch)
+            let blobs: [TensorView]
+            if let plannedFetch {
+                blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+            } else {
+                blobs = try await model.fetchRoutedExperts(
+                    layer: layer, experts: expertIDs)
+            }
             var blobByExpert: [Int: TensorView] = [:]
             for (expert, blob) in zip(expertIDs, blobs) {
                 blobByExpert[expert] = blob

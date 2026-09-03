@@ -79,10 +79,34 @@ import TUFFEngine
             "--expert-cache-policy", "--prefill", "--prefill-chunk-tokens",
             "--rdadvise", "--help",
             "--chat-prompt", "--image", "--vision-pack", "--vision-residency",
+            "--speculative", "--speculative-draft-tokens",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })
         #expect(options == expected)
+    }
+
+    @Test func speculativeOptionsAreOptInAndBounded() throws {
+        let defaults = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        #expect(defaults.speculativeMode == .off)
+        #expect(defaults.speculativeDraftTokens == 4)
+
+        let arguments = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--speculative", "greedy", "--speculative-draft-tokens", "8",
+        ])
+        #expect(arguments.speculativeMode == .greedy)
+        #expect(arguments.speculativeDraftTokens == 8)
+
+        for value in ["0", "9"] {
+            #expect(throws: ArgsError.invalidValue(
+                flag: "--speculative-draft-tokens", value: value)) {
+                _ = try Args.parse([
+                    "--model", "m.gturbo", "--prompt", "hi",
+                    "--speculative-draft-tokens", value,
+                ])
+            }
+        }
     }
 
     @Test func systemPromptParsesOnlyWithAChatPrompt() throws {

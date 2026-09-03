@@ -119,4 +119,47 @@ import Metal
                                  position: 3, into: output)
         #expect(runner.continuationPosition == 4)
     }
+
+    @Test func speculativeVerifierMicrobenchmark() async throws {
+        let (directory, context, _, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = logits(context)
+        let candidates: [Int32] = [9, 11, 13, 17, 19, 23, 29, 31]
+        for blockSize in [2, 4, 6, 8] {
+            var scalarNanos: [UInt64] = []
+            var blockNanos: [UInt64] = []
+            var lastMetrics = SpeculativeVerificationMetrics()
+            for _ in 0..<4 {
+                runner.reset()
+                try await runner.produce(token: 7, position: 0, into: output)
+                let scalarStart = DispatchTime.now().uptimeNanoseconds
+                for (index, candidate) in candidates.prefix(blockSize).enumerated() {
+                    try await runner.produce(token: candidate,
+                                             position: index + 1,
+                                             into: output)
+                }
+                scalarNanos.append(DispatchTime.now().uptimeNanoseconds - scalarStart)
+
+                runner.reset()
+                try await runner.produce(token: 7, position: 0, into: output)
+                let blockStart = DispatchTime.now().uptimeNanoseconds
+                let result = try await runner.verifySpeculativeBlock(
+                    tokens: Array(candidates.prefix(blockSize)),
+                    startPosition: 1,
+                    into: output)
+                try runner.commitSpeculativePrefix(blockSize)
+                blockNanos.append(DispatchTime.now().uptimeNanoseconds - blockStart)
+                lastMetrics = result.metrics
+                #expect(result.metrics.wallNanos > 0)
+            }
+            let scalarMedian = scalarNanos.sorted()[scalarNanos.count / 2]
+            let blockMedian = blockNanos.sorted()[blockNanos.count / 2]
+            let speedup = Double(scalarMedian) / Double(blockMedian)
+            print("[spec-benchmark backend=dense-gemma-toy block=\(blockSize) "
+                  + "repeats=4 scalarMedianMs=\(Double(scalarMedian) / 1e6) "
+                  + "blockMedianMs=\(Double(blockMedian) / 1e6) "
+                  + "speedup=\(speedup) expertReads=\(lastMetrics.expertReads) "
+                  + "expertBytes=\(lastMetrics.expertBytes)]")
+        }
+    }
 }

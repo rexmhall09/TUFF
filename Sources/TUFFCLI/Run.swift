@@ -130,7 +130,10 @@ public func run(args: Args,
                 repetitionPenalty: args.repetitionPenalty,
                 seed: args.seed,
                 stopStrings: args.stops,
-                extraStopTokens: [])
+                extraStopTokens: [],
+                speculative: SpeculativeDecodeConfig(
+                    mode: args.speculativeMode,
+                    draftTokens: args.speculativeDraftTokens))
         }
         // Hoisted above the `auto` estimate, which needs a device to read image
         // geometry. Planning never touches the GPU, but building the plan does
@@ -286,6 +289,9 @@ public func run(args: Args,
         }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
         let config = makeConfig(maxNewTokens: effectiveMaxNew)
+        let draftProducer: (any DraftTokenProducer)? = args.speculativeMode == .greedy
+            ? PromptLookupDraftTokenProducer()
+            : nil
         let assistantDecoder = StructuredAssistantDecoder(
             tokenizer: tokenizer, allowedTools: [],
             promptOpensThinking: StructuredAssistantDecoder.promptOpensThinking(
@@ -306,7 +312,8 @@ public func run(args: Args,
             config: config,
             context: context,
             scratch: scratch,
-            prefillConfig: runtime.prefillConfig) { progress in
+            prefillConfig: runtime.prefillConfig,
+            draftProducer: draftProducer) { progress in
                 switch progress {
                 case .prefill:
                     break
@@ -356,6 +363,28 @@ public func run(args: Args,
                 : 0
             let footer = "\n[stop=\(String(describing: stats.reason)) prefill=\(stats.prefillTokens)tok/\(String(format: "%.2f", stats.prefillSeconds))s new=\(stats.newTokens)tok decode=\(String(format: "%.2f", stats.decodeSeconds))s tok/s=\(String(format: "%.3f", tokensPerSecond))]\n"
             stderr.write(Data(footer.utf8))
+            if args.speculativeMode != .off {
+                let speculative = stats.speculative
+                let rate = String(format: "%.3f", speculative.acceptanceRate)
+                let verificationMs = String(
+                    format: "%.2f",
+                    Double(speculative.verificationWallNanos) / 1e6)
+                let draftMs = String(
+                    format: "%.2f",
+                    Double(speculative.draftWallNanos) / 1e6)
+                let expertBytes = speculative.verificationExpertBytes
+                let line = "[spec rounds=\(speculative.rounds) proposed=\(speculative.proposedTokens) "
+                    + "accepted=\(speculative.acceptedTokens) acceptance=\(rate) "
+                    + "rejected=\(speculative.rejectedTokens) corrections=\(speculative.correctionTokens) "
+                    + "verifyTokens=\(speculative.verificationTokens) "
+                    + "verifyMs=\(verificationMs) draftMs=\(draftMs) "
+                    + "verifyReads=\(speculative.verificationExpertReads) "
+                    + "verifyBytes=\(expertBytes) "
+                    + "verifyCacheHits=\(speculative.verificationExpertCacheHits) "
+                    + "verifyCacheMisses=\(speculative.verificationExpertCacheMisses) "
+                    + "fallbacks=\(speculative.normalFallbackDecodes)]\n"
+                stderr.write(Data(line.utf8))
+            }
         }
         return RunResult(exitCode: 0)
     } catch let error as ArgsError {

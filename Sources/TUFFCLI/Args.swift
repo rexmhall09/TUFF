@@ -28,6 +28,8 @@ public struct Args: Equatable, Sendable {
     /// is known, which needs the tokenizer and, for images, their geometry.
     public var prefillChunkTokensAuto: Bool
     public var rdadvisePolicy: RDAdvicePolicyMode
+    public var speculativeMode: SpeculativeDecodeMode
+    public var speculativeDraftTokens: Int
 
     public init(model: String,
                 prompt: String? = nil,
@@ -53,7 +55,9 @@ public struct Args: Equatable, Sendable {
                 prefillPolicy: RuntimePrefillPolicy = RuntimeConfiguration.production.prefillPolicy,
                 prefillChunkTokens: Int = RuntimeConfiguration.production.prefillChunkTokens,
                 prefillChunkTokensAuto: Bool = false,
-                rdadvisePolicy: RDAdvicePolicyMode = RuntimeConfiguration.production.rdadvisePolicy) {
+                rdadvisePolicy: RDAdvicePolicyMode = RuntimeConfiguration.production.rdadvisePolicy,
+                speculativeMode: SpeculativeDecodeMode = .off,
+                speculativeDraftTokens: Int = 4) {
         self.model = model
         self.prompt = prompt
         self.chatPrompt = chatPrompt
@@ -79,6 +83,8 @@ public struct Args: Equatable, Sendable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillChunkTokensAuto = prefillChunkTokensAuto
         self.rdadvisePolicy = rdadvisePolicy
+        self.speculativeMode = speculativeMode
+        self.speculativeDraftTokens = speculativeDraftTokens
     }
 }
 
@@ -155,6 +161,9 @@ extension Args {
                                  expert pool, so larger chunks read less; auto
                                  picks the smallest size that covers the prompt.
       --rdadvise <s>             Read-advice policy: off, default, bounded, or adaptive (default off).
+      --speculative <off|greedy> Enable opt-in greedy speculative decoding (default off).
+      --speculative-draft-tokens <n>
+                                Candidate block size, 1...8 (default 4).
       --help                     Show this message.
     """
 
@@ -223,6 +232,8 @@ extension Args {
         var prefillChunkTokens = runtimeDefaults.prefillChunkTokens
         var prefillChunkTokensAuto = false
         var rdadvisePolicy = runtimeDefaults.rdadvisePolicy
+        var speculativeMode: SpeculativeDecodeMode = .off
+        var speculativeDraftTokens = 4
 
         var index = 0
         while index < argv.count {
@@ -347,6 +358,18 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 rdadvisePolicy = parsed
+            case "--speculative":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = SpeculativeDecodeMode(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                speculativeMode = parsed
+            case "--speculative-draft-tokens":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = Int(value), (1...8).contains(parsed) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                speculativeDraftTokens = parsed
             default:
                 throw ArgsError.unknownFlag(flag)
             }
@@ -422,7 +445,9 @@ extension Args {
                              prefillPolicy: prefillPolicy,
                              prefillChunkTokens: prefillChunkTokens,
                              prefillChunkTokensAuto: prefillChunkTokensAuto,
-                             rdadvisePolicy: rdadvisePolicy)
+                             rdadvisePolicy: rdadvisePolicy,
+                             speculativeMode: speculativeMode,
+                             speculativeDraftTokens: speculativeDraftTokens)
         _ = try arguments.resolvedRuntimeConfiguration(forceLogitsHead: false)
         return arguments
     }
