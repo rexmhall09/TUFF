@@ -130,7 +130,7 @@ internal enum PrefillProjectionDispatchPolicy {
     }
 }
 
-public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, @unchecked Sendable {
+public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, SpeculativeVerificationRunner, @unchecked Sendable {
     private struct LayerSharedExpertProjections {
         let gate: SharedExpertInt8Proj
         let up: SharedExpertInt8Proj
@@ -211,6 +211,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
     private let moeMissActiveSlots: MTLBuffer // [topK] UInt32
     private let greedyTokenBuf: MTLBuffer // 4 B UInt32 fused-head output
+    private let speculativeTokenBuffer: MTLBuffer // bounded candidate IDs
+    private let speculativeTargetTokenBuf: MTLBuffer // one argmax per candidate row
     // Qwen 3.6 decode scratch (nil on architectures that never use it).
     private let qPackedScratch: MTLBuffer?   // [2 * N_HEADS * head_dim] packed [q ; gate]
     private let attnGateScratch: MTLBuffer?  // [N_HEADS * head_dim]
@@ -231,6 +233,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let onesPerExpertScale: MTLBuffer?
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
+    private var speculativeStartPosition: Int?
+    private var speculativeProcessedTokens = 0
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -410,6 +414,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             throw ModelError.residentBufferWrapFailed
         }
         self.greedyTokenBuf = tok
+        self.speculativeTokenBuffer = try buf(8, MemoryLayout<UInt32>.size)
+        self.speculativeTargetTokenBuf = try buf(8, MemoryLayout<UInt32>.size)
 
         // Qwen 3.6 decode scratch — allocated once here, never in the hot path.
         if cfg.attnOutputGate {
@@ -546,6 +552,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         kv?.reset()
         gdnState?.reset()
         qwenMultimodalRopeDelta = 0
+        speculativeStartPosition = nil
+        speculativeProcessedTokens = 0
         resetTransientState()
     }
 
@@ -562,6 +570,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             throw PrefillError.prefillCursorMismatch(
                 "continuation expected KV position \(expectedPosition), current \(kv.position)")
         }
+        speculativeStartPosition = nil
+        speculativeProcessedTokens = 0
         resetTransientState()
     }
 
@@ -587,6 +597,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     public private(set) var totalGPUSharedNanos: UInt64 = 0
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
+    /// The Qwen Gated-DeltaNet state is recurrent rather than rewindable KV,
+    /// so this POC advertises verification only for the fused-head affine
+    /// path without linear-attention layers.
+    public var supportsSpeculativeVerification: Bool {
+        useFusedGreedyHead && gdnState == nil
+    }
     public private(set) var totalRDAdviseNanos: UInt64 = 0
     public private(set) var totalRDAdviseCalls: UInt64 = 0
     public private(set) var totalRDAdviseBytes: UInt64 = 0
@@ -648,6 +664,95 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         case .default, .off:
             break
         }
+    }
+
+    public func verifySpeculativeBlock(tokens: [Int32],
+                                       startPosition: Int,
+                                       into logits: MTLBuffer) async throws
+        -> SpeculativeVerificationResult {
+        guard supportsSpeculativeVerification else {
+            throw PrefillError.chunkedUnsupported(
+                "speculative verification requires the fused affine head without GDN state")
+        }
+        guard (1...8).contains(tokens.count) else {
+            throw SpeculativeDecodingError.invalidBlockSize(
+                requested: tokens.count, maximum: 8)
+        }
+        guard speculativeStartPosition == nil else {
+            throw PrefillError.chunkedRunnerDirty(
+                "a speculative verification transaction is already active")
+        }
+        guard let kv, kv.position == startPosition else {
+            throw SpeculativeDecodingError.invalidStartPosition(
+                expected: kv?.position ?? 0, actual: startPosition)
+        }
+        guard tokens.allSatisfy({ $0 >= 0 && Int($0) < cfg.vocabSize }) else {
+            throw GeneratorError.invalidGenerationConfig(
+                "speculative token is outside the model vocabulary")
+        }
+        guard let scratch = try? ensurePrefillScratch(
+            config: .production(chunkTokens: 32)) else {
+            throw PrefillError.chunkedUnsupported(
+                "speculative verification could not allocate bounded prefill scratch")
+        }
+
+        let candidatePointer = speculativeTokenBuffer
+            .contents().assumingMemoryBound(to: UInt32.self)
+        for (index, token) in tokens.enumerated() {
+            candidatePointer[index] = UInt32(bitPattern: token)
+        }
+        let boundaryToken = lastGreedyToken
+        let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        do {
+            try await executePrefillChunk(
+                tokens: tokens[...],
+                startPosition: startPosition,
+                outputMode: .greedyIfAvailable,
+                logits: logits,
+                scratch: scratch,
+                config: .production(chunkTokens: 32),
+                writeFinalHead: true,
+                speculativeTargetTokens: speculativeTargetTokenBuf,
+                tokenBufferOverride: speculativeTokenBuffer)
+        } catch {
+            // The chunk path marks itself dirty before dispatching layers. A
+            // failed/cancelled verification must restore both logical state
+            // and the reusable prefill scratch state before propagating.
+            kv.rewind(to: startPosition)
+            prefillChunkState.markCommitted()
+            throw error
+        }
+        let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start
+
+        let targetPointer = speculativeTargetTokenBuf
+            .contents().assumingMemoryBound(to: UInt32.self)
+        var targetTokens = [Int32(bitPattern: boundaryToken)]
+        targetTokens.reserveCapacity(tokens.count + 1)
+        for index in 0..<tokens.count {
+            targetTokens.append(Int32(bitPattern: targetPointer[index]))
+        }
+        speculativeStartPosition = startPosition
+        speculativeProcessedTokens = tokens.count
+        return SpeculativeVerificationResult(
+            startPosition: startPosition,
+            proposedTokenIDs: tokens,
+            targetTokenIDs: targetTokens,
+            processedTokens: tokens.count,
+            newPosition: startPosition + tokens.count,
+            metrics: SpeculativeVerificationMetrics(wallNanos: wallNanos))
+    }
+
+    public func commitSpeculativePrefix(_ count: Int) throws {
+        guard let start = speculativeStartPosition else {
+            throw SpeculativeDecodingError.noActiveTransaction
+        }
+        guard (0...speculativeProcessedTokens).contains(count) else {
+            throw SpeculativeDecodingError.invalidCommitCount(
+                requested: count, processed: speculativeProcessedTokens)
+        }
+        kv?.rewind(to: start + count)
+        speculativeStartPosition = nil
+        speculativeProcessedTokens = 0
     }
 
     public func produce(token: Int32, position: Int, into logits: MTLBuffer,
@@ -865,7 +970,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      writeFinalHead: Bool,
                                      embeddingOverride: MTLBuffer? = nil,
                                      bidirectionalBlock: Range<Int>? = nil,
-                                     positionIDs: MultimodalPositionIDs? = nil) async throws {
+                                     positionIDs: MultimodalPositionIDs? = nil,
+                                     speculativeTargetTokens: MTLBuffer? = nil,
+                                     tokenBufferOverride: MTLBuffer? = nil) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires FP16 KV")
@@ -972,10 +1079,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
 
         let tokenIDs = tokens.map { UInt32(bitPattern: $0) }
-        guard let tokenBuffer = ctx.device.makeBuffer(bytes: tokenIDs,
-                                                      length: tokenIDs.count * MemoryLayout<UInt32>.stride,
-                                                      options: .storageModeShared) else {
-            throw ModelError.residentBufferWrapFailed
+        let tokenBuffer: MTLBuffer
+        if let tokenBufferOverride {
+            guard tokenBufferOverride.length
+                >= tokenIDs.count * MemoryLayout<UInt32>.stride else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            tokenIDs.withUnsafeBytes { bytes in
+                if let baseAddress = bytes.baseAddress {
+                    memcpy(tokenBufferOverride.contents(), baseAddress, bytes.count)
+                }
+            }
+            tokenBuffer = tokenBufferOverride
+        } else {
+            guard let allocated = ctx.device.makeBuffer(
+                bytes: tokenIDs,
+                length: tokenIDs.count * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            tokenBuffer = allocated
         }
         let mropeBuffers: (temporal: MTLBuffer, height: MTLBuffer, width: MTLBuffer)?
         if let positionIDs {
@@ -2061,7 +2184,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             guard let finalCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
-            if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+            if let speculativeTargetTokens {
+                fusionHead.encodeGreedyDecodeRows(
+                    commandBuffer: finalCB,
+                    hidden: scratch.hidden,
+                    hiddenStride: D,
+                    rowCount: t,
+                    normWeight: finalNorm.buffer,
+                    normOffset: Int(finalNorm.offset),
+                    weights: lm.buffer,
+                    weightsOffset: Int(lm.offset),
+                    scales: lm.buffer,
+                    scalesOffset: Int(lm.scaleOffset),
+                    biases: lm.buffer,
+                    biasesOffset: Int(lm.biasOffset),
+                    outTokens: speculativeTargetTokens,
+                    d: UInt32(D),
+                    vocab: UInt32(cfg.vocabSize),
+                    rmsEps: eps)
+            } else if outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 fusionHead.encodeGreedyDecode(
                     commandBuffer: finalCB,
                     hidden: scratch.hidden,
@@ -2098,7 +2239,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             }
             finalCB.commit()
             try waitForCompletion(finalCB)
-            if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+            if speculativeTargetTokens == nil,
+               outputMode == .greedyIfAvailable, useFusedGreedyHead {
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             }
         }

@@ -6,7 +6,7 @@ import Metal
 /// groups routes by expert, and reads each selected expert once per layer and
 /// chunk instead of once per token.
 final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
-    ContinuableLogitProducer, @unchecked Sendable {
+    ContinuableLogitProducer, SpeculativeVerificationRunner, @unchecked Sendable {
     private static let prefillQueryCapacity =
         GPTOSSExpertScratchLayout.maximumPrefillQueries
     private struct LayerViews {
@@ -33,6 +33,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private let layers: [LayerViews]
 
     private let bf16: BF16GEMV
+    private let argmax: FP16Argmax
     private let rms: RMSNorm
     private let rope: RoPE
     private let attention: Attention
@@ -48,6 +49,11 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private let routerLogits: MTLBuffer
     private let routedIndices: MTLBuffer
     private let expertScratch: GPTOSSExpertScratchBuffers
+    private let speculativeTargetTokenBuffer: MTLBuffer
+    private let speculativeHeadLogits: MTLBuffer
+    private var lastLogitsBuffer: MTLBuffer?
+    private var speculativeStartPosition: Int?
+    private var speculativeProcessedTokens = 0
 
     let maxContext: Int
     /// Decode-phase totals only, matching `RealForwardRunner` and what
@@ -93,6 +99,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             maxPrefillChunkTokens: PrefillRuntimeConfig.maxChunkTokens)
 
         bf16 = try BF16GEMV(context: context)
+        argmax = try FP16Argmax(context: context)
         rms = try RMSNorm(context: context)
         rope = try RoPE(context: context)
         attention = try Attention(context: context)
@@ -154,6 +161,12 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         routedIndices = try sharedBuffer(elements: queryCapacity * config.topKExperts,
                                          stride: MemoryLayout<UInt32>.stride,
                                          label: "gptoss.routedIndices")
+        speculativeTargetTokenBuffer = try sharedBuffer(
+            elements: 8, stride: MemoryLayout<UInt32>.stride,
+            label: "gptoss.speculativeTargets")
+        speculativeHeadLogits = try sharedBuffer(
+            elements: config.vocabSize, stride: MemoryLayout<Float16>.stride,
+            label: "gptoss.speculativeHeadLogits")
         expertScratch = try GPTOSSExpertScratchBuffers.allocate(
             device: context.device,
             layout: GPTOSSExpertScratchLayout(
@@ -165,6 +178,9 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
 
     func reset() {
         kv.reset()
+        lastLogitsBuffer = nil
+        speculativeStartPosition = nil
+        speculativeProcessedTokens = 0
     }
 
     var continuationPosition: Int { kv.position }
@@ -174,11 +190,89 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             throw PrefillError.prefillCursorMismatch(
                 "GPT-OSS continuation expected KV position \(expectedPosition), current \(kv.position)")
         }
+        lastLogitsBuffer = nil
+        speculativeStartPosition = nil
+        speculativeProcessedTokens = 0
     }
+
+    var supportsSpeculativeVerification: Bool { true }
 
     func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws {
         try await executeToken(token: token, position: position,
                                emitHead: true, logits: logits)
+    }
+
+    func verifySpeculativeBlock(tokens: [Int32],
+                                startPosition: Int,
+                                into logits: MTLBuffer) async throws
+        -> SpeculativeVerificationResult {
+        guard (1...8).contains(tokens.count) else {
+            throw SpeculativeDecodingError.invalidBlockSize(
+                requested: tokens.count, maximum: 8)
+        }
+        guard speculativeStartPosition == nil else {
+            throw PrefillError.chunkedRunnerDirty(
+                "a speculative verification transaction is already active")
+        }
+        guard kv.position == startPosition else {
+            throw SpeculativeDecodingError.invalidStartPosition(
+                expected: kv.position, actual: startPosition)
+        }
+        guard tokens.allSatisfy({ $0 >= 0 && Int($0) < config.vocabSize }) else {
+            throw GeneratorError.invalidGenerationConfig(
+                "speculative token is outside the model vocabulary")
+        }
+        guard let currentLogits = lastLogitsBuffer else {
+            throw PrefillError.chunkedUnsupported(
+                "GPT-OSS has no target logits at the current boundary")
+        }
+
+        let boundaryToken = try currentGreedyToken(from: currentLogits)
+        let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        do {
+            try await executePrefillChunk(
+                tokens: tokens[...],
+                startPosition: startPosition,
+                emitHead: true,
+                logits: logits,
+                speculativeTargetTokens: speculativeTargetTokenBuffer)
+        } catch {
+            kv.rewind(to: startPosition)
+            speculativeStartPosition = nil
+            speculativeProcessedTokens = 0
+            throw error
+        }
+        let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start
+        let targetPointer = speculativeTargetTokenBuffer
+            .contents().assumingMemoryBound(to: UInt32.self)
+        var targetTokens = [boundaryToken]
+        targetTokens.reserveCapacity(tokens.count + 1)
+        for index in 0..<tokens.count {
+            targetTokens.append(Int32(bitPattern: targetPointer[index]))
+        }
+        speculativeStartPosition = startPosition
+        speculativeProcessedTokens = tokens.count
+        return SpeculativeVerificationResult(
+            startPosition: startPosition,
+            proposedTokenIDs: tokens,
+            targetTokenIDs: targetTokens,
+            processedTokens: tokens.count,
+            newPosition: startPosition + tokens.count,
+            metrics: SpeculativeVerificationMetrics(wallNanos: wallNanos))
+    }
+
+    func commitSpeculativePrefix(_ count: Int) throws {
+        guard let start = speculativeStartPosition else {
+            throw SpeculativeDecodingError.noActiveTransaction
+        }
+        guard (0...speculativeProcessedTokens).contains(count) else {
+            throw SpeculativeDecodingError.invalidCommitCount(
+                requested: count, processed: speculativeProcessedTokens)
+        }
+        kv.rewind(to: start + count)
+        speculativeStartPosition = nil
+        speculativeProcessedTokens = 0
+        lastLogitsBuffer = nil
     }
 
     func prefillChunked(tokens: ArraySlice<Int32>,
@@ -230,7 +324,9 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private func executePrefillChunk(tokens: ArraySlice<Int32>,
                                      startPosition: Int,
                                      emitHead: Bool,
-                                     logits: MTLBuffer) async throws {
+                                     logits: MTLBuffer,
+                                     speculativeTargetTokens: MTLBuffer? = nil)
+        async throws {
         let queryCount = tokens.count
         guard queryCount > 0, queryCount <= Self.prefillQueryCapacity else {
             throw PrefillError.chunkedUnsupported(
@@ -266,11 +362,21 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         for _ in 0..<queryCount { kv.advance() }
 
         if emitHead {
-            try executeHead(
-                hiddenOffset: (queryCount - 1) * config.hiddenSize * floatBytes,
-                normedOffset: (queryCount - 1) * config.hiddenSize
-                    * MemoryLayout<Float16>.stride,
-                logits: logits)
+            if let speculativeTargetTokens {
+                try executeHeadRows(
+                    hiddenOffset: 0,
+                    normedOffset: 0,
+                    hiddenStride: config.hiddenSize * floatBytes,
+                    normedStride: config.hiddenSize * MemoryLayout<Float16>.stride,
+                    rowCount: queryCount,
+                    outputTokens: speculativeTargetTokens)
+            } else {
+                try executeHead(
+                    hiddenOffset: (queryCount - 1) * config.hiddenSize * floatBytes,
+                    normedOffset: (queryCount - 1) * config.hiddenSize
+                        * MemoryLayout<Float16>.stride,
+                    logits: logits)
+            }
         }
     }
 
@@ -519,7 +625,60 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                         columns: config.hiddenSize)
         headCB.commit()
         try waitForCompletion(headCB)
+        lastLogitsBuffer = logits
         totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - headStart
+    }
+
+    private func executeHeadRows(hiddenOffset: Int,
+                                 normedOffset: Int,
+                                 hiddenStride: Int,
+                                 normedStride: Int,
+                                 rowCount: Int,
+                                 outputTokens: MTLBuffer) throws {
+        precondition((1...Self.prefillQueryCapacity).contains(rowCount))
+        let headStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let headCB = context.queue.makeCommandBuffer()!
+        for row in 0..<rowCount {
+            rms.encodeFloatBF16W(
+                commandBuffer: headCB,
+                x: hidden,
+                xOffset: hiddenOffset + row * hiddenStride,
+                weight: model.finalNorm.buffer,
+                weightOffset: Int(model.finalNorm.offset),
+                out: normed,
+                outOffset: normedOffset + row * normedStride,
+                d: UInt32(config.hiddenSize),
+                eps: 1e-5)
+            bf16.encodeHalf(
+                commandBuffer: headCB,
+                weights: model.lmHead,
+                input: normed,
+                inputOffset: normedOffset + row * normedStride,
+                output: speculativeHeadLogits,
+                rows: config.vocabSize,
+                columns: config.hiddenSize)
+            argmax.encode(
+                commandBuffer: headCB,
+                values: speculativeHeadLogits,
+                count: config.vocabSize,
+                output: outputTokens,
+                outputOffset: row * MemoryLayout<UInt32>.stride)
+        }
+        headCB.commit()
+        try waitForCompletion(headCB)
+        totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - headStart
+    }
+
+    private func currentGreedyToken(from logits: MTLBuffer) throws -> Int32 {
+        let cb = context.queue.makeCommandBuffer()!
+        argmax.encode(commandBuffer: cb,
+                      values: logits,
+                      count: config.vocabSize,
+                      output: speculativeTargetTokenBuffer)
+        cb.commit()
+        try waitForCompletion(cb)
+        return Int32(bitPattern: speculativeTargetTokenBuffer.contents()
+            .assumingMemoryBound(to: UInt32.self)[0])
     }
 
     private func executeLayer(_ layer: Int, position: Int) async throws {

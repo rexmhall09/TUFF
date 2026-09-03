@@ -5,7 +5,8 @@ import Metal
 /// BF16/MXFP4 layer graph after the model has passed normal load validation.
 public final class ModelForwardRunner: ChunkedPrefillRunner,
     MultimodalPrefillRunner, ContextWindowReporting, EpilogueFusingLogitProducer,
-    ContinuableLogitProducer, GreedyHeadReporting, @unchecked Sendable {
+    ContinuableLogitProducer, SpeculativeVerificationRunner, GreedyHeadReporting,
+    @unchecked Sendable {
     private enum Backend {
         case affine(RealForwardRunner)
         case gptOss(GPTOSSForwardRunner)
@@ -44,6 +45,34 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
             try await runner.produce(token: token, position: position, into: logits)
         case .gptOss(let runner):
             try await runner.produce(token: token, position: position, into: logits)
+        }
+    }
+
+    public var supportsSpeculativeVerification: Bool {
+        switch backend {
+        case .affine(let runner): return runner.supportsSpeculativeVerification
+        case .gptOss(let runner): return runner.supportsSpeculativeVerification
+        }
+    }
+
+    public func verifySpeculativeBlock(tokens: [Int32],
+                                       startPosition: Int,
+                                       into logits: MTLBuffer) async throws
+        -> SpeculativeVerificationResult {
+        switch backend {
+        case .affine(let runner):
+            return try await runner.verifySpeculativeBlock(
+                tokens: tokens, startPosition: startPosition, into: logits)
+        case .gptOss(let runner):
+            return try await runner.verifySpeculativeBlock(
+                tokens: tokens, startPosition: startPosition, into: logits)
+        }
+    }
+
+    public func commitSpeculativePrefix(_ count: Int) throws {
+        switch backend {
+        case .affine(let runner): try runner.commitSpeculativePrefix(count)
+        case .gptOss(let runner): try runner.commitSpeculativePrefix(count)
         }
     }
 

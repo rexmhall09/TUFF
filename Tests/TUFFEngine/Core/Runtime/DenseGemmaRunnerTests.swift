@@ -79,4 +79,44 @@ import Metal
         try await runner.produce(token: 9, position: 1, into: output)
         #expect(runner.lastGreedyToken == reference)
     }
+
+    @Test func speculativeBlockMatchesScalarArgmaxAndCommitsAllRows() async throws {
+        let (directory, context, _, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = logits(context)
+        try await runner.produce(token: 7, position: 0, into: output)
+        let boundary = Int32(bitPattern: runner.lastGreedyToken)
+        let candidates: [Int32] = [9, 11, 13, 17]
+        var scalarTargets = [boundary]
+        for (index, candidate) in candidates.enumerated() {
+            try await runner.produce(token: candidate,
+                                     position: index + 1,
+                                     into: output)
+            scalarTargets.append(Int32(bitPattern: runner.lastGreedyToken))
+        }
+
+        runner.reset()
+        try await runner.produce(token: 7, position: 0, into: output)
+        let result = try await runner.verifySpeculativeBlock(
+            tokens: candidates, startPosition: 1, into: output)
+        #expect(result.targetTokenIDs == scalarTargets)
+        #expect(runner.continuationPosition == 5)
+        try runner.commitSpeculativePrefix(candidates.count)
+        #expect(runner.continuationPosition == 5)
+    }
+
+    @Test func speculativeRollbackLeavesAUsableKVBoundary() async throws {
+        let (directory, context, _, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = logits(context)
+        try await runner.produce(token: 7, position: 0, into: output)
+        let candidates: [Int32] = [9, 11, 13, 17]
+        let result = try await runner.verifySpeculativeBlock(
+            tokens: candidates, startPosition: 1, into: output)
+        try runner.commitSpeculativePrefix(2)
+        #expect(runner.continuationPosition == 3)
+        try await runner.produce(token: result.targetTokenIDs[2],
+                                 position: 3, into: output)
+        #expect(runner.continuationPosition == 4)
+    }
 }

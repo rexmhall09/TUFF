@@ -39,6 +39,7 @@ import Metal
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect(runner.maxContext == 64)
         #expect(runner.usesFusedGreedyHead)
+        #expect(!runner.supportsSpeculativeVerification)
     }
 
     @Test func runnerRejectsCacheSmallerThanRoutedTopK() throws {

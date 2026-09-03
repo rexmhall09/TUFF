@@ -20,6 +20,58 @@ using namespace metal;
 constant constexpr uint kLogitMaxSimdGroups = 8;
 constant constexpr float kSampleTopMaxK     = 256.0f;  // cap for top-k mask scan
 
+// One bounded reduction for a vocabulary row. The Swift wrapper uses this
+// between ordered head projections in a single command buffer, so a verifier
+// can retain only token IDs rather than blockSize * vocab logits on the CPU.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void argmax_fp16(
+    device const half* values [[buffer(0)]],
+    device uint* out_token [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint lid [[thread_position_in_threadgroup]],
+    uint lsize [[threads_per_threadgroup]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]],
+    uint simdgroups [[simdgroups_per_threadgroup]])
+{
+    threadgroup float partialValue[kLogitMaxSimdGroups];
+    threadgroup uint partialIndex[kLogitMaxSimdGroups];
+
+    float bestValue = -INFINITY;
+    uint bestIndex = 0xFFFFFFFFu;
+    for (uint i = lid; i < count; i += lsize) {
+        const float value = float(values[i]);
+        if (value > bestValue ||
+            (value == bestValue && i < bestIndex)) {
+            bestValue = value;
+            bestIndex = i;
+        }
+    }
+
+    const float simdValue = simd_max(bestValue);
+    const uint simdIndex = (bestValue == simdValue)
+        ? bestIndex : 0xFFFFFFFFu;
+    const uint simdIndexMin = simd_min(simdIndex);
+    if (simd_lane_id == 0) {
+        partialValue[simd_group_id] = simdValue;
+        partialIndex[simd_group_id] = simdIndexMin;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group_id == 0) {
+        const bool active = simd_lane_id < simdgroups;
+        const float value = active ? partialValue[simd_lane_id] : -INFINITY;
+        const uint index = active ? partialIndex[simd_lane_id] : 0xFFFFFFFFu;
+        const float allValue = simd_max(value);
+        const uint allIndex = (value == allValue)
+            ? index : 0xFFFFFFFFu;
+        const uint allIndexMin = simd_min(allIndex);
+        if (simd_lane_id == 0) {
+            out_token[0] = allIndexMin;
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------
 // K8: logit_softcap_softmax
 //
@@ -785,6 +837,114 @@ void lm_head_greedy_int4_rows_reduce(
         i_all = simd_min(i_all);
         if (simd_lane_id == 0) {
             out_token[0] = (i_all == 0xFFFFFFFFu) ? 0u : i_all;
+        }
+    }
+}
+
+// Block variant of the fused head. `tg_idx.y` selects a hidden row while the
+// x dimension still partitions the vocabulary rows. Every row gets its own
+// summary range, so all candidate argmaxes stay on the GPU.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void lm_head_greedy_int4_block_rows_raw(
+    device const half*    x_normed     [[buffer(0)]],
+    device const uint8_t* W            [[buffer(1)]],
+    device const bfloat*  scales       [[buffer(2)]],
+    device const bfloat*  biases       [[buffer(3)]],
+    device       float*   summaries    [[buffer(4)]],
+    constant     uint&    D            [[buffer(5)]],
+    constant     uint&    V            [[buffer(6)]],
+    constant     uint&    row_count    [[buffer(7)]],
+    uint3 tg_idx         [[threadgroup_position_in_grid]],
+    uint  simd_lane_id   [[thread_index_in_simdgroup]],
+    uint  simd_group_id  [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups     [[simdgroups_per_threadgroup]])
+{
+    threadgroup float partial_v[kLogitMaxSimdGroups];
+    threadgroup uint partial_i[kLogitMaxSimdGroups];
+    const uint DD = lmhead_fc_d(D);
+    const uint VV = lmhead_fc_v(V);
+    const uint batch = tg_idx.y;
+    const uint row = tg_idx.x * kLMHeadRowsPerTG + simd_group_id;
+    float best_v = -INFINITY;
+    uint best_i = 0xFFFFFFFFu;
+
+    if (batch < row_count && row < VV) {
+        device const half* x = x_normed + batch * DD;
+        float z = lmhead_int4_gemv_row_simd_dev(
+            W, scales, biases, x, row, DD, simd_lane_id);
+        if (simd_lane_id == 0 && isfinite(z)) {
+            best_v = z;
+            best_i = row;
+        }
+    }
+
+    if (simd_lane_id == 0) {
+        partial_v[simd_group_id] = best_v;
+        partial_i[simd_group_id] = best_i;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_group_id == 0) {
+        const bool active = simd_lane_id < simdgroups;
+        const float v = active ? partial_v[simd_lane_id] : -INFINITY;
+        const uint idx = active ? partial_i[simd_lane_id] : 0xFFFFFFFFu;
+        const float v_all = simd_max(v);
+        uint i_all = (v == v_all) ? idx : 0xFFFFFFFFu;
+        i_all = simd_min(i_all);
+        if (simd_lane_id == 0) {
+            device float* slot = summaries
+                + (batch * ((VV + kLMHeadRowsPerTG - 1) / kLMHeadRowsPerTG)
+                   + tg_idx.x) * kLMHeadRowSummaryStride;
+            slot[0] = v_all;
+            slot[1] = as_type<float>(i_all);
+        }
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void lm_head_greedy_int4_block_rows_reduce(
+    device const float* summaries    [[buffer(0)]],
+    device       uint* out_tokens    [[buffer(1)]],
+    constant     uint& row_groups   [[buffer(2)]],
+    uint batch            [[threadgroup_position_in_grid]],
+    uint lid              [[thread_position_in_threadgroup]],
+    uint lsize            [[threads_per_threadgroup]],
+    uint simd_lane_id     [[thread_index_in_simdgroup]],
+    uint simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint simdgroups       [[simdgroups_per_threadgroup]])
+{
+    threadgroup float partial_v[kLogitMaxSimdGroups];
+    threadgroup uint partial_i[kLogitMaxSimdGroups];
+    const device float* base = summaries + batch * row_groups
+        * kLMHeadRowSummaryStride;
+    float best_v = -INFINITY;
+    uint best_i = 0xFFFFFFFFu;
+    for (uint i = lid; i < row_groups; i += lsize) {
+        const device float* slot = base + i * kLMHeadRowSummaryStride;
+        const float v = slot[0];
+        const uint idx = as_type<uint>(slot[1]);
+        if (v > best_v || (v == best_v && idx < best_i)) {
+            best_v = v;
+            best_i = idx;
+        }
+    }
+    const float v_simd = simd_max(best_v);
+    const uint i_simd = simd_min(
+        (best_v == v_simd) ? best_i : 0xFFFFFFFFu);
+    if (simd_lane_id == 0) {
+        partial_v[simd_group_id] = v_simd;
+        partial_i[simd_group_id] = i_simd;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group_id == 0) {
+        const bool active = simd_lane_id < simdgroups;
+        const float v = active ? partial_v[simd_lane_id] : -INFINITY;
+        const uint idx = active ? partial_i[simd_lane_id] : 0xFFFFFFFFu;
+        const float v_all = simd_max(v);
+        const uint i_all = simd_min(
+            (v == v_all) ? idx : 0xFFFFFFFFu);
+        if (simd_lane_id == 0) {
+            out_tokens[batch] = i_all == 0xFFFFFFFFu ? 0u : i_all;
         }
     }
 }

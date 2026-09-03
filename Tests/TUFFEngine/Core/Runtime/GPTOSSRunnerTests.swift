@@ -342,4 +342,49 @@ private enum GPTOSSToyCPUReference {
         }
         #expect(actualToken == referenceToken)
     }
+
+    @Test func speculativeBlockMatchesScalarLogitArgmaxAndCommitsAllRows() async throws {
+        let (directory, context, _, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = try logits(context)
+        try await runner.produce(token: 7, position: 0, into: output)
+        let candidates: [Int32] = [3, 11, 19, 29]
+        var outputValues = values(output)
+        var scalarTargets = [Int32(outputValues.indices.max {
+            outputValues[$0] < outputValues[$1]
+        }!)]
+        for (index, candidate) in candidates.enumerated() {
+            try await runner.produce(token: candidate,
+                                     position: index + 1,
+                                     into: output)
+            outputValues = values(output)
+            scalarTargets.append(Int32(outputValues.indices.max {
+                outputValues[$0] < outputValues[$1]
+            }!))
+        }
+
+        runner.reset()
+        try await runner.produce(token: 7, position: 0, into: output)
+        let result = try await runner.verifySpeculativeBlock(
+            tokens: candidates, startPosition: 1, into: output)
+        #expect(result.targetTokenIDs == scalarTargets)
+        #expect(runner.continuationPosition == 5)
+        try runner.commitSpeculativePrefix(candidates.count)
+        #expect(runner.continuationPosition == 5)
+    }
+
+    @Test func speculativeRollbackLeavesGPTOSSKVAtAcceptedBoundary() async throws {
+        let (directory, context, _, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = try logits(context)
+        try await runner.produce(token: 7, position: 0, into: output)
+        let candidates: [Int32] = [3, 11, 19, 29]
+        let result = try await runner.verifySpeculativeBlock(
+            tokens: candidates, startPosition: 1, into: output)
+        try runner.commitSpeculativePrefix(2)
+        #expect(runner.continuationPosition == 3)
+        try await runner.produce(token: result.targetTokenIDs[2],
+                                 position: 3, into: output)
+        #expect(runner.continuationPosition == 4)
+    }
 }

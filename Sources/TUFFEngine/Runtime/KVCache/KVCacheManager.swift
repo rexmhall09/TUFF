@@ -283,6 +283,16 @@ public final class KVCacheManager {
         position += count
     }
 
+    /// Rewind only the logical cursor after a bounded speculative write. The
+    /// physical K/V tail is intentionally left in place: attention is bounded
+    /// by `position`, and the next committed write overwrites that tail. This
+    /// keeps rollback O(1) and preserves ring-buffer geometry.
+    public func rewind(to target: Int) {
+        precondition(target >= 0 && target <= position,
+                     "KV rewind target must be within the current logical range")
+        position = target
+    }
+
     /// Drop all cached positions and return physical pages to the OS.
     ///
     /// No buffer zeroing — the attention kernels read only `[0, validTokenCount]`,

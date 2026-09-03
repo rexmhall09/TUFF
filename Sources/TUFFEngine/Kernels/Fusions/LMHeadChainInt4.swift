@@ -17,14 +17,21 @@ final class LMHeadChainInt4 {
     private let rowGreedy: MTLComputePipelineState
     private let rowGreedySpecialized: MTLComputePipelineState
     private let rowReducer: MTLComputePipelineState
+    private let blockRowGreedy: MTLComputePipelineState
+    private let blockRowGreedySpecialized: MTLComputePipelineState
+    private let blockRowReducer: MTLComputePipelineState
     private let xNormedBuffer: MTLBuffer
     private let rowSummariesBuffer: MTLBuffer
+    private let blockXNormedBuffer: MTLBuffer
+    private let blockRowSummariesBuffer: MTLBuffer
     private let maxD: Int
     private let maxVocab: Int
+    private let maxRows: Int
 
     init(context: MetalContext,
          maxD: Int = 2816,
-         maxVocab: Int = 262144) throws {
+         maxVocab: Int = 262144,
+         maxRows: Int = 8) throws {
         self.rms = try RMSNorm(context: context)
         self.rowGreedy = try context.pipeline("lm_head_greedy_int4_rows_chunk_raw")
         self.specializedD = UInt32(maxD)
@@ -37,8 +44,20 @@ final class LMHeadChainInt4 {
                 MetalFunctionConstant(index: 13, value: .bool(true)),
             ])
         self.rowReducer = try context.pipeline("lm_head_greedy_int4_rows_reduce")
+        self.blockRowGreedy = try context.pipeline(
+            "lm_head_greedy_int4_block_rows_raw")
+        self.blockRowGreedySpecialized = try context.pipeline(
+            "lm_head_greedy_int4_block_rows_raw",
+            constants: [
+                MetalFunctionConstant(index: 10, value: .uint32(UInt32(maxD))),
+                MetalFunctionConstant(index: 11, value: .uint32(UInt32(maxVocab))),
+                MetalFunctionConstant(index: 13, value: .bool(true)),
+            ])
+        self.blockRowReducer = try context.pipeline(
+            "lm_head_greedy_int4_block_rows_reduce")
         self.maxD = maxD
         self.maxVocab = maxVocab
+        self.maxRows = maxRows
 
         let rowGroups = (maxVocab + Self.rowsPerThreadgroup - 1) / Self.rowsPerThreadgroup
         let xLength = max(maxD, 1) * MemoryLayout<Float16>.size
@@ -53,6 +72,16 @@ final class LMHeadChainInt4 {
         }
         self.xNormedBuffer = xNormedBuffer
         self.rowSummariesBuffer = rowSummariesBuffer
+        guard let blockXNormedBuffer = context.device.makeBuffer(
+                  length: max(maxRows, 1) * xLength,
+                  options: .storageModePrivate),
+              let blockRowSummariesBuffer = context.device.makeBuffer(
+                  length: max(maxRows, 1) * summaryLength,
+                  options: .storageModePrivate) else {
+            throw MetalError.noDevice
+        }
+        self.blockXNormedBuffer = blockXNormedBuffer
+        self.blockRowSummariesBuffer = blockRowSummariesBuffer
     }
 
     func encodeGreedyDecode(commandBuffer: MTLCommandBuffer,
@@ -122,6 +151,86 @@ final class LMHeadChainInt4 {
 
             let threadgroupSize = MTLSize(width: 256, height: 1, depth: 1)
             encoder.dispatchThreads(threadgroupSize, threadsPerThreadgroup: threadgroupSize)
+            encoder.endEncoding()
+        }
+    }
+
+    /// Fused final norm plus one argmax per hidden row. The projections are
+    /// ordered in one command buffer and the only shared result is one token ID
+    /// per row. This is the affine-target verifier's bounded N+1 prediction
+    /// representation; it does not materialize block-sized vocab logits.
+    func encodeGreedyDecodeRows(commandBuffer: MTLCommandBuffer,
+                                hidden: MTLBuffer,
+                                hiddenOffset: Int = 0,
+                                hiddenStride: Int,
+                                rowCount: Int,
+                                normWeight: MTLBuffer,
+                                normOffset: Int = 0,
+                                weights: MTLBuffer,
+                                weightsOffset: Int = 0,
+                                scales: MTLBuffer,
+                                scalesOffset: Int = 0,
+                                biases: MTLBuffer,
+                                biasesOffset: Int = 0,
+                                outTokens: MTLBuffer,
+                                d: UInt32,
+                                vocab: UInt32,
+                                rmsEps: Float = 1e-6) {
+        precondition(rowCount > 0 && rowCount <= maxRows,
+                     "rowCount exceeds speculative head capacity")
+        precondition(Int(d) <= maxD, "d exceeds wrapper maxD")
+        precondition(Int(vocab) <= maxVocab, "vocab exceeds wrapper maxVocab")
+        precondition(hiddenOffset >= 0 && hiddenStride >= Int(d))
+        precondition(Int(d) % Quantization.groupSize == 0)
+        precondition(weightsOffset % 2 == 0)
+
+        for row in 0..<rowCount {
+            rms.encodeBF16W(commandBuffer: commandBuffer,
+                            x: hidden,
+                            xOffset: hiddenOffset
+                                + row * hiddenStride * MemoryLayout<Float16>.stride,
+                            weight: normWeight,
+                            weightOffset: normOffset,
+                            out: blockXNormedBuffer,
+                            outOffset: row * maxD * MemoryLayout<Float16>.stride,
+                            d: d,
+                            eps: rmsEps)
+        }
+
+        let rowGroups = (Int(vocab) + Self.rowsPerThreadgroup - 1)
+            / Self.rowsPerThreadgroup
+        if let encoder = commandBuffer.makeComputeCommandEncoder() {
+            let specialized = d == specializedD && vocab == specializedVocab
+            encoder.setComputePipelineState(
+                specialized ? blockRowGreedySpecialized : blockRowGreedy)
+            encoder.setBuffer(blockXNormedBuffer, offset: 0, index: 0)
+            encoder.setBuffer(weights, offset: weightsOffset, index: 1)
+            encoder.setBuffer(scales, offset: scalesOffset, index: 2)
+            encoder.setBuffer(biases, offset: biasesOffset, index: 3)
+            encoder.setBuffer(blockRowSummariesBuffer, offset: 0, index: 4)
+            var dValue = d
+            var vocabValue = vocab
+            var rowCountValue = UInt32(rowCount)
+            encoder.setBytes(&dValue, length: MemoryLayout<UInt32>.size, index: 5)
+            encoder.setBytes(&vocabValue, length: MemoryLayout<UInt32>.size, index: 6)
+            encoder.setBytes(&rowCountValue,
+                             length: MemoryLayout<UInt32>.size, index: 7)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: rowGroups, height: rowCount, depth: 1),
+                threadsPerThreadgroup: MTLSize(
+                    width: 32 * Self.rowsPerThreadgroup, height: 1, depth: 1))
+            encoder.endEncoding()
+        }
+
+        if let encoder = commandBuffer.makeComputeCommandEncoder() {
+            encoder.setComputePipelineState(blockRowReducer)
+            encoder.setBuffer(blockRowSummariesBuffer, offset: 0, index: 0)
+            encoder.setBuffer(outTokens, offset: 0, index: 1)
+            var rowGroupCount = UInt32(rowGroups)
+            encoder.setBytes(&rowGroupCount, length: MemoryLayout<UInt32>.size, index: 2)
+            encoder.dispatchThreadgroups(
+                MTLSize(width: rowCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
             encoder.endEncoding()
         }
     }
