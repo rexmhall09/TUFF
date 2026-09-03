@@ -58,10 +58,11 @@ def system_report
 end
 
 def command_for(model_path, prompt, block_size, max_new, max_context)
+  gpt_oss = File.basename(model_path).start_with?("gpt-oss-")
   command = [
     "/usr/bin/time", "-l", CLI,
     "--model", model_path,
-    "--prompt", prompt,
+    gpt_oss ? "--chat-prompt" : "--prompt", prompt,
     "--max-new", max_new.to_s,
     "--max-context", max_context.to_s,
     "--temperature", "0",
@@ -72,6 +73,7 @@ def command_for(model_path, prompt, block_size, max_new, max_context)
     "--prefill-chunk-tokens", "128",
     "--rdadvise", "off"
   ]
+  command.insert(7, "--reasoning", "low") if gpt_oss
   if block_size
     command += ["--speculative", "greedy", "--speculative-draft-tokens", block_size.to_s]
   end
@@ -137,7 +139,7 @@ def run_once(output_dir, model, prompt_name, label, command, block_size)
   File.binwrite("#{prefix}.stderr.txt", stderr)
   raise "#{model} #{prompt_name} #{label} exited #{status.exitstatus}" unless status.success?
   measurement = parse_measurement(stderr, block_size)
-  unless %w[endOfTurn eos].include?(measurement.fetch("stop_reason"))
+  unless %w[endOfTurn eos maxTokens].include?(measurement.fetch("stop_reason"))
     raise "#{model} #{prompt_name} #{label} stopped with #{measurement.fetch("stop_reason")}"
   end
   measurement.merge(
@@ -156,7 +158,7 @@ def existing_run(output_dir, model, prompt_name, label, command, block_size)
   return nil unless [command_path, stdout_path, stderr_path].all? { |path| File.file?(path) }
   return nil unless File.read(command_path).strip == Shellwords.join(command)
   measurement = parse_measurement(File.read(stderr_path), block_size)
-  return nil unless %w[endOfTurn eos].include?(measurement.fetch("stop_reason"))
+  return nil unless %w[endOfTurn eos maxTokens].include?(measurement.fetch("stop_reason"))
   measurement.merge(
     "label" => label,
     "command" => Shellwords.join(command),
@@ -168,7 +170,7 @@ rescue RuntimeError
 end
 
 def summarize(measurements)
-  spec_rows = measurements.filter_map { |row| row["speculative"] }
+  spec_rows = measurements.map { |row| row["speculative"] }.compact
   {
     "prompt_tokens" => measurements.first.fetch("prompt_tokens"),
     "generated_tokens" => measurements.map { |row| row.fetch("generated_tokens") },
@@ -240,6 +242,7 @@ end
 options = {
   resident: nil,
   streamed: nil,
+  prompt_names: [],
   warmups: 1,
   runs: 3,
   max_new: 128,
@@ -253,6 +256,7 @@ OptionParser.new do |parser|
   parser.banner = "Usage: Scripts/benchmark_speculative.rb --resident-model PATH --streamed-model PATH [options]"
   parser.on("--resident-model PATH", "Resident control model directory") { |path| options[:resident] = File.expand_path(path) }
   parser.on("--streamed-model PATH", "SSD-streamed MoE model directory") { |path| options[:streamed] = File.expand_path(path) }
+  parser.on("--prompt NAME", "Run only this prompt fixture (repeatable)") { |name| options[:prompt_names] << name }
   parser.on("--warmups N", Integer, "Warmups per condition (default 1)") { |n| options[:warmups] = n }
   parser.on("--runs N", Integer, "Measured runs per condition (default 3)") { |n| options[:runs] = n }
   parser.on("--max-new N", Integer, "Generated-token cap (default 128)") { |n| options[:max_new] = n }
@@ -268,10 +272,15 @@ abort "--max-new must be positive" if options[:max_new] < 1
 abort "--max-context must be positive" if options[:max_context] < 1
 
 models = { "resident" => options[:resident], "streamed" => options[:streamed] }.compact
+unknown_prompts = options[:prompt_names] - PROMPTS.keys
+abort "unknown prompt: #{unknown_prompts.join(", ")}" unless unknown_prompts.empty?
+selected_prompts = options[:prompt_names].empty? ? PROMPTS : PROMPTS.select {
+  |name, _path| options[:prompt_names].include?(name)
+}
 if options[:plan]
   models = { "resident" => options[:resident] || "<resident-model>", "streamed" => options[:streamed] || "<streamed-model>" }
   models.each do |model, path|
-    PROMPTS.each do |prompt_name, prompt_path|
+    selected_prompts.each do |prompt_name, prompt_path|
       BLOCKS.each do |block_size|
         prompt = File.read(prompt_path).strip
         puts Shellwords.join(command_for(path, prompt, block_size, options[:max_new], options[:max_context]))
@@ -286,7 +295,7 @@ abort "release CLI is missing; run swift build -c release --product TUFFCLI" unl
 models.each do |model, path|
   abort "#{model} model is missing: #{path}" unless File.directory?(path)
 end
-PROMPTS.each_value { |path| abort "benchmark prompt is missing: #{path}" unless File.file?(path) }
+selected_prompts.each_value { |path| abort "benchmark prompt is missing: #{path}" unless File.file?(path) }
 
 protocol = {
   "warmups_per_condition" => options[:warmups],
@@ -294,7 +303,7 @@ protocol = {
   "max_new_tokens" => options[:max_new],
   "max_context_tokens" => options[:max_context],
   "blocks" => BLOCKS.map { |value| value || "baseline" },
-  "prompts" => PROMPTS.keys
+  "prompts" => selected_prompts.keys
 }
 results_path = File.join(options[:output], "results.json")
 if options[:resume]
@@ -313,7 +322,7 @@ File.write(File.join(options[:output], "system.json"), JSON.pretty_generate(repo
 
 models.each do |model, model_path|
   report["models"][model] ||= {}
-  PROMPTS.each do |prompt_name, prompt_path|
+  selected_prompts.each do |prompt_name, prompt_path|
     prompt = File.read(prompt_path).strip
     report["models"][model][prompt_name] ||= {}
     BLOCKS.each do |block_size|

@@ -77,8 +77,9 @@ the same number of scalar target calls. Results are recorded with the current
 commit and binary identity so resumed measurements cannot mix revisions. The
 POC reports expert-cache-plan misses, estimated expert bytes, hits, and misses
 inside verification; exact Metal command-buffer/GPU counters remain
-unavailable. The supplied real-model harness has not run in this checkout
-because no `.gturbo` model directories are installed.
+unavailable. A live repetitive-prompt smoke slice has now run against the
+installed Gemma E4B and GPT-OSS 20B bundles; the full four-prompt slice remains
+available through the benchmark's `--prompt` filter and resumable output.
 
 ## AngelSpec / DFly boundary
 

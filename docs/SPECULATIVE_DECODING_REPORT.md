@@ -1,6 +1,6 @@
 # TUFF speculative decoding proof of concept
 
-Date: 2026-09-02
+Date: 2026-09-03
 Recommendation: **KEEP EXPERIMENTAL**
 
 Measurement checkout: `346d8c26e8d53e03c795fb2d83c85aae71afa3e2`
@@ -73,14 +73,24 @@ in 240 suites in 643.8 seconds.
 
 ## Measurements
 
-The current checkout contains no installed `.gturbo` directories, so the
-resident-control versus SSD-streamed-model end-to-end matrix was not run. The
-reproducible harness is [Scripts/benchmark_speculative.rb](../Scripts/benchmark_speculative.rb)
-and requires explicit `--resident-model PATH` and `--streamed-model PATH`
-arguments. It runs baseline plus blocks 2/4/6/8 over repetitive, normal prose,
-code-continuation, and long-context prompts, with fresh-process repeats,
-medians, output-equivalence checks, commit hash, CLI SHA-256, peak RSS, phase
-timings, acceptance, verification time, and verification expert-I/O fields.
+Installed bundles were found in the TUFF app support directory rather than the
+repository. A live TPS smoke matrix was run on the MacBook Air (M2, 16 GB)
+using `gemma4-e4b.gturbo` as the resident control and `gpt-oss-20b.gturbo` as
+the SSD-streamed MoE target. It used the repetitive fixture, `max-new 16`, one
+warmup, and three measured fresh-process runs for baseline plus blocks 2/4/6/8.
+The raw result directory is
+`benchmark-results/speculative-tps-repetitive-m2-20260902/` (ignored by Git),
+with [summary.md](../benchmark-results/speculative-tps-repetitive-m2-20260902/summary.md)
+and `results.json` preserving every run. GPT-OSS uses Harmony chat mode in the
+harness; Gemma uses raw completion mode.
+
+The full four-prompt matrix remains available through
+[Scripts/benchmark_speculative.rb](../Scripts/benchmark_speculative.rb). The
+`--prompt NAME` filter was added so long-running streamed targets can be
+measured in bounded, resumable slices. Every condition still records fresh
+process repeats, medians, output-equivalence checks, commit hash, CLI SHA-256,
+peak RSS, phase timings, acceptance, verification time, and verification
+expert-I/O fields.
 
 The available Metal toy fixtures provide a verifier-only measurement on this
 MacBook Air (M2, 16 GB), Swift 6.3.3, macOS 26.6.2. These are not representative
@@ -109,6 +119,43 @@ The verifier reports expert cache-plan misses, estimated physical expert bytes,
 hits, and misses per block when the model backend exposes them. Exact Metal
 command-buffer and GPU-counter values remain unavailable in this POC and are
 reported as unavailable by the benchmark rather than inferred.
+
+### Live TPS smoke result
+
+The table below reports medians of three measured runs after one warmup. Decode
+TPS excludes model load and prefill. All runs generated the capped 16 tokens,
+and the benchmark compared speculative stdout with the baseline before saving
+each condition.
+
+| Model | Condition | Decode tok/s | vs baseline | Acceptance | Verify ms | Verify reads | Verify bytes | Expert-I/O wait ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Gemma E4B resident | baseline | 4.220 | 1.000x | n/a | n/a | n/a | n/a | 0.0 |
+| Gemma E4B resident | block 2 | 4.955 | 1.174x | 0.909 | 2,227.84 | 0 | 0 | 0.0 |
+| Gemma E4B resident | block 4 | 3.828 | 0.907x | 0.923 | 3,350.36 | 0 | 0 | 0.0 |
+| Gemma E4B resident | block 6 | 4.471 | 1.059x | 0.929 | 3,130.25 | 0 | 0 | 0.0 |
+| Gemma E4B resident | block 8 | 4.427 | 1.049x | 0.933 | 3,400.57 | 0 | 0 | 0.0 |
+| GPT-OSS 20B streamed | baseline | 1.208 | 1.000x | n/a | n/a | n/a | n/a | 2,810.8 |
+| GPT-OSS 20B streamed | block 2 | 1.103 | 0.913x | 0.250 | 5,304.61 | 122 | 1,615,069,184 | 1,926.0 |
+| GPT-OSS 20B streamed | block 4 | 0.405 | 0.335x | 0.273 | 16,598.24 | 143 | 1,893,072,896 | 3,989.6 |
+| GPT-OSS 20B streamed | block 6 | 0.730 | 0.604x | 0.200 | 11,245.84 | 173 | 2,290,221,056 | 2,156.1 |
+| GPT-OSS 20B streamed | block 8 | 0.707 | 0.585x | 0.167 | 12,645.98 | 184 | 2,435,842,048 | 1,987.3 |
+
+For the streamed target, the verification-byte estimates correspond to about
+96.3, 112.9, 136.6, and 145.2 MiB per emitted token for blocks 2, 4, 6, and 8
+respectively. The normal scalar footer does not yet expose its per-fetch byte
+count, so these are verification-only byte totals; the phase-level expert-I/O
+wait is the directly comparable whole-decode signal. On this run every
+speculative GPT-OSS condition was slower than baseline, and prompt lookup
+acceptance fell as the block grew. The resident result is within normal run
+noise: block 2 was 17.4% faster, while blocks 4/6/8 varied from 9.3% slower to
+5.9% faster.
+
+This is an early negative result for the current drafter/runtime combination,
+not evidence that a trained drafter is impossible. It does show that the
+present verifier does not amortize GPT-OSS expert work enough at the observed
+acceptance rates; a future drafter must have much higher acceptance and the
+verifier needs total-run I/O accounting before training investment is
+justified.
 
 ## Known limitations
 
@@ -168,20 +215,20 @@ feature-space drafter:
    drafter version, target architecture, hidden taps, block size, quantization,
    and memory estimate.
 
-The next experiment should install a qualified resident control and a streamed
-GPT-OSS or Gemma MoE model, run the supplied matrix, and inspect verification
-expert bytes per emitted token. If block verification is materially cheaper and
-the prompt-lookup acceptance is low, that is the point to train a DFly-style
-drafter. If verification does not reduce streamed target work, a trained
-drafter is unlikely to fix the core bottleneck.
+The next experiment should run the remaining prompt fixtures on the installed
+models, add total scalar-versus-speculative expert-byte accounting, and repeat
+the streamed cases with a prompt-lookup hit rate intentionally near 1.0. If
+block verification remains slower even with high acceptance, a trained
+DFly-style drafter is unlikely to fix the core bottleneck.
 
 ## Recommendation
 
-**KEEP EXPERIMENTAL —** the architecture is correct and the toy block verifier
-is promising, but the decisive SSD-streamed measurements and real acceptance
-rates are not available in this checkout. Do not enable it by default or invest
-in DFly training until the real-model benchmark reports target work and expert
-bytes per emitted token.
+**KEEP EXPERIMENTAL —** the architecture is correct and the live verifier now
+has real-model evidence, but the current prompt-lookup drafter made GPT-OSS
+20B slower at every tested block size: 0.913x, 0.335x, 0.604x, and 0.585x of
+baseline TPS for blocks 2/4/6/8. Do not enable it by default or invest in DFly
+training until the remaining prompt workloads and total target I/O accounting
+show that high-acceptance blocks can reduce streamed work.
 
 ## Files changed
 
@@ -216,7 +263,7 @@ bytes per emitted token.
 - Add transactional Qwen GDN state before enabling that target.
 - Implement and test standard speculative rejection sampling before allowing
   any non-greedy configuration.
-- Add a real-model benchmark result artifact after model installation; keep
-  commit and CLI hashes alongside every run.
+- Add the remaining real-model prompt slices and a total scalar/speculative
+  expert-byte counter; keep commit and CLI hashes alongside every run.
 - Revisit the block head to avoid serial per-row vocabulary GEMVs if profiling
   shows the head dominates verification.
