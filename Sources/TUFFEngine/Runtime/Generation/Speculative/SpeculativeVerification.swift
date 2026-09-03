@@ -69,12 +69,21 @@ public struct SpeculativeVerificationResult: Sendable, Equatable {
 /// only the accepted prefix logically, while physical tail bytes may be reused
 /// by the next correction token.
 public protocol SpeculativeVerificationRunner: LogitProducer {
+    /// Backends with additional mutable state can conform while remaining
+    /// disabled until they implement a complete transaction. Qwen3.6's GDN
+    /// state is the first example.
+    var supportsSpeculativeVerification: Bool { get }
+
     func verifySpeculativeBlock(tokens: [Int32],
                                 startPosition: Int,
                                 into logits: MTLBuffer) async throws
         -> SpeculativeVerificationResult
 
     func commitSpeculativePrefix(_ count: Int) throws
+}
+
+public extension SpeculativeVerificationRunner {
+    var supportsSpeculativeVerification: Bool { true }
 }
 
 /// The first POC's greedy acceptance rule. For a mismatch, the target token at

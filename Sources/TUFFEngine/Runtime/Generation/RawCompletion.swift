@@ -28,6 +28,56 @@ public struct RawDecodeResult: Sendable {
     public let kvPosition: Int
     public let kvBackedTokenIDs: [Int32]
     public let uncommittedBoundaryTokenIDs: [Int32]
+    public let speculative: SpeculativeDecodeMetrics
+
+    public init(prefillTokens: Int,
+                cachedPromptTokens: Int,
+                computedPrefillTokens: Int,
+                prefillSeconds: Double,
+                newTokens: Int,
+                decodeSeconds: Double,
+                reason: StopReason,
+                kvPosition: Int,
+                kvBackedTokenIDs: [Int32],
+                uncommittedBoundaryTokenIDs: [Int32],
+                speculative: SpeculativeDecodeMetrics = .init()) {
+        self.prefillTokens = prefillTokens
+        self.cachedPromptTokens = cachedPromptTokens
+        self.computedPrefillTokens = computedPrefillTokens
+        self.prefillSeconds = prefillSeconds
+        self.newTokens = newTokens
+        self.decodeSeconds = decodeSeconds
+        self.reason = reason
+        self.kvPosition = kvPosition
+        self.kvBackedTokenIDs = kvBackedTokenIDs
+        self.uncommittedBoundaryTokenIDs = uncommittedBoundaryTokenIDs
+        self.speculative = speculative
+    }
+
+    /// Compatibility overload retained for callers that do not consume
+    /// speculative metrics.
+    public init(prefillTokens: Int,
+                cachedPromptTokens: Int,
+                computedPrefillTokens: Int,
+                prefillSeconds: Double,
+                newTokens: Int,
+                decodeSeconds: Double,
+                reason: StopReason,
+                kvPosition: Int,
+                kvBackedTokenIDs: [Int32],
+                uncommittedBoundaryTokenIDs: [Int32]) {
+        self.init(prefillTokens: prefillTokens,
+                  cachedPromptTokens: cachedPromptTokens,
+                  computedPrefillTokens: computedPrefillTokens,
+                  prefillSeconds: prefillSeconds,
+                  newTokens: newTokens,
+                  decodeSeconds: decodeSeconds,
+                  reason: reason,
+                  kvPosition: kvPosition,
+                  kvBackedTokenIDs: kvBackedTokenIDs,
+                  uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs,
+                  speculative: .init())
+    }
 }
 
 /// Preallocated per-generation buffers (two 512 KiB vocab buffers plus a token
@@ -95,6 +145,7 @@ public func runRawCompletion(producer: any LogitProducer,
                              scratch: RawCompletionScratch,
                              prefillConfig: PrefillRuntimeConfig = .defaultChunked,
                              start: RawCompletionStart = .reset,
+                             draftProducer: (any DraftTokenProducer)? = nil,
                              shouldStop: () -> Bool = { false },
                              onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
     try config.validate()
@@ -239,6 +290,17 @@ public func runRawCompletion(producer: any LogitProducer,
         ? producer as? any EpilogueFusingLogitProducer
         : nil
     var fusedTokenReady = false
+    let speculativeVerifier = producer as? any SpeculativeVerificationRunner
+    let speculativeEnabled = config.speculative.isEnabled
+        && config.isPureGreedy
+        && multimodalInput == nil
+        && draftProducer != nil
+        && speculativeVerifier?.supportsSpeculativeVerification == true
+    let speculativeDecoder = SpeculativeDecoder(
+        maximumBlockTokens: min(config.speculative.draftTokens, 8))
+    if speculativeEnabled {
+        draftProducer?.reset()
+    }
 
     let decodeStart = Date()
     let prefillSeconds = decodeStart.timeIntervalSince(prefillStart)
@@ -246,28 +308,26 @@ public func runRawCompletion(producer: any LogitProducer,
     var generated = 0
     var reason: StopReason = .maxTokens
     var uncommittedBoundaryTokenIDs: [Int32] = []
+    var speculativeRounds = 0
+    var speculativeProposedTokens = 0
+    var speculativeAcceptedTokens = 0
+    var speculativeRejectedTokens = 0
+    var speculativeCorrectionTokens = 0
+    var speculativeVerificationBlocks = 0
+    var speculativeVerificationTokens = 0
+    var speculativeVerificationWallNanos: UInt64 = 0
+    var speculativeVerificationCommandBuffers: UInt64 = 0
+    var speculativeVerificationExpertReads: UInt64 = 0
+    var speculativeVerificationExpertBytes: UInt64 = 0
+    var speculativeVerificationExpertCacheHits: UInt64 = 0
+    var speculativeVerificationExpertCacheMisses: UInt64 = 0
+    var speculativeDraftWallNanos: UInt64 = 0
+    var speculativeFallbackDecodes = 0
 
-    while true {
-        try Task.checkCancellation()
-
-        let tokenID: Int32
-        if generated == 0, let seed = prefillSeed {
-            switch seed {
-            case .greedyToken(let token):
-                tokenID = Int32(bitPattern: token)
-            case .logitsWritten:
-                tokenID = try sampleOnce(scratch: scratch, context: context,
-                                         history: history, config: config, position: generated)
-            }
-        } else if fusedGreedy {
-            tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
-        } else if fusedTokenReady {
-            // The previous token's command buffer already ran the sampler.
-            tokenID = Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
-        } else {
-            tokenID = try sampleOnce(scratch: scratch, context: context,
-                                     history: history, config: config, position: generated)
-        }
+    /// Apply exactly the existing visible-token semantics without advancing
+    /// target state. A false result means the token is the uncommitted boundary
+    /// for EOS/EOT/tool, stop string, cancellation, or max-token termination.
+    func emitToken(_ tokenID: Int32) -> Bool {
         generated += 1
         uncommittedBoundaryTokenIDs = [tokenID]
 
@@ -281,7 +341,7 @@ public func runRawCompletion(producer: any LogitProducer,
             }
             let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
             if !tail.isEmpty { onProgress(.tail(tail)) }
-            break
+            return false
         }
 
         let delta = detok.push(tokenID)
@@ -289,9 +349,7 @@ public func runRawCompletion(producer: any LogitProducer,
         onProgress(.token(index: generated - 1, id: tokenID, delta: visible))
 
         // Cancellation is not a stop-string match: reporting it as one made a
-        // user pressing Stop indistinguishable from a configured stop string,
-        // and `stopStringFiltered` is computed from `isStopped` rather than the
-        // reason, so the two disagreed about the same run.
+        // user pressing Stop indistinguishable from a configured stop string.
         let hitStopString = stopMatcher.isStopped
         let cancelled = !hitStopString && shouldStop()
         let hitMax = generated >= config.maxNewTokens
@@ -299,15 +357,20 @@ public func runRawCompletion(producer: any LogitProducer,
             let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
             if !tail.isEmpty { onProgress(.tail(tail)) }
             reason = hitStopString ? .stopString : (cancelled ? .cancelled : .maxTokens)
-            break
+            return false
         }
 
         history.append(tokenID)
+        return true
+    }
+
+    /// Advance target state after a token has been made visible and committed
+    /// to history. This is shared by the scalar path and the correction/bonus
+    /// token after a speculative block.
+    func advanceAfterCommittedToken(_ tokenID: Int32) async throws {
+        prefillSeed = nil
         fusedTokenReady = false
         if !fusedGreedy, let epilogueProducer {
-            // `generated` here equals the `position` the next iteration's
-            // sampler would use for its per-position seed, and `history` is
-            // already the list that sampler would see.
             let samplerPosition = generated
             fusedTokenReady = try await epilogueProducer.produce(
                 token: tokenID, position: position, into: scratch.logits
@@ -325,6 +388,131 @@ public func runRawCompletion(producer: any LogitProducer,
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
     }
 
+    func nextScalarToken() throws -> Int32 {
+        if generated == 0, let seed = prefillSeed {
+            switch seed {
+            case .greedyToken(let token):
+                return Int32(bitPattern: token)
+            case .logitsWritten:
+                return try sampleOnce(scratch: scratch, context: context,
+                                      history: history, config: config, position: generated)
+            }
+        } else if fusedGreedy {
+            return Int32(bitPattern: fusedRunner!.lastGreedyToken)
+        } else if fusedTokenReady {
+            // The previous token's command buffer already ran the sampler.
+            return Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
+        } else {
+            return try sampleOnce(scratch: scratch, context: context,
+                                  history: history, config: config, position: generated)
+        }
+    }
+
+    while true {
+        try Task.checkCancellation()
+
+        if speculativeEnabled,
+           generated < config.maxNewTokens,
+           let draftProducer,
+           let speculativeVerifier {
+            let remaining = config.maxNewTokens - generated
+            let draftStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let proposal = try await draftProducer.propose(
+                history: history,
+                maxTokens: min(config.speculative.draftTokens, remaining),
+                startPosition: position)
+            speculativeDraftWallNanos &+=
+                clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - draftStart
+            try Task.checkCancellation()
+
+            if !proposal.isEmpty {
+                speculativeRounds += 1
+                speculativeProposedTokens += proposal.count
+                let roundStartPosition = position
+                let plan: SpeculativeRoundPlan
+                do {
+                    plan = try await speculativeDecoder.verifyGreedyRound(
+                        proposal: proposal,
+                        startPosition: roundStartPosition,
+                        verifier: speculativeVerifier,
+                        into: scratch.logits)
+                } catch {
+                    // A cancellation or malformed verifier result must not
+                    // strand a speculative tail in the target cache.
+                    try? speculativeVerifier.commitSpeculativePrefix(0)
+                    throw error
+                }
+                speculativeVerificationBlocks += 1
+                speculativeVerificationTokens += plan.verification.processedTokens
+                speculativeVerificationWallNanos &+= plan.verification.metrics.wallNanos
+                speculativeVerificationCommandBuffers &+=
+                    plan.verification.metrics.targetCommandBuffers
+                speculativeVerificationExpertReads &+=
+                    plan.verification.metrics.expertReads
+                speculativeVerificationExpertBytes &+=
+                    plan.verification.metrics.expertBytes
+                speculativeVerificationExpertCacheHits &+=
+                    plan.verification.metrics.expertCacheHits
+                speculativeVerificationExpertCacheMisses &+=
+                    plan.verification.metrics.expertCacheMisses
+                speculativeAcceptedTokens += plan.decision.acceptedDraftCount
+                speculativeRejectedTokens +=
+                    proposal.count - plan.decision.acceptedDraftCount
+                if plan.decision.firstMismatchIndex != nil {
+                    speculativeCorrectionTokens += 1
+                }
+
+                var committedCandidateCount = 0
+                do {
+                    var finished = false
+                    for index in 0..<plan.decision.acceptedDraftCount {
+                        try Task.checkCancellation()
+                        if emitToken(proposal.tokenIDs[index]) {
+                            committedCandidateCount += 1
+                        } else {
+                            // The boundary token was visible but not target-KV
+                            // committed, exactly like scalar max/stop handling.
+                            try speculativeVerifier.commitSpeculativePrefix(
+                                committedCandidateCount)
+                            position = roundStartPosition + committedCandidateCount
+                            finished = true
+                            break
+                        }
+                    }
+                    if finished {
+                        break
+                    }
+
+                    try speculativeVerifier.commitSpeculativePrefix(
+                        committedCandidateCount)
+                    position = roundStartPosition + committedCandidateCount
+
+                    // On mismatch this is the target correction. When every draft
+                    // token matched it is the one-token bonus prediction.
+                    let nextToken = plan.decision.nextTargetToken
+                    if !emitToken(nextToken) {
+                        break
+                    }
+                    try await advanceAfterCommittedToken(nextToken)
+                    continue
+                } catch {
+                    // Tokens already emitted from the accepted prefix must stay
+                    // backed by target KV even when cancellation arrives from a
+                    // progress callback during the block.
+                    try? speculativeVerifier.commitSpeculativePrefix(
+                        committedCandidateCount)
+                    position = roundStartPosition + committedCandidateCount
+                    throw error
+                }
+            }
+            speculativeFallbackDecodes += 1
+        }
+
+        let tokenID = try nextScalarToken()
+        guard emitToken(tokenID) else { break }
+        try await advanceAfterCommittedToken(tokenID)
+    }
+
     return RawDecodeResult(prefillTokens: promptIds.count,
                            cachedPromptTokens: cachedPromptTokens,
                            computedPrefillTokens: computedPrefillTokens,
@@ -334,7 +522,28 @@ public func runRawCompletion(producer: any LogitProducer,
                            reason: reason,
                            kvPosition: position,
                            kvBackedTokenIDs: history,
-                           uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs)
+                           uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs,
+                           speculative: SpeculativeDecodeMetrics(
+                               rounds: speculativeRounds,
+                               proposedTokens: speculativeProposedTokens,
+                               acceptedTokens: speculativeAcceptedTokens,
+                               rejectedTokens: speculativeRejectedTokens,
+                               correctionTokens: speculativeCorrectionTokens,
+                               verificationBlocks: speculativeVerificationBlocks,
+                               verificationTokens: speculativeVerificationTokens,
+                               verificationWallNanos: speculativeVerificationWallNanos,
+                               verificationCommandBuffers:
+                                   speculativeVerificationCommandBuffers,
+                               verificationExpertReads:
+                                   speculativeVerificationExpertReads,
+                               verificationExpertBytes:
+                                   speculativeVerificationExpertBytes,
+                               verificationExpertCacheHits:
+                                   speculativeVerificationExpertCacheHits,
+                               verificationExpertCacheMisses:
+                                   speculativeVerificationExpertCacheMisses,
+                               draftWallNanos: speculativeDraftWallNanos,
+                               normalFallbackDecodes: speculativeFallbackDecodes))
 }
 
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,

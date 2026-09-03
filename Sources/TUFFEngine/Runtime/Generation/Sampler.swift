@@ -15,6 +15,7 @@ public struct GenerationConfig: Sendable {
     public var seed: UInt64? = nil         // nil = nondeterministic
     public var stopStrings: [String] = []
     public var extraStopTokens: Set<Int32> = []
+    public var speculative: SpeculativeDecodeConfig = .off
 
     public init(maxNewTokens: Int = 256,
                 temperature: Float = 1.0,
@@ -23,7 +24,8 @@ public struct GenerationConfig: Sendable {
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
                 stopStrings: [String] = [],
-                extraStopTokens: Set<Int32> = []) {
+                extraStopTokens: Set<Int32> = [],
+                speculative: SpeculativeDecodeConfig = .off) {
         self.maxNewTokens = maxNewTokens
         self.temperature = temperature
         self.topK = topK
@@ -32,6 +34,28 @@ public struct GenerationConfig: Sendable {
         self.seed = seed
         self.stopStrings = stopStrings
         self.extraStopTokens = extraStopTokens
+        self.speculative = speculative
+    }
+
+    /// Compatibility overload retained for clients built against the
+    /// pre-speculation initializer.
+    public init(maxNewTokens: Int,
+                temperature: Float,
+                topK: Int?,
+                topP: Float?,
+                repetitionPenalty: Float,
+                seed: UInt64?,
+                stopStrings: [String],
+                extraStopTokens: Set<Int32>) {
+        self.init(maxNewTokens: maxNewTokens,
+                  temperature: temperature,
+                  topK: topK,
+                  topP: topP,
+                  repetitionPenalty: repetitionPenalty,
+                  seed: seed,
+                  stopStrings: stopStrings,
+                  extraStopTokens: extraStopTokens,
+                  speculative: .off)
     }
 
     public func validate() throws {
@@ -64,6 +88,14 @@ public struct GenerationConfig: Sendable {
         if temperature > 0, topK == nil, let topP, topP < 1 {
             throw GeneratorError.invalidGenerationConfig(
                 "topP below one requires topK; full-vocabulary nucleus sampling is not implemented")
+        }
+        guard !speculative.isEnabled || speculative.mode == .greedy else {
+            throw GeneratorError.invalidGenerationConfig(
+                "only greedy speculative decoding is currently supported")
+        }
+        guard !speculative.isEnabled || (1...8).contains(speculative.draftTokens) else {
+            throw GeneratorError.invalidGenerationConfig(
+                "speculative draftTokens must be between 1 and 8")
         }
     }
 
