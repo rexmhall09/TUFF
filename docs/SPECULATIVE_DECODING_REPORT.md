@@ -3,11 +3,13 @@
 Date: 2026-09-03
 Recommendation: **KEEP EXPERIMENTAL**
 
-Final-code measurement checkout: `eee670f391f65244b9f4f15c9c135114cbf61499`
-Release CLI SHA-256: `be4d818c79ca06d9ec5301ddeebd419162586cd0bb82724c6c43224703ca1dac`
-The final matrices are preserved in
-`benchmark-results/speculative-final-m2-20260903-rerun/` and
-`benchmark-results/speculative-final-gemma-m2-20260903/`.
+Latest code measurement checkout: `7e0ea2ca5dadc2ae07a7c7a2122b595677ee8c56`
+Latest release CLI SHA-256: `ad7b153fc95c95e41f8eb50e3b7b803aa5de691ba32335261a334ecb12bdd5d9`
+The latest matrix is preserved in
+`benchmark-results/speculative-latest-m2-20260903/`. Earlier matrices are
+kept in `benchmark-results/speculative-batched-gpt-m2-20260903/` and
+`benchmark-results/speculative-final-gemma-m2-20260903/` for comparison; they
+are separate fresh-process runs and must not be combined into one median.
 
 ## What changed
 
@@ -27,6 +29,13 @@ The first real drafter is a prompt-lookup/n-gram drafter. It searches a bounded
 recent history for a repeated suffix and proposes the tokens that followed the
 earlier occurrence. It has no second model, tokenizer conversion, or runtime
 download requirement.
+
+The GPT-OSS verifier now batches resident BF16 projection and RMSNorm rows and
+the final-head argmax across a speculative block, while retaining grouped
+routed-expert execution. The boundary argmax is cached between the fast reject
+check and a successful verification. These changes target the actual TUFF
+costs without changing the scalar path or allocating a vocabulary-sized result
+per candidate.
 
 The CLI controls are deliberately experimental and opt-in:
 
@@ -77,22 +86,23 @@ Passed:
 - speculative-off behavior continues through the existing path
 
 Focused suites passed during implementation: 29 raw-completion/speculative
-tests plus the Gemma and GPT-OSS runner equivalence suites. The canonical
-`Scripts/test.sh` gate passed against the final checkpoint with 1,482 tests in
-240 suites in 291.609 seconds.
+tests plus the Gemma, GPT-OSS, BF16GEMV, and RMSNorm equivalence suites. The
+canonical `Scripts/test.sh` gate passed against the latest checkpoint with
+1,484 tests in 240 suites in 283.116 seconds.
 
 ## Measurements
 
 Installed bundles were found in the TUFF app support directory rather than the
-repository. The final-code TPS matrices ran on a MacBook Air (M2, 16 GB),
-using one warmup and three measured fresh-process runs for baseline, auto, and
-blocks 2/4/6/8, with `max-new 16`, `max-context 2048`, and the repetitive
-fixture. GPT-OSS uses Harmony chat mode in the harness; Gemma uses raw
-completion mode. The raw directories preserve every process, stdout/stderr,
-command, system report, commit, and CLI hash:
+repository. The latest TPS matrix ran on a MacBook Air (M2, 16 GB), using one
+warmup and three measured fresh-process runs for baseline, auto, and blocks
+2/4/6/8, with `max-new 16`, `max-context 2048`, and the repetitive fixture.
+GPT-OSS uses Harmony chat mode in the harness; Gemma uses raw completion mode.
+The raw directory preserves every process, stdout/stderr, command, system
+report, commit, and CLI hash:
 
-- [resident Gemma plus streamed GPT-OSS](../benchmark-results/speculative-final-m2-20260903-rerun/summary.md)
-- [resident Gemma plus streamed Gemma](../benchmark-results/speculative-final-gemma-m2-20260903/summary.md)
+- [latest resident Gemma plus streamed GPT-OSS](../benchmark-results/speculative-latest-m2-20260903/summary.md)
+- [earlier batched-kernel comparison](../benchmark-results/speculative-batched-gpt-m2-20260903/summary.md)
+- [earlier streamed-Gemma comparison](../benchmark-results/speculative-final-gemma-m2-20260903/summary.md)
 
 The full four-prompt matrix remains available through
 [Scripts/benchmark_speculative.rb](../Scripts/benchmark_speculative.rb). The
@@ -113,16 +123,16 @@ the runner was initialized.
 | dense Gemma toy | 4 | 3.215 | 1.576 | 2.04x | 0 / 0 |
 | dense Gemma toy | 6 | 6.122 | 1.880 | 3.26x | 0 / 0 |
 | dense Gemma toy | 8 | 7.273 | 2.549 | 2.85x | 0 / 0 |
-| GPT-OSS toy | 2 | 3.124 | 2.446 | 1.28x | 0 / 0, 8 cache hits |
-| GPT-OSS toy | 4 | 5.610 | 2.159 | 2.60x | 0 / 0, 8 cache hits |
-| GPT-OSS toy | 6 | 8.515 | 2.863 | 2.97x | 0 / 0, 8 cache hits |
-| GPT-OSS toy | 8 | 13.828 | 3.978 | 3.48x | 0 / 0, 8 cache hits |
+| GPT-OSS toy | 2 | 3.164 | 2.123 | 1.49x | 0 / 0, 8 cache hits |
+| GPT-OSS toy | 4 | 5.958 | 1.947 | 3.06x | 0 / 0, 8 cache hits |
+| GPT-OSS toy | 6 | 8.396 | 2.157 | 3.89x | 0 / 0, 8 cache hits |
+| GPT-OSS toy | 8 | 11.441 | 2.209 | 5.18x | 0 / 0, 8 cache hits |
 
 The toy result establishes that the production block path is not N scalar
 `produce` calls and can be cheaper for these tiny shapes. It does not establish
 the central SSD hypothesis: the toy expert cache is warm and the shapes are not
-representative of a large model. The final-code live matrices below provide the
-first end-to-end prompt-lookup acceptance and total expert-traffic measurements.
+representative of a large model. The live matrices below provide end-to-end
+prompt-lookup acceptance and total expert-traffic measurements.
 
 The verifier reports expert cache-plan misses, estimated physical expert bytes,
 hits, and misses per block. The benchmark also reports total decode-phase
@@ -131,7 +141,7 @@ fallback, correction, and bonus work. Verification command-buffer counts are
 reported by the production runners; hardware GPU counters and physical SSD
 counters remain unavailable.
 
-### Final-code live TPS result
+### Latest-code live TPS result
 
 The table below reports medians of three measured runs after one warmup. Decode
 TPS excludes model load and prefill. All runs generated the capped 16 tokens,
@@ -141,43 +151,39 @@ per emitted token, including verification and scalar fallback/correction work.
 
 | Model | Condition | Decode tok/s | vs baseline | Acceptance | Expert reads/token | Expert MiB/token | Verify ms | Boundary rejects/checks |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Gemma E4B resident | baseline | 26.945 | 1.000x | n/a | 0.00 | 0.00 | n/a | n/a |
-| Gemma E4B resident | auto | 27.208 | 1.010x | 0.909 | 0.00 | 0.00 | 382.71 | 1/6 |
-| Gemma E4B resident | block 2 | 25.853 | 0.959x | 0.909 | 0.00 | 0.00 | 399.88 | 1/6 |
-| Gemma E4B resident | block 4 | 15.425 | 0.572x | 0.923 | 0.00 | 0.00 | 803.51 | 1/4 |
-| Gemma E4B resident | block 6 | 5.452 | 0.202x | 0.929 | 0.00 | 0.00 | 2,426.72 | 0/3 |
-| Gemma E4B resident | block 8 | 7.723 | 0.287x | 0.933 | 0.00 | 0.00 | 1,944.00 | 0/2 |
-| Gemma 26B-A4B streamed | baseline | 7.464 | 1.000x | n/a | 67.56 | 216.41 | n/a | n/a |
-| Gemma 26B-A4B streamed | auto | 6.626 | 0.888x | 0.000 | 67.56 | 216.41 | 0.00 | 1/1 |
-| Gemma 26B-A4B streamed | block 2 | 6.851 | 0.918x | 0.833 | 70.19 | 224.82 | 1,345.57 | 1/6 |
-| Gemma 26B-A4B streamed | block 4 | 8.050 | 1.079x | 0.750 | 70.38 | 225.42 | 1,188.33 | 1/4 |
-| Gemma 26B-A4B streamed | block 6 | 5.919 | 0.793x | 0.667 | 70.38 | 225.42 | 1,735.51 | 1/4 |
-| Gemma 26B-A4B streamed | block 8 | 7.858 | 1.053x | 0.600 | 70.38 | 225.42 | 1,206.02 | 1/4 |
-| GPT-OSS 20B streamed | baseline | 1.778 | 1.000x | n/a | 60.31 | 761.45 | n/a | n/a |
-| GPT-OSS 20B streamed | auto | 1.799 | 1.012x | 0.000 | 60.31 | 761.45 | 0.00 | 1/1 |
-| GPT-OSS 20B streamed | block 2 | 1.248 | 0.702x | 0.250 | 60.19 | 759.87 | 998.80 | 3/4 |
-| GPT-OSS 20B streamed | block 4 | 1.091 | 0.614x | 0.273 | 61.38 | 774.86 | 3,466.70 | 2/3 |
-| GPT-OSS 20B streamed | block 6 | 1.345 | 0.756x | 0.200 | 61.75 | 779.59 | 4,014.54 | 2/3 |
-| GPT-OSS 20B streamed | block 8 | 1.193 | 0.671x | 0.167 | 62.50 | 789.06 | 4,884.70 | 2/3 |
+| Gemma E4B resident | baseline | 26.732 | 1.000x | n/a | 0.00 | 0.00 | n/a | n/a |
+| Gemma E4B resident | auto | 2.385 | 0.089x | 0.929 | 0.00 | 0.00 | 3,371.69 | 0/3 |
+| Gemma E4B resident | block 2 | 5.255 | 0.197x | 0.909 | 0.00 | 0.00 | 1,928.13 | 1/6 |
+| Gemma E4B resident | block 4 | 9.126 | 0.341x | 0.923 | 0.00 | 0.00 | 1,325.59 | 1/4 |
+| Gemma E4B resident | block 6 | 7.391 | 0.276x | 0.929 | 0.00 | 0.00 | 1,842.41 | 0/3 |
+| Gemma E4B resident | block 8 | 7.285 | 0.273x | 0.933 | 0.00 | 0.00 | 2,055.96 | 0/2 |
+| GPT-OSS 20B streamed | baseline | 1.423 | 1.000x | n/a | 60.31 | 761.45 | n/a | n/a |
+| GPT-OSS 20B streamed | auto | 1.424 | 1.001x | 0.000 | 60.31 | 761.45 | 0.00 | 1/1 |
+| GPT-OSS 20B streamed | block 2 | 1.506 | 1.058x | 0.250 | 60.19 | 759.87 | 1,118.45 | 3/4 |
+| GPT-OSS 20B streamed | block 4 | 1.436 | 1.009x | 0.273 | 61.38 | 774.86 | 3,043.63 | 2/3 |
+| GPT-OSS 20B streamed | block 6 | 1.142 | 0.803x | 0.200 | 61.75 | 779.59 | 4,694.03 | 2/3 |
+| GPT-OSS 20B streamed | block 8 | 1.278 | 0.898x | 0.167 | 62.50 | 789.06 | 4,347.50 | 2/3 |
 
-These are separate fresh-process matrices, not a combined median. The resident
-control is visibly noisy under repeated large-model runs, so its block rows are
-useful as a control for the verifier path but not as a stable speed claim.
+These are separate fresh-process measurements, not a combined median across
+checkouts. The resident control is visibly noisy across the two matrices, so
+its block rows are useful as a control for the verifier path but not as a stable
+speed claim. The latest streamed GPT-OSS rows are the comparison for the latest
+code checkpoint.
 
-The SSD result is clearer. On streamed Gemma, fixed blocks increased total
-expert traffic from 216.41 to 224.82--225.42 MiB per emitted token and did not
-produce a repeatable TPS gain. On streamed GPT-OSS, total traffic stayed near
-baseline for block 2 because three of four proposals were rejected by the
-boundary fast path, but TPS fell to 0.702x. Larger blocks increased traffic to
-789.06 MiB per emitted token and fell to 0.614--0.756x baseline. Auto mode now
-avoids the full failed verification and stays near baseline, but it cannot
-create a speedup when the drafter has no accepted first token.
+The latest SSD result is mixed but informative. On streamed GPT-OSS, block 2
+reached 1.058x baseline while reducing total traffic slightly from 761.45 to
+759.87 MiB per emitted token. Block 4 was effectively flat at 1.009x but
+increased traffic to 774.86 MiB/token; blocks 6/8 fell to 0.803--0.898x and
+reached 779.59--789.06 MiB/token. Three of four block-2 proposals were
+rejected by the boundary fast path, so this is not yet evidence of a robust
+high-acceptance win. Auto mode avoids a full failed verification and stays at
+baseline when the drafter has no accepted first token.
 
-The small positive streamed-Gemma block-4 and block-8 medians in this run are
-not sufficient evidence of a speedup: the corresponding traffic is higher and
-the prior fresh matrix produced a different ordering. The implementation is
-therefore measured, safe, and useful for follow-up work, but not yet a default
-decode strategy.
+The earlier streamed-Gemma matrix increased total expert traffic from 216.41
+to 224.82--225.42 MiB per emitted token and did not produce a repeatable TPS
+gain. It remains useful as a second SSD-target control, but it is from an
+earlier code checkpoint and is not combined numerically with the latest GPT
+matrix.
 
 ## Known limitations
 
@@ -249,16 +255,14 @@ bottleneck.
 ## Recommendation
 
 **KEEP EXPERIMENTAL —** block verification is real, KV-safe, and materially
-cheaper than repeated scalar target calls in the toy microbenchmark, but the
-final-code prompt-lookup matrices do not show a repeatable SSD-streamed win.
-Streamed GPT-OSS reached only 0.614--0.756x baseline for fixed blocks, while
-streamed Gemma ranged from 0.793--1.079x with higher total expert traffic in
-every fixed speculative condition. Auto mode now rejects a doomed first token
-without paying the full block and stays near baseline, but that is a guardrail,
-not a speedup. Keep the architecture as a first-class optimization surface,
-but do not enable it by default or train a DFly drafter until a high-acceptance,
-high-route-overlap workload demonstrates lower target work and SSD bytes per
-emitted token.
+cheaper than repeated scalar target calls in the toy microbenchmark. The latest
+streamed GPT-OSS matrix has a narrow block-2 positive at 1.058x with slightly
+lower expert traffic, but block 4 is flat and blocks 6/8 are slower with more
+traffic; acceptance is only 0.167--0.273. The resident control is noisy and
+does not show a resident-model benefit. Keep this as a first-class optimization
+surface, but do not enable it by default or train a DFly drafter until a
+high-acceptance, high-route-overlap workload demonstrates lower target work and
+SSD bytes per emitted token.
 
 ## Files changed
 
@@ -271,8 +275,10 @@ emitted token.
 - `Sources/TUFFEngine/Runtime/Inference/ModelExpertIO.swift`
 - `Sources/TUFFEngine/Runtime/KVCache/KVCacheManager.swift`
 - `Sources/TUFFEngine/Kernels/Quant/BF16GEMV.swift`
+- `Sources/TUFFEngine/Kernels/Primitives/RMSNorm.swift`
 - `Sources/TUFFEngine/Kernels/Fusions/LMHeadChainInt4.swift`
 - `Sources/TUFFEngine/Kernels/Sampling/Argmax.swift`
+- `Sources/TUFFEngine/Metal/Primitives/rmsnorm.metal`
 - `Sources/TUFFEngine/Metal/Quant/mxfp4.metal`
 - `Sources/TUFFEngine/Metal/Sampling/logit.metal`
 - `Sources/TUFFCLI/Args.swift`
@@ -281,6 +287,7 @@ emitted token.
 - `Tests/TUFFEngine/Core/Runtime/Generation/RawCompletionLoopTests+Speculative.swift`
 - `Tests/TUFFEngine/Core/Runtime/Generation/PromptLookupDraftTokenProducerTests.swift`
 - `Tests/TUFFEngine/Core/Kernels/Quant/BF16GEMVTests.swift`
+- `Tests/TUFFEngine/Core/Kernels/Primitives/RMSNormTests.swift`
 - `Tests/TUFFEngine/Core/Runtime/DenseGemmaRunnerTests.swift`
 - `Tests/TUFFEngine/Core/Runtime/GPTOSSRunnerTests.swift`
 - `Tests/TUFFEngine/Core/Runtime/QwenRunnerTests.swift`

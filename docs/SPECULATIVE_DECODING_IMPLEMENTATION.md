@@ -1,6 +1,6 @@
 # Speculative decoding architecture
 
-Status: implemented opt-in greedy verifier with adaptive cost gating, 2026-09-03
+Status: implemented opt-in greedy verifier with adaptive cost gating and batched GPT-OSS rows, 2026-09-03
 
 ## What the current runtime exposes
 
@@ -64,9 +64,11 @@ from paying for an entire doomed block on an SSD-backed target.
    one token per verification row. Reuse `executePrefillChunk` without changing
    public prefill seed behavior.
 4. Added the same explicit verifier to GPT-OSS, using its existing grouped
-   prefill expert path and a batched BF16 output-head argmax kernel. Verification
-   reads only one target ID per row back to Swift; it does not materialize a
-   block-sized CPU logits matrix.
+   prefill expert path and batched BF16 projection, RMSNorm, and output-head
+   argmax kernels. The resident projections are encoded for all speculative
+   rows together while routed expert groups retain their existing cache-aware
+   scheduling. Verification reads only one target ID per row back to Swift; it
+   does not materialize a block-sized CPU logits matrix.
 5. Added a prompt-lookup/n-gram drafter and a benchmark command. It requires no
    second model or tokenizer and is useful for measuring verifier economics
    before a trained drafter exists.
@@ -74,6 +76,9 @@ from paying for an entire doomed block on an SSD-backed target.
    after profitable high-acceptance rounds, and disables itself after low
    acceptance, wall-time loss, or excess routed-expert bytes. A first-token
    boundary mismatch is handled before full verification.
+7. Cached the GPT-OSS boundary argmax across the fast-reject check and the
+   following successful verification, removing duplicate full-vocabulary head
+   work without changing the target boundary or transaction semantics.
 
 ## Expected metrics and benchmark plan
 
@@ -93,9 +98,10 @@ POC reports expert-cache-plan misses, estimated expert bytes, hits, and misses
 inside verification, plus total decode-phase routed-expert traffic.
 Verification command-buffer counts are reported by the bounded production
 paths; hardware GPU counters and physical SSD counters are still unavailable.
-Fresh repetitive-prompt matrices have run against the installed Gemma E4B,
-streamed Gemma, and GPT-OSS 20B bundles. The full four-prompt slice remains
-available through the benchmark's `--prompt` filter and resumable output.
+Fresh repetitive-prompt matrices have run against the installed Gemma E4B and
+GPT-OSS 20B bundles. The latest release matrix is recorded at commit
+`7e0ea2c`; the full four-prompt slice remains available through the benchmark's
+`--prompt` filter and resumable output.
 
 ## AngelSpec / DFly boundary
 
