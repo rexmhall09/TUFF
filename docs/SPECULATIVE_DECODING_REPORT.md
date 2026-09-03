@@ -3,7 +3,8 @@
 Date: 2026-09-03
 Recommendation: **KEEP EXPERIMENTAL**
 
-Measurement checkout: `346d8c26e8d53e03c795fb2d83c85aae71afa3e2`
+Measurement checkouts: `d68c6f228a47bed628f2ac75cacf53707909823c` (GPT-OSS run),
+`552e22015950f3798090df1e4d4de6e7b01b74b9` (Gemma run)
 Release CLI SHA-256: `fe1fa4e86316b36bf69f2131ef4ebf376f1bc37b32761c26d20d0ca8ac1ef74d`
 
 ## What changed
@@ -134,27 +135,38 @@ each condition.
 | Gemma E4B resident | block 4 | 3.828 | 0.907x | 0.923 | 3,350.36 | 0 | 0 | 0.0 |
 | Gemma E4B resident | block 6 | 4.471 | 1.059x | 0.929 | 3,130.25 | 0 | 0 | 0.0 |
 | Gemma E4B resident | block 8 | 4.427 | 1.049x | 0.933 | 3,400.57 | 0 | 0 | 0.0 |
+| Gemma 26B-A4B streamed | baseline | 3.419 | 1.000x | n/a | n/a | n/a | n/a | 957.6 |
+| Gemma 26B-A4B streamed | block 2 | 3.016 | 0.882x | 0.833 | 3,506.09 | 859 | 2,885,140,480 | 419.7 |
+| Gemma 26B-A4B streamed | block 4 | 3.517 | 1.029x | 0.750 | 3,542.60 | 1,156 | 3,882,680,320 | 249.8 |
+| Gemma 26B-A4B streamed | block 6 | 3.381 | 0.989x | 0.667 | 3,735.91 | 1,400 | 4,702,208,000 | 220.6 |
+| Gemma 26B-A4B streamed | block 8 | 2.879 | 0.842x | 0.600 | 4,403.64 | 1,561 | 5,242,961,920 | 211.1 |
 | GPT-OSS 20B streamed | baseline | 1.208 | 1.000x | n/a | n/a | n/a | n/a | 2,810.8 |
 | GPT-OSS 20B streamed | block 2 | 1.103 | 0.913x | 0.250 | 5,304.61 | 122 | 1,615,069,184 | 1,926.0 |
 | GPT-OSS 20B streamed | block 4 | 0.405 | 0.335x | 0.273 | 16,598.24 | 143 | 1,893,072,896 | 3,989.6 |
 | GPT-OSS 20B streamed | block 6 | 0.730 | 0.604x | 0.200 | 11,245.84 | 173 | 2,290,221,056 | 2,156.1 |
 | GPT-OSS 20B streamed | block 8 | 0.707 | 0.585x | 0.167 | 12,645.98 | 184 | 2,435,842,048 | 1,987.3 |
 
-For the streamed target, the verification-byte estimates correspond to about
-96.3, 112.9, 136.6, and 145.2 MiB per emitted token for blocks 2, 4, 6, and 8
-respectively. The normal scalar footer does not yet expose its per-fetch byte
-count, so these are verification-only byte totals; the phase-level expert-I/O
-wait is the directly comparable whole-decode signal. On this run every
-speculative GPT-OSS condition was slower than baseline, and prompt lookup
-acceptance fell as the block grew. The resident result is within normal run
-noise: block 2 was 17.4% faster, while blocks 4/6/8 varied from 9.3% slower to
-5.9% faster.
+For GPT-OSS, the verification-byte estimates correspond to about 96.3, 112.9,
+136.6, and 145.2 MiB per emitted token for blocks 2, 4, 6, and 8 respectively.
+For Gemma 26B-A4B they are 172.0, 231.4, 280.3, and 312.5 MiB per emitted
+token. The normal scalar footer does not yet expose its per-fetch byte count,
+so these are verification-only byte totals; the phase-level expert-I/O wait is
+the directly comparable whole-decode signal.
+
+On GPT-OSS every speculative condition was slower than baseline, and prompt
+lookup acceptance fell as the block grew. On the streamed Gemma target, block
+4 was only 2.9% faster in the median, while block 2 was 11.8% slower and block
+8 was 15.8% slower. That small block-4 result is not strong enough to call a
+speedup: the three baseline rates ranged from 2.918 to 5.848 tok/s, and the
+verification-byte estimate increased with every larger block. The resident
+control is similarly noisy: block 2 was 17.4% faster, while blocks 4/6/8
+varied from 9.3% slower to 5.9% faster.
 
 This is an early negative result for the current drafter/runtime combination,
 not evidence that a trained drafter is impossible. It does show that the
-present verifier does not amortize GPT-OSS expert work enough at the observed
-acceptance rates; a future drafter must have much higher acceptance and the
-verifier needs total-run I/O accounting before training investment is
+present verifier has not yet amortized streamed expert work enough to produce a
+repeatable TPS gain. A future drafter must have high acceptance, and the
+verifier needs total-run I/O accounting, before training investment is
 justified.
 
 ## Known limitations
@@ -224,11 +236,12 @@ DFly-style drafter is unlikely to fix the core bottleneck.
 ## Recommendation
 
 **KEEP EXPERIMENTAL —** the architecture is correct and the live verifier now
-has real-model evidence, but the current prompt-lookup drafter made GPT-OSS
-20B slower at every tested block size: 0.913x, 0.335x, 0.604x, and 0.585x of
-baseline TPS for blocks 2/4/6/8. Do not enable it by default or invest in DFly
-training until the remaining prompt workloads and total target I/O accounting
-show that high-acceptance blocks can reduce streamed work.
+has real SSD-streamed evidence, but the current prompt-lookup drafter produced
+no repeatable gain: GPT-OSS 20B measured 0.913x, 0.335x, 0.604x, and 0.585x of
+baseline TPS, while Gemma 26B-A4B measured 0.882x, 1.029x, 0.989x, and 0.842x
+for blocks 2/4/6/8. Do not enable it by default or invest in DFly training
+until the remaining prompt workloads and total target I/O accounting show that
+high-acceptance blocks can reduce streamed work.
 
 ## Files changed
 
