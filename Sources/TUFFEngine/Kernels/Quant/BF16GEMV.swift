@@ -7,24 +7,36 @@ final class BF16GEMV {
     private static let defaultMaxVocabularyRows = 262_144
     private let halfPipeline: MTLComputePipelineState
     private let floatPipeline: MTLComputePipelineState
+    private let halfRowsPipeline: MTLComputePipelineState
+    private let floatRowsPipeline: MTLComputePipelineState
     private let argmaxRowsPipeline: MTLComputePipelineState
     private let argmaxRowsReducePipeline: MTLComputePipelineState
     private let embeddingPipeline: MTLComputePipelineState
     private let floatEmbeddingPipeline: MTLComputePipelineState
     private let argmaxRowsSummaries: MTLBuffer
     private let maxRows: Int
+    private let maxBatchRows: Int
     private let maxVocabularyRows: Int
 
     init(context: MetalContext,
          maxRows: Int = 8,
+         maxBatchRows: Int? = nil,
          maxVocabularyRows: Int = BF16GEMV.defaultMaxVocabularyRows) throws {
         precondition(maxRows > 0)
+        let resolvedMaxBatchRows = max(maxRows, maxBatchRows ?? maxRows)
+        precondition(resolvedMaxBatchRows > 0)
         precondition(maxVocabularyRows > 0)
         halfPipeline = try context.pipeline(
             "bf16_gemv_half_simd", constants: [],
             maxTotalThreadsPerThreadgroup: 32 * Self.rowsPerThreadgroup)
         floatPipeline = try context.pipeline(
             "bf16_gemv_float_simd", constants: [],
+            maxTotalThreadsPerThreadgroup: 32 * Self.rowsPerThreadgroup)
+        halfRowsPipeline = try context.pipeline(
+            "bf16_gemv_half_rows_simd", constants: [],
+            maxTotalThreadsPerThreadgroup: 32 * Self.rowsPerThreadgroup)
+        floatRowsPipeline = try context.pipeline(
+            "bf16_gemv_float_rows_simd", constants: [],
             maxTotalThreadsPerThreadgroup: 32 * Self.rowsPerThreadgroup)
         argmaxRowsPipeline = try context.pipeline(
             "bf16_gemv_argmax_rows", constants: [],
@@ -35,6 +47,7 @@ final class BF16GEMV {
         embeddingPipeline = try context.pipeline("bf16_embedding_lookup_half")
         floatEmbeddingPipeline = try context.pipeline("bf16_embedding_lookup_float")
         self.maxRows = maxRows
+        self.maxBatchRows = resolvedMaxBatchRows
         self.maxVocabularyRows = maxVocabularyRows
         let rowGroups = (maxVocabularyRows + Self.rowsPerThreadgroup - 1)
             / Self.rowsPerThreadgroup
@@ -91,6 +104,72 @@ final class BF16GEMV {
                bias: bias,
                rows: rows,
                columns: columns)
+    }
+
+    /// Batched BF16-weight projection with FP16 activations. One SIMD group
+    /// computes one output row for one input row, while the 2-D grid shares a
+    /// single encoder across the bounded candidate block. This is useful for
+    /// speculative verification and chunked prefill; scalar decode continues
+    /// to use `encodeHalf`/`encodeFloat` unchanged.
+    func encodeHalfRows(
+        commandBuffer: MTLCommandBuffer,
+        weights: TensorView,
+        input: MTLBuffer,
+        inputOffset: Int = 0,
+        inputStrideElements: Int,
+        output: MTLBuffer,
+        outputOffset: Int = 0,
+        outputStrideElements: Int,
+        bias: TensorView? = nil,
+        batchCount: Int,
+        rows: Int,
+        columns: Int
+    ) {
+        encodeRows(commandBuffer: commandBuffer,
+                   pipeline: halfRowsPipeline,
+                   weights: weights,
+                   input: input,
+                   inputOffset: inputOffset,
+                   inputStrideElements: inputStrideElements,
+                   output: output,
+                   outputOffset: outputOffset,
+                   outputStrideElements: outputStrideElements,
+                   bias: bias,
+                   batchCount: batchCount,
+                   rows: rows,
+                   columns: columns)
+    }
+
+    /// Batched BF16-weight projection with FP32 outputs. GPT-OSS uses this for
+    /// the per-row router logits, where retaining FP32 matches the scalar
+    /// router path and avoids an intermediate vocabulary-sized buffer.
+    func encodeFloatRows(
+        commandBuffer: MTLCommandBuffer,
+        weights: TensorView,
+        input: MTLBuffer,
+        inputOffset: Int = 0,
+        inputStrideElements: Int,
+        output: MTLBuffer,
+        outputOffset: Int = 0,
+        outputStrideElements: Int,
+        bias: TensorView? = nil,
+        batchCount: Int,
+        rows: Int,
+        columns: Int
+    ) {
+        encodeRows(commandBuffer: commandBuffer,
+                   pipeline: floatRowsPipeline,
+                   weights: weights,
+                   input: input,
+                   inputOffset: inputOffset,
+                   inputStrideElements: inputStrideElements,
+                   output: output,
+                   outputOffset: outputOffset,
+                   outputStrideElements: outputStrideElements,
+                   bias: bias,
+                   batchCount: batchCount,
+                   rows: rows,
+                   columns: columns)
     }
 
     /// Computes one greedy token for each input row without materializing a
@@ -244,6 +323,62 @@ final class BF16GEMV {
             MTLSize(width: (rows + Self.rowsPerThreadgroup - 1)
                     / Self.rowsPerThreadgroup,
                     height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: 32 * Self.rowsPerThreadgroup, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    private func encodeRows(
+        commandBuffer: MTLCommandBuffer,
+        pipeline: MTLComputePipelineState,
+        weights: TensorView,
+        input: MTLBuffer,
+        inputOffset: Int,
+        inputStrideElements: Int,
+        output: MTLBuffer,
+        outputOffset: Int,
+        outputStrideElements: Int,
+        bias: TensorView?,
+        batchCount: Int,
+        rows: Int,
+        columns: Int
+    ) {
+        precondition(batchCount > 0 && batchCount <= maxBatchRows)
+        precondition(rows > 0 && columns > 0)
+        precondition(inputStrideElements >= columns)
+        precondition(outputStrideElements >= rows)
+        precondition(inputOffset >= 0 && outputOffset >= 0)
+        precondition(inputOffset % MemoryLayout<Float16>.alignment == 0)
+        precondition(outputOffset % MemoryLayout<Float16>.alignment == 0)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return
+        }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(weights.buffer, offset: Int(weights.offset), index: 0)
+        encoder.setBuffer(input, offset: inputOffset, index: 1)
+        encoder.setBuffer(output, offset: outputOffset, index: 2)
+        encoder.setBuffer(bias?.buffer ?? weights.buffer,
+                          offset: bias.map { Int($0.offset) }
+                              ?? Int(weights.offset),
+                          index: 3)
+        var rowValue = UInt32(rows)
+        var columnValue = UInt32(columns)
+        var hasBias: UInt32 = bias == nil ? 0 : 1
+        var inputStrideValue = UInt32(inputStrideElements)
+        var outputStrideValue = UInt32(outputStrideElements)
+        var batchValue = UInt32(batchCount)
+        encoder.setBytes(&rowValue, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&columnValue, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&hasBias, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&inputStrideValue,
+                         length: MemoryLayout<UInt32>.size, index: 7)
+        encoder.setBytes(&outputStrideValue,
+                         length: MemoryLayout<UInt32>.size, index: 8)
+        encoder.setBytes(&batchValue, length: MemoryLayout<UInt32>.size, index: 9)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (rows + Self.rowsPerThreadgroup - 1)
+                    / Self.rowsPerThreadgroup,
+                    height: batchCount, depth: 1),
             threadsPerThreadgroup: MTLSize(
                 width: 32 * Self.rowsPerThreadgroup, height: 1, depth: 1))
         encoder.endEncoding()

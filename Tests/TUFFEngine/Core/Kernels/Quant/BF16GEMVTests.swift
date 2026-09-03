@@ -260,4 +260,120 @@ import TUFFValidationSupport
             #expect(newPointer[row + 1] == oldPointer[row])
         }
     }
+
+    @Test func batchedRowsMatchScalarProjectionsWithStrides() throws {
+        let context = try MetalContext()
+        let kernel = try BF16GEMV(context: context, maxRows: 4)
+        let rows = 13
+        let columns = 64
+        let batch = 4
+        let inputStride = columns + 5
+        let halfOutputStride = rows + 3
+        let floatOutputStride = rows + 2
+        let weights = (0..<(rows * columns)).map { index in
+            Quantization.bf16Bits(Float((index * 23 + 9) % 97 - 48) / 64)
+        }
+        let biases = (0..<rows).map { index in
+            Quantization.bf16Bits(Float((index * 7 + 1) % 17 - 8) / 32)
+        }
+        let inputs = (0..<(batch * inputStride)).map { index in
+            index % inputStride < columns
+                ? Float16(Float((index * 11 + 5) % 71 - 35) / 32)
+                : Float16(123)
+        }
+        let weightBuffer = try #require(context.device.makeBuffer(
+            bytes: weights,
+            length: weights.count * MemoryLayout<UInt16>.stride,
+            options: .storageModeShared))
+        let biasBuffer = try #require(context.device.makeBuffer(
+            bytes: biases,
+            length: biases.count * MemoryLayout<UInt16>.stride,
+            options: .storageModeShared))
+        let inputBuffer = try #require(Fp16Buffer.make(
+            context.device, halves: [Float16(-19)] + inputs))
+        let scalarHalf = try #require(Fp16Buffer.make(
+            context.device, count: batch * halfOutputStride))
+        let batchedHalf = try #require(Fp16Buffer.make(
+            context.device, count: batch * halfOutputStride))
+        let scalarFloat = try #require(context.device.makeBuffer(
+            length: batch * floatOutputStride * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
+        let batchedFloat = try #require(context.device.makeBuffer(
+            length: batch * floatOutputStride * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
+        let weightsView = Self.view(weightBuffer, elements: weights.count,
+                                    rows: rows, columns: columns)
+        let biasView = Self.view(biasBuffer, elements: biases.count,
+                                 rows: 1, columns: rows)
+        let inputOffset = MemoryLayout<Float16>.stride
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        for row in 0..<batch {
+            let inputRowOffset = inputOffset
+                + row * inputStride * MemoryLayout<Float16>.stride
+            kernel.encodeHalf(commandBuffer: commandBuffer,
+                              weights: weightsView,
+                              input: inputBuffer,
+                              inputOffset: inputRowOffset,
+                              output: scalarHalf,
+                              outputOffset: row * halfOutputStride
+                                * MemoryLayout<Float16>.stride,
+                              bias: biasView,
+                              rows: rows,
+                              columns: columns)
+            kernel.encodeFloat(commandBuffer: commandBuffer,
+                               weights: weightsView,
+                               input: inputBuffer,
+                               inputOffset: inputRowOffset,
+                               output: scalarFloat,
+                               outputOffset: row * floatOutputStride
+                                * MemoryLayout<Float>.stride,
+                               bias: biasView,
+                               rows: rows,
+                               columns: columns)
+        }
+        kernel.encodeHalfRows(commandBuffer: commandBuffer,
+                              weights: weightsView,
+                              input: inputBuffer,
+                              inputOffset: inputOffset,
+                              inputStrideElements: inputStride,
+                              output: batchedHalf,
+                              outputStrideElements: halfOutputStride,
+                              bias: biasView,
+                              batchCount: batch,
+                              rows: rows,
+                              columns: columns)
+        kernel.encodeFloatRows(commandBuffer: commandBuffer,
+                               weights: weightsView,
+                               input: inputBuffer,
+                               inputOffset: inputOffset,
+                               inputStrideElements: inputStride,
+                               output: batchedFloat,
+                               outputStrideElements: floatOutputStride,
+                               bias: biasView,
+                               batchCount: batch,
+                               rows: rows,
+                               columns: columns)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try checkCommandBufferError(commandBuffer.error)
+
+        let scalarHalfValues = Fp16Buffer.read(scalarHalf,
+                                               count: batch * halfOutputStride)
+        let batchedHalfValues = Fp16Buffer.read(batchedHalf,
+                                                count: batch * halfOutputStride)
+        let scalarFloatPointer = scalarFloat.contents()
+            .assumingMemoryBound(to: Float.self)
+        let batchedFloatPointer = batchedFloat.contents()
+            .assumingMemoryBound(to: Float.self)
+        for batchRow in 0..<batch {
+            for row in 0..<rows {
+                let halfIndex = batchRow * halfOutputStride + row
+                #expect(batchedHalfValues[halfIndex]
+                        == scalarHalfValues[halfIndex])
+                let floatIndex = batchRow * floatOutputStride + row
+                #expect(batchedFloatPointer[floatIndex]
+                        == scalarFloatPointer[floatIndex])
+            }
+        }
+    }
 }

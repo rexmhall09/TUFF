@@ -108,7 +108,8 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             slidingWindow: config.slidingWindow,
             maxPrefillChunkTokens: PrefillRuntimeConfig.maxChunkTokens)
 
-        bf16 = try BF16GEMV(context: context)
+        bf16 = try BF16GEMV(context: context,
+                            maxBatchRows: Self.prefillQueryCapacity)
         argmax = try FP16Argmax(context: context)
         rms = try RMSNorm(context: context)
         rope = try RoPE(context: context)
@@ -448,30 +449,41 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         let indexBytes = MemoryLayout<UInt32>.stride
 
         let cb1 = context.queue.makeCommandBuffer()!
+
+        // Normalize and project all candidate rows through the resident
+        // weights with bounded 2-D dispatches. K/V still use per-row outputs
+        // because a ring-enabled KV cache may wrap each position to a
+        // different physical slot.
+        rms.encodeFloatBF16WRows(
+            commandBuffer: cb1,
+            x: hidden,
+            xStrideElements: hiddenSize,
+            weight: views.inputNorm.buffer,
+            weightOffset: Int(views.inputNorm.offset),
+            out: normed,
+            outStrideElements: hiddenSize,
+            rows: queryCount,
+            d: UInt32(hiddenSize),
+            eps: 1e-5)
+        bf16.encodeHalfRows(
+            commandBuffer: cb1,
+            weights: views.qWeight,
+            input: normed,
+            inputStrideElements: hiddenSize,
+            output: query,
+            outputStrideElements: qRows,
+            bias: views.qBias,
+            batchCount: queryCount,
+            rows: qRows,
+            columns: hiddenSize)
+
         for row in 0..<queryCount {
             let position = startPosition + row
-            let hiddenOffset = row * hiddenSize * floatBytes
             let normedOffset = row * hiddenSize * halfBytes
             let queryOffset = row * qRows * halfBytes
-            let routerOffset = row * config.numExperts * floatBytes
-            let routeOffset = row * config.topKExperts
             let kSlot = kv.kSlot(layer: layer, position: position)
             let vSlot = kv.vSlot(layer: layer, position: position)
 
-            rms.encodeFloatBF16W(
-                commandBuffer: cb1,
-                x: hidden, xOffset: hiddenOffset,
-                weight: views.inputNorm.buffer,
-                weightOffset: Int(views.inputNorm.offset),
-                out: normed, outOffset: normedOffset,
-                d: UInt32(hiddenSize), eps: 1e-5)
-            bf16.encodeHalf(
-                commandBuffer: cb1,
-                weights: views.qWeight,
-                input: normed, inputOffset: normedOffset,
-                output: query, outputOffset: queryOffset,
-                bias: views.qBias,
-                rows: qRows, columns: hiddenSize)
             bf16.encodeHalf(
                 commandBuffer: cb1,
                 weights: views.kWeight,
@@ -525,32 +537,53 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                     sinksOffset: Int(views.sinks.offset),
                     ringCapacity: UInt32(kv.ringCapacity(layer: layer)))
             }
-            bf16.encodeHalf(
-                commandBuffer: cb1,
-                weights: views.oWeight,
-                input: attentionOutput, inputOffset: queryOffset,
-                output: projectedAttention, outputOffset: normedOffset,
-                bias: views.oBias,
-                rows: hiddenSize, columns: qRows)
+        }
+
+        bf16.encodeHalfRows(
+            commandBuffer: cb1,
+            weights: views.oWeight,
+            input: attentionOutput,
+            inputStrideElements: qRows,
+            output: projectedAttention,
+            outputStrideElements: hiddenSize,
+            bias: views.oBias,
+            batchCount: queryCount,
+            rows: hiddenSize,
+            columns: qRows)
+        for row in 0..<queryCount {
+            let hiddenOffset = row * hiddenSize * floatBytes
+            let normedOffset = row * hiddenSize * halfBytes
             elementwise.encodeFloatResidualAdd(
                 commandBuffer: cb1,
                 hidden: hidden, hiddenOffset: hiddenOffset,
                 delta: projectedAttention, deltaOffset: normedOffset,
                 count: hiddenSize)
-            rms.encodeFloatBF16W(
-                commandBuffer: cb1,
-                x: hidden, xOffset: hiddenOffset,
-                weight: views.postAttentionNorm.buffer,
-                weightOffset: Int(views.postAttentionNorm.offset),
-                out: normed, outOffset: normedOffset,
-                d: UInt32(hiddenSize), eps: 1e-5)
-            bf16.encodeFloat(
-                commandBuffer: cb1,
-                weights: views.routerWeight,
-                input: normed, inputOffset: normedOffset,
-                output: routerLogits, outputOffset: routerOffset,
-                bias: views.routerBias,
-                rows: config.numExperts, columns: hiddenSize)
+        }
+        rms.encodeFloatBF16WRows(
+            commandBuffer: cb1,
+            x: hidden,
+            xStrideElements: hiddenSize,
+            weight: views.postAttentionNorm.buffer,
+            weightOffset: Int(views.postAttentionNorm.offset),
+            out: normed,
+            outStrideElements: hiddenSize,
+            rows: queryCount,
+            d: UInt32(hiddenSize),
+            eps: 1e-5)
+        bf16.encodeFloatRows(
+            commandBuffer: cb1,
+            weights: views.routerWeight,
+            input: normed,
+            inputStrideElements: hiddenSize,
+            output: routerLogits,
+            outputStrideElements: config.numExperts,
+            bias: views.routerBias,
+            batchCount: queryCount,
+            rows: config.numExperts,
+            columns: hiddenSize)
+        for row in 0..<queryCount {
+            let routerOffset = row * config.numExperts * floatBytes
+            let routeOffset = row * config.topKExperts
             moePrimitives.encodeRouterTop4(
                 commandBuffer: cb1,
                 logits: routerLogits,

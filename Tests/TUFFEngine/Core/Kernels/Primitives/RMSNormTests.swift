@@ -110,6 +110,76 @@ import TUFFValidationSupport
                 < Tolerance.fp16Reduction)
     }
 
+    @Test func rmsNorm_floatResidual_blockMatchesScalarRowsWithStrides() throws {
+        let rows = 5
+        let d = 2880
+        let xStride = d + 7
+        let outStride = d + 5
+        let xPrefix = [Float(31), Float(-31), Float(7)]
+        var rng = SeedTree(0x7A11).key("rmsnorm-float-block")
+        let input = (0..<(rows * xStride)).map { index in
+            index % xStride < d ? rng.uniform(-8_000, 8_000) : Float(91)
+        }
+        let weightBits = (0..<d).map {
+            Quantization.bf16Bits(0.75 + Float($0 % 13) / 16)
+        }
+        let context = try MetalContext()
+        let kernel = try RMSNorm(context: context)
+        let inputBuffer = try #require(context.device.makeBuffer(
+            bytes: xPrefix + input,
+            length: (xPrefix.count + input.count) * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
+        let weightBuffer = try #require(context.device.makeBuffer(
+            bytes: weightBits,
+            length: weightBits.count * MemoryLayout<UInt16>.stride,
+            options: .storageModeShared))
+        let scalarOutput = try #require(Fp16Buffer.make(
+            context.device, count: 2 + rows * outStride))
+        let blockOutput = try #require(Fp16Buffer.make(
+            context.device, count: 2 + rows * outStride))
+        let inputOffset = xPrefix.count * MemoryLayout<Float>.stride
+        let outputOffset = 2 * MemoryLayout<Float16>.stride
+        let commandBuffer = try #require(context.queue.makeCommandBuffer())
+        for row in 0..<rows {
+            kernel.encodeFloatBF16W(
+                commandBuffer: commandBuffer,
+                x: inputBuffer,
+                xOffset: inputOffset + row * xStride * MemoryLayout<Float>.stride,
+                weight: weightBuffer,
+                out: scalarOutput,
+                outOffset: outputOffset + row * outStride
+                    * MemoryLayout<Float16>.stride,
+                d: UInt32(d),
+                eps: Self.eps)
+        }
+        kernel.encodeFloatBF16WRows(
+            commandBuffer: commandBuffer,
+            x: inputBuffer,
+            xOffset: inputOffset,
+            xStrideElements: xStride,
+            weight: weightBuffer,
+            out: blockOutput,
+            outOffset: outputOffset,
+            outStrideElements: outStride,
+            rows: rows,
+            d: UInt32(d),
+            eps: Self.eps)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        try checkCommandBufferError(commandBuffer.error)
+
+        let scalar = Fp16Buffer.read(scalarOutput, count: 2 + rows * outStride)
+        let block = Fp16Buffer.read(blockOutput, count: 2 + rows * outStride)
+        for row in 0..<rows {
+            let start = 2 + row * outStride
+            let scalarRow = Array(scalar[start..<(start + d)])
+            let blockRow = Array(block[start..<(start + d)])
+            #expect(RelError.maxAbsDiff(blockRow, scalarRow) <= 1e-3)
+            #expect(RelError.compute(actual: blockRow, reference: scalarRow)
+                    <= 1e-4)
+        }
+    }
+
     // MARK: - No-scale variant
     //
     // v_norm and the MoE router's internal norm omit the learnable weight:

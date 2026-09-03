@@ -150,6 +150,38 @@ void rmsnorm_float_bf16w_half(
     }
 }
 
+// Batched form for GPT-OSS chunked/speculative verification. Each
+// threadgroup owns one FP32 residual row and writes one FP16 normalized row.
+// The row strides are explicit because the caller keeps the rows in shared
+// bounded scratch rather than allocating a temporary matrix per block.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void rmsnorm_float_bf16w_half_block(
+    device const float*  x          [[buffer(0)]],
+    device const bfloat* weight     [[buffer(1)]],
+    device       half*   out        [[buffer(2)]],
+    constant     uint&   T          [[buffer(3)]],
+    constant     uint&   D          [[buffer(4)]],
+    constant     float&  eps        [[buffer(5)]],
+    constant     uint&   x_stride   [[buffer(6)]],
+    constant     uint&   out_stride [[buffer(7)]],
+    uint  row             [[threadgroup_position_in_grid]],
+    uint  lid             [[thread_position_in_threadgroup]],
+    uint  lsize           [[threads_per_threadgroup]],
+    uint  simd_lane_id    [[thread_index_in_simdgroup]],
+    uint  simd_group_id   [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups      [[simdgroups_per_threadgroup]]) {
+    if (row >= T) return;
+    threadgroup float partial[kRmsMaxSimdGroups];
+    device const float* xr = x + row * x_stride;
+    device half* outRow = out + row * out_stride;
+    const float inv = rms_block_inv_float(xr, D, eps, lid, lsize,
+                                          simd_lane_id, simd_group_id,
+                                          simdgroups, partial);
+    for (uint i = lid; i < D; i += lsize) {
+        outRow[i] = half(xr[i] * inv * float(weight[i]));
+    }
+}
+
 // Gemma 4 applies q_norm/k_norm
 // (BF16 weight, shared across heads) and v_norm (no-scale) to each attention
 // head independently. These kernels process all heads in one dispatch, with

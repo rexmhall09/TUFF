@@ -120,6 +120,60 @@ kernel void bf16_gemv_float_simd(
     }
 }
 
+// Batched resident projections used by bounded prefill and speculative
+// verification. The x grid partitions output rows and the y grid partitions
+// input rows. One SIMD group still owns one output row, but all rows share one
+// encoder and can make better use of the GPU than a chain of tiny GEMVs.
+kernel void bf16_gemv_half_rows_simd(
+    device const bfloat* weights [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    device const bfloat* bias [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& columns [[buffer(5)]],
+    constant uint& has_bias [[buffer(6)]],
+    constant uint& input_stride [[buffer(7)]],
+    constant uint& output_stride [[buffer(8)]],
+    constant uint& batch_count [[buffer(9)]],
+    uint2 tg_idx [[threadgroup_position_in_grid]],
+    uint simdgroupIndex [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rowsPerThreadgroup = 8;
+    const uint row = tg_idx.x * rowsPerThreadgroup + simdgroupIndex;
+    if (tg_idx.y >= batch_count || row >= rows) return;
+    const device half* rowInput = input + tg_idx.y * input_stride;
+    const float sum = bf16_gemv_row(weights, rowInput, row, columns, lane);
+    if (lane == 0u) {
+        output[tg_idx.y * output_stride + row] = half(
+            sum + (has_bias != 0u ? float(bias[row]) : 0.0f));
+    }
+}
+
+kernel void bf16_gemv_float_rows_simd(
+    device const bfloat* weights [[buffer(0)]],
+    device const half* input [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    device const bfloat* bias [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& columns [[buffer(5)]],
+    constant uint& has_bias [[buffer(6)]],
+    constant uint& input_stride [[buffer(7)]],
+    constant uint& output_stride [[buffer(8)]],
+    constant uint& batch_count [[buffer(9)]],
+    uint2 tg_idx [[threadgroup_position_in_grid]],
+    uint simdgroupIndex [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rowsPerThreadgroup = 8;
+    const uint row = tg_idx.x * rowsPerThreadgroup + simdgroupIndex;
+    if (tg_idx.y >= batch_count || row >= rows) return;
+    const device half* rowInput = input + tg_idx.y * input_stride;
+    const float sum = bf16_gemv_row(weights, rowInput, row, columns, lane);
+    if (lane == 0u) {
+        output[tg_idx.y * output_stride + row] = sum
+            + (has_bias != 0u ? float(bias[row]) : 0.0f);
+    }
+}
+
 // Batched BF16 output-head argmax. The x grid partitions vocabulary rows and
 // the y grid partitions candidate hidden rows. This keeps the target verifier
 // to one head dispatch plus one reduction dispatch, rather than one full

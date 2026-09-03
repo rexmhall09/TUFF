@@ -23,6 +23,7 @@ final class RMSNorm {
     private let psoNoScalePerHead256: MTLComputePipelineState
     private let psoNoScalePerHead512: MTLComputePipelineState
     private let psoFloatBF16: MTLComputePipelineState
+    private let psoFloatBF16Block: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
@@ -48,6 +49,8 @@ final class RMSNorm {
                                                                  "rmsnorm_no_scale_perhead",
                                                                  d: 512)
         self.psoFloatBF16 = try context.pipeline("rmsnorm_float_bf16w_half")
+        self.psoFloatBF16Block = try context.pipeline(
+            "rmsnorm_float_bf16w_half_block")
     }
 
     /// Encode the BF16-weight variant (Gemma 4 norms).
@@ -80,6 +83,47 @@ final class RMSNorm {
                        weight: weight, weightOffset: weightOffset,
                        out: out, outOffset: outOffset,
                        d: d, eps: eps)
+    }
+
+    /// Normalize several FP32 residual rows with one bounded dispatch. The
+    /// output remains FP16, matching `encodeFloatBF16W`; separate strides keep
+    /// this usable with the persistent speculative scratch buffers.
+    func encodeFloatBF16WRows(commandBuffer: MTLCommandBuffer,
+                              x: MTLBuffer, xOffset: Int = 0,
+                              xStrideElements: Int,
+                              weight: MTLBuffer, weightOffset: Int = 0,
+                              out: MTLBuffer, outOffset: Int = 0,
+                              outStrideElements: Int,
+                              rows: Int,
+                              d: UInt32,
+                              eps: Float) {
+        precondition(rows > 0)
+        precondition(xOffset >= 0 && outOffset >= 0)
+        precondition(xStrideElements >= Int(d))
+        precondition(outStrideElements >= Int(d))
+        precondition(xOffset % MemoryLayout<Float>.alignment == 0)
+        precondition(outOffset % MemoryLayout<Float16>.alignment == 0)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoFloatBF16Block)
+        enc.setBuffer(x, offset: xOffset, index: 0)
+        enc.setBuffer(weight, offset: weightOffset, index: 1)
+        enc.setBuffer(out, offset: outOffset, index: 2)
+        var rowCount = UInt32(rows)
+        var dimension = d
+        var epsilon = eps
+        var xStride = UInt32(xStrideElements)
+        var outStride = UInt32(outStrideElements)
+        enc.setBytes(&rowCount, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&dimension, length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&epsilon, length: MemoryLayout<Float>.size, index: 5)
+        enc.setBytes(&xStride, length: MemoryLayout<UInt32>.size, index: 6)
+        enc.setBytes(&outStride, length: MemoryLayout<UInt32>.size, index: 7)
+        let threads = min(Int(psoFloatBF16Block.maxTotalThreadsPerThreadgroup), 256)
+        enc.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: threads,
+                                                               height: 1,
+                                                               depth: 1))
+        enc.endEncoding()
     }
 
     /// Encode the no-scale variant (v_norm, router internal norm).
