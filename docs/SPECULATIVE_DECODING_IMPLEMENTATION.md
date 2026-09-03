@@ -1,6 +1,6 @@
-# Speculative decoding proof of concept
+# Speculative decoding architecture
 
-Status: implemented opt-in greedy POC, 2026-09-02
+Status: implemented opt-in greedy verifier with adaptive cost gating, 2026-09-03
 
 ## What the current runtime exposes
 
@@ -28,6 +28,9 @@ Generation policy uses two independent protocols:
 * `DraftTokenProducer` proposes a bounded candidate block from emitted history.
 * `SpeculativeVerificationRunner` verifies the block and owns a transactional
   speculative tail.
+* `SpeculativeTargetCostReporting` optionally exposes decode-only routed-expert
+  reads and bytes so adaptive mode can protect the SSD bottleneck as well as
+  wall time.
 
 The verifier returns the target greedy prediction at the boundary before every
 candidate and after the final candidate. Thus an `N`-token proposal returns
@@ -44,6 +47,12 @@ the ordinary sampler path even if a drafter is supplied. This avoids silently
 introducing biased sampling while preserving all existing fused-head and
 sampler fast paths.
 
+The verifier also has an optional boundary-token hook. If the first draft token
+does not equal the target's already-available greedy boundary prediction, the
+runtime emits the target correction through the normal scalar path without
+streaming or committing a speculative tail. This keeps a low-acceptance drafter
+from paying for an entire doomed block on an SSD-backed target.
+
 ## Production implementation sequence
 
 1. Landed pure acceptance logic, proposal/result types, and transaction tests.
@@ -55,18 +64,23 @@ sampler fast paths.
    one token per verification row. Reuse `executePrefillChunk` without changing
    public prefill seed behavior.
 4. Added the same explicit verifier to GPT-OSS, using its existing grouped
-   prefill expert path. The initial implementation may use bounded GPU logits
-   for per-row head evaluation if no row-argmax kernel is available, but it must
-   read only row argmax IDs back to Swift.
+   prefill expert path and a batched BF16 output-head argmax kernel. Verification
+   reads only one target ID per row back to Swift; it does not materialize a
+   block-sized CPU logits matrix.
 5. Added a prompt-lookup/n-gram drafter and a benchmark command. It requires no
    second model or tokenizer and is useful for measuring verifier economics
    before a trained drafter exists.
+6. Added an adaptive `auto` mode. It starts at a bounded block, grows only
+   after profitable high-acceptance rounds, and disables itself after low
+   acceptance, wall-time loss, or excess routed-expert bytes. A first-token
+   boundary mismatch is handled before full verification.
 
 ## Expected metrics and benchmark plan
 
-Each run should record rounds, proposed/accepted/rejected tokens, acceptance
-rate, verification wall time, draft time, fallback time, target tokens per
-emitted token, command-buffer counts, and the existing target I/O counters.
+Each run records rounds, proposed/accepted/rejected tokens, acceptance rate,
+verification wall time, draft time, fallback time, target tokens per emitted
+token, boundary checks/rejects, command-buffer counts, and target I/O counters.
+The benchmark derives routed-expert reads and bytes per emitted token directly.
 The central comparison is scalar target work and SSD expert bytes per emitted
 token, not only aggregate tok/s.
 
@@ -76,9 +90,11 @@ context prompts. A verifier-only microbenchmark compares one block pass with
 the same number of scalar target calls. Results are recorded with the current
 commit and binary identity so resumed measurements cannot mix revisions. The
 POC reports expert-cache-plan misses, estimated expert bytes, hits, and misses
-inside verification; exact Metal command-buffer/GPU counters remain
-unavailable. A live repetitive-prompt smoke slice has now run against the
-installed Gemma E4B and GPT-OSS 20B bundles; the full four-prompt slice remains
+inside verification, plus total decode-phase routed-expert traffic.
+Verification command-buffer counts are reported by the bounded production
+paths; hardware GPU counters and physical SSD counters are still unavailable.
+Fresh repetitive-prompt matrices have run against the installed Gemma E4B,
+streamed Gemma, and GPT-OSS 20B bundles. The full four-prompt slice remains
 available through the benchmark's `--prompt` filter and resumable output.
 
 ## AngelSpec / DFly boundary
