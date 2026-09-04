@@ -98,11 +98,15 @@ warmup and three measured fresh-process runs for baseline, auto, and blocks
 2/4/6/8, with `max-new 16`, `max-context 2048`, and the repetitive fixture.
 GPT-OSS uses Harmony chat mode in the harness; Gemma uses raw completion mode.
 The raw directory preserves every process, stdout/stderr, command, system
-report, commit, and CLI hash:
+report, commit, and CLI hash. `benchmark-results/` is not tracked, so these
+are paths on the machine that ran the matrix rather than links:
 
-- [latest resident Gemma plus streamed GPT-OSS](../benchmark-results/speculative-latest-m2-20260903/summary.md)
-- [earlier batched-kernel comparison](../benchmark-results/speculative-batched-gpt-m2-20260903/summary.md)
-- [earlier streamed-Gemma comparison](../benchmark-results/speculative-final-gemma-m2-20260903/summary.md)
+- latest resident Gemma plus streamed GPT-OSS:
+  `benchmark-results/speculative-latest-m2-20260903/summary.md`
+- earlier batched-kernel comparison:
+  `benchmark-results/speculative-batched-gpt-m2-20260903/summary.md`
+- earlier streamed-Gemma comparison:
+  `benchmark-results/speculative-final-gemma-m2-20260903/summary.md`
 
 The full four-prompt matrix remains available through
 [Scripts/benchmark_speculative.rb](../Scripts/benchmark_speculative.rb). The
