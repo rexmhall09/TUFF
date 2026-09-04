@@ -135,7 +135,11 @@ The interface has four places:
   share one decode service, so TUFF never starts a second copy of the model.
 - **Settings** keeps simple chat behavior separate from per-model context,
   sampling, cache, prefill, and memory controls. Per-model memory defaults to
-  Auto; turning it off restores that model's saved manual choices.
+  Auto; turning it off restores that model's saved manual choices. **Zoom**,
+  under Appearance, sets the interface between 90% and 150% — also on the View
+  menu as Zoom In (⌘+), Zoom Out (⌘−), and Actual Size (⌘0). It scales the
+  fonts themselves rather than magnifying the window, so larger text is drawn
+  at full resolution instead of being blown up.
 
 Both sides of the conversation render headings, lists, links, quotes, code
 blocks, inline code, emphasis, and LaTeX math such as `$a^2 + b^2 = c^2$`. Math

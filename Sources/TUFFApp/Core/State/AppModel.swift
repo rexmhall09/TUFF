@@ -162,6 +162,10 @@ public final class AppModel {
         get { settingsStore.customAccentColorHex }
         set { settingsStore.customAccentColorHex = newValue }
     }
+    public private(set) var zoomLevel: AppZoomLevel {
+        get { settingsStore.zoomLevel }
+        set { settingsStore.zoomLevel = newValue }
+    }
     /// Whether launching the app should load the model straight away. Off by
     /// default, because loading takes minutes and holds gigabytes.
     public var diagnostics: AppDiagnostics? {
@@ -308,6 +312,8 @@ public final class AppModel {
     private var hasHandledTerminalEvent = false
     private let memorySampler: AppMemorySampler
     private let settingsPersistenceEnabled: Bool
+    /// The debounced settings write. See `persistSettingsSoon`.
+    @ObservationIgnored private var pendingSettingsSave: Task<Void, Never>?
     private let installETAClock: SuspendingClock
     private let installETAOrigin: SuspendingClock.Instant
     private var visionInstallETAEstimator = DownloadETAEstimator()
@@ -393,6 +399,7 @@ public final class AppModel {
         self.loadModelOnLaunch = settings.loadModelOnLaunch
         self.accentColorMode = settings.accentColorMode
         self.customAccentColorHex = settings.customAccentColorHex
+        self.zoomLevel = settings.zoomLevel
         self.settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
 
@@ -1342,6 +1349,12 @@ public final class AppModel {
         persistSettings()
     }
 
+    public func setZoomLevel(_ level: AppZoomLevel) {
+        guard zoomLevel != level else { return }
+        zoomLevel = level
+        persistSettings()
+    }
+
     public func settingsProfile(
         for coordinator: ModelInstallCoordinator
     ) -> AppModelSettingsProfile {
@@ -1418,7 +1431,7 @@ public final class AppModel {
         guard profile.isValid() else { return }
         if coordinator.id == selectedModelID {
             applySettingsProfile(profile)
-            persistSettings()
+            persistSettingsSoon()
             return
         }
         guard settingsPersistenceEnabled else { return }
@@ -2294,6 +2307,7 @@ public final class AppModel {
         loadModelOnLaunch = settings.loadModelOnLaunch
         accentColorMode = settings.accentColorMode
         customAccentColorHex = settings.customAccentColorHex
+        zoomLevel = settings.zoomLevel
         settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
     }
 
@@ -2346,6 +2360,36 @@ public final class AppModel {
         settingsStore.systemPrompt = profile.systemPrompt
     }
 
+    /// Coalesces the writes behind a control that changes continuously.
+    ///
+    /// Every save rewrites the whole file — a read to merge the profiles of
+    /// the models that are not selected, then an atomic replace — and the
+    /// Settings sliders call one per tick while the system prompt editor calls
+    /// one per keystroke, all on the main actor. The in-memory state still
+    /// changes immediately; only the disk write waits, and because each save
+    /// serialises whatever is current rather than a captured snapshot, a
+    /// pending one can never write back a stale value.
+    ///
+    /// `flushPendingSettings` runs on quit so the last edit is not lost.
+    private func persistSettingsSoon() {
+        guard settingsPersistenceEnabled else { return }
+        pendingSettingsSave?.cancel()
+        pendingSettingsSave = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            self.pendingSettingsSave = nil
+            self.persistSettings()
+        }
+    }
+
+    /// Writes whatever `persistSettingsSoon` is still holding, now.
+    public func flushPendingSettings() {
+        guard pendingSettingsSave != nil else { return }
+        pendingSettingsSave?.cancel()
+        pendingSettingsSave = nil
+        persistSettings()
+    }
+
     private func persistSettings() {
         guard settingsPersistenceEnabled else { return }
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
@@ -2363,6 +2407,7 @@ public final class AppModel {
         settings.loadModelOnLaunch = loadModelOnLaunch
         settings.accentColorMode = accentColorMode
         settings.customAccentColorHex = customAccentColorHex
+        settings.zoomLevel = zoomLevel
         settings.bypassModelRestrictions = bypassModelRestrictions
         try? MacAppSettingsFileStore.save(
             settings,

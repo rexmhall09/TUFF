@@ -13,6 +13,7 @@ import SwiftUI
 /// pointer was over.
 struct OutputPaneView: View {
     let model: AppModel
+    @Environment(\.appFontScale) private var fontScale
     /// True while the view should keep itself at the newest message. Set by the
     /// reader arriving at the bottom and cleared by the reader leaving it, so
     /// following the answer never fights someone reading back.
@@ -122,7 +123,7 @@ struct OutputPaneView: View {
             images: turn.images,
             documents: turn.documents,
             modelName: model.modelShortName(forProfileKey: turn.modelID),
-            renderer: Self.sharedRenderer,
+            renderer: Self.renderer(scale: fontScale),
             actions: actions(for: turn))
     }
 
@@ -145,7 +146,7 @@ struct OutputPaneView: View {
             images: model.outputImageAttachments,
             documents: model.outputDocumentAttachments,
             modelName: model.selectedDescriptor.shortName,
-            renderer: Self.sharedRenderer,
+            renderer: Self.renderer(scale: fontScale),
             live: TranscriptMessageView.LiveResponse(
                 mailbox: model.hasLiveMessage
                     ? model.generationTranscriptMailbox : nil,
@@ -154,30 +155,43 @@ struct OutputPaneView: View {
                     && model.outputResponsePlainText.isEmpty))
     }
 
-    private static let sharedRenderer = ResponseMarkdownRenderer()
+    /// One renderer per zoom. The point sizes are baked into the attributed
+    /// string it produces, so a renderer belongs to the scale it was made for;
+    /// they are cached rather than rebuilt because every transcript update
+    /// renders through one.
+    @MainActor
+    private static var renderersByScale: [CGFloat: ResponseMarkdownRenderer] = [:]
+
+    @MainActor
+    private static func renderer(scale: CGFloat) -> ResponseMarkdownRenderer {
+        if let cached = renderersByScale[scale] { return cached }
+        let renderer = ResponseMarkdownRenderer(scale: scale)
+        renderersByScale[scale] = renderer
+        return renderer
+    }
 
     private var emptyPlaceholderContent: some View {
         VStack(spacing: 8) {
             if !needsModelLoad {
                 Text("Choose a predefined example or write your own prompt.")
-                    .font(.headline)
+                    .appFont(.headline)
                 Text("Describe the goal, relevant context, and any constraints.")
-                    .font(.callout)
+                    .appFont(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
             if isLoadingModel {
                 LoadingModelText()
-                    .font(.callout)
+                    .appFont(.callout)
                     .foregroundStyle(.tertiary)
             } else if let placeholderHint {
                 Text(placeholderHint)
-                    .font(.callout)
+                    .appFont(.callout)
                     .foregroundStyle(.tertiary)
             }
             if let detail = model.presentation.detail {
                 Text(detail)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(model.presentation.severity == .error ? .red : .secondary)
                     .multilineTextAlignment(.center)
             }
@@ -329,7 +343,7 @@ private struct EmptyPlaceholderIcon: View {
 
     var body: some View {
         Image(systemName: systemName)
-            .font(.title2)
+            .appFont(.title2)
             .foregroundStyle(.quaternary)
             .accessibilityHidden(true)
     }
@@ -420,10 +434,10 @@ private struct MessagePreview: View {
 #Preview("Empty") {
     VStack(spacing: 8) {
         Image(systemName: "cube.transparent")
-            .font(.title2)
+            .appFont(.title2)
             .foregroundStyle(.quaternary)
         Text("Choose a predefined example or write your own prompt.")
-            .font(.headline)
+            .appFont(.headline)
         Text("Describe the goal, relevant context, and any constraints.")
             .foregroundStyle(.secondary)
     }

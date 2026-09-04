@@ -14,7 +14,7 @@ struct InfoPopoverButton: View {
             isShowingPopover.toggle()
         } label: {
             Image(systemName: "info.circle")
-                .font(.caption2)
+                .appFont(.caption2)
                 .foregroundStyle(.tertiary)
                 .frame(width: 16, height: 16)
                 .contentShape(Rectangle())
@@ -23,7 +23,7 @@ struct InfoPopoverButton: View {
         .help(text)
         .popover(isPresented: $isShowingPopover, arrowEdge: arrowEdge) {
             Text(text)
-                .font(.callout)
+                .appFont(.callout)
                 .frame(width: 280, alignment: .leading)
                 .padding()
         }

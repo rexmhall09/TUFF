@@ -35,9 +35,18 @@ public final class StreamingResponseDocumentController {
     private var prefillDotCount = 0
 
     private let renderer: ResponseMarkdownRenderer
+    /// The zoom this document is set at. The streamed text is an
+    /// `NSAttributedString`, so the size is baked in here as well as in the
+    /// renderer, and both have to agree or the answer changes size as it
+    /// finishes.
+    private let scale: CGFloat
 
-    public init(renderer: ResponseMarkdownRenderer = ResponseMarkdownRenderer()) {
-        self.renderer = renderer
+    public init(
+        renderer: ResponseMarkdownRenderer? = nil,
+        scale: CGFloat = 1
+    ) {
+        self.scale = scale
+        self.renderer = renderer ?? ResponseMarkdownRenderer(scale: scale)
     }
 
     public static func clampedRanges(
@@ -88,7 +97,7 @@ public final class StreamingResponseDocumentController {
             let delta = String(response.dropFirst(self.response.count))
             storage.append(NSAttributedString(
                 string: delta,
-                attributes: Self.responseAttributes()))
+                attributes: Self.responseAttributes(scale: scale)))
             assistantRange.length += (delta as NSString).length
             mutation = .appended
         }
@@ -119,7 +128,7 @@ public final class StreamingResponseDocumentController {
         prefillDotCount = (prefillDotCount + 1) % 4
         let replacement = NSAttributedString(
             string: Self.prefillPlaceholder(dotCount: prefillDotCount),
-            attributes: Self.prefillPlaceholderAttributes())
+            attributes: Self.prefillPlaceholderAttributes(scale: scale))
         storage.replaceCharacters(in: range, with: replacement)
         range.length = replacement.length
         prefillPlaceholderRange = range
@@ -135,14 +144,14 @@ public final class StreamingResponseDocumentController {
         assistantRange = NSRange(location: 0, length: 0)
         document.append(NSAttributedString(
             string: response,
-            attributes: Self.responseAttributes()))
+            attributes: Self.responseAttributes(scale: scale)))
         assistantRange.length = (response as NSString).length
         prefillDotCount = 0
         prefillPlaceholderRange = nil
         if showsPrefillPlaceholder {
             let placeholder = NSAttributedString(
                 string: Self.prefillPlaceholder(dotCount: prefillDotCount),
-                attributes: Self.prefillPlaceholderAttributes())
+                attributes: Self.prefillPlaceholderAttributes(scale: scale))
             prefillPlaceholderRange = NSRange(
                 location: document.length,
                 length: placeholder.length)
@@ -152,19 +161,19 @@ public final class StreamingResponseDocumentController {
         isFinalized = false
     }
 
-    public static func responseAttributes() -> [NSAttributedString.Key: Any] {
+    public static func responseAttributes(scale: CGFloat = 1) -> [NSAttributedString.Key: Any] {
         let style = NSMutableParagraphStyle()
-        style.lineSpacing = 3
-        style.paragraphSpacing = 6
+        style.lineSpacing = 3 * scale
+        style.paragraphSpacing = 6 * scale
         return [
-            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize * scale),
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: style,
         ]
     }
 
-    private static func prefillPlaceholderAttributes() -> [NSAttributedString.Key: Any] {
-        var attributes = responseAttributes()
+    private static func prefillPlaceholderAttributes(scale: CGFloat = 1) -> [NSAttributedString.Key: Any] {
+        var attributes = responseAttributes(scale: scale)
         attributes[.foregroundColor] = NSColor.secondaryLabelColor
         return attributes
     }

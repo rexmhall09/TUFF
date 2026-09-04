@@ -19,6 +19,7 @@ struct TranscriptMessageView: View {
     let documents: [AppDocumentAttachment]
     let modelName: String
     let renderer: ResponseMarkdownRenderer
+    @Environment(\.appFontScale) private var fontScale
     /// Nil for a finished message. Present while this message is the live one.
     var live: LiveResponse?
     /// What this message can be rewound to. Absent while a run is in flight,
@@ -159,7 +160,11 @@ struct TranscriptMessageView: View {
                 mailbox: live.mailbox,
                 isTerminal: live.isTerminal,
                 showsPrefillPlaceholder: live.showsPrefillPlaceholder,
+                scale: fontScale,
                 height: $liveHeight)
+                // The live answer's text is built at one scale, so changing
+                // the zoom rebuilds it rather than leaving it at the old size.
+                .id(fontScale)
                 .frame(height: max(liveHeight, 1))
         } else if !response.isEmpty {
             AttributedTextView(
@@ -191,7 +196,7 @@ struct MessageActionButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.caption)
+                .appFont(.caption)
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: 18, height: 18)
                 .contentShape(Rectangle())
@@ -210,7 +215,7 @@ struct MessageRoleLabel: View {
 
     var body: some View {
         Text(text)
-            .font(.caption.weight(.semibold))
+            .appFont(.caption.weight(.semibold))
             .foregroundStyle(TUFFMacTheme.accentColor)
             .lineLimit(1)
             .accessibilityAddTraits(.isHeader)
@@ -230,14 +235,14 @@ struct ThinkingDisclosure: View {
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             Text(text)
-                .font(.callout)
+                .appFont(.callout)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 8)
         } label: {
             Label(isRunning ? "Thinking…" : "Thinking", systemImage: "brain")
-                .font(.caption.weight(.medium))
+                .appFont(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
         }
         .padding(10)

@@ -28,17 +28,17 @@ struct ModelInstallView: View {
     private var identity: some View {
         VStack(spacing: 10) {
             Image(systemName: "externaldrive.badge.plus")
-                .font(.system(.largeTitle, design: .rounded))
+                .appFont(.system(.largeTitle, design: .rounded))
                 .foregroundStyle(TUFFMacTheme.accentColor)
                 .accessibilityHidden(true)
             Text("Choose a model")
-                .font(.title.bold())
+                .appFont(.title.bold())
                 .accessibilityHeading(.h1)
             Text("TUFF needs one of these installed before it can generate text. "
                  + "Each one downloads independently, so you can install as many "
                  + "as you have room for and switch between them. A download "
                  + "keeps running while you use another model.")
-                .font(.body)
+                .appFont(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -48,10 +48,10 @@ struct ModelInstallView: View {
     private var locationCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Install location for \(model.selectedDescriptor.displayName)")
-                .font(.caption.weight(.medium))
+                .appFont(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
             Text(model.modelPathText)
-                .font(.caption.monospaced())
+                .appFont(.caption.monospaced())
                 .foregroundStyle(.tertiary)
                 .lineLimit(2)
                 .truncationMode(.middle)

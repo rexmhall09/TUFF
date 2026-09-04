@@ -9,9 +9,9 @@ struct PromptExamplesView: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Try an example")
-                        .font(.headline)
+                        .appFont(.headline)
                     Text("Choose a prompt, edit it, or write your own.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -43,11 +43,11 @@ struct PromptExamplesView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(preset.title)
-                        .font(.caption.weight(.semibold))
+                        .appFont(.caption.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(2)
                     Text(preset.prompt)
-                        .font(.caption2)
+                        .appFont(.caption2)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.leading)
                         .lineLimit(3)

@@ -116,7 +116,7 @@ private struct PhaseLabel: View {
                     .contentTransition(.opacity)
             }
         }
-        .font(.caption.weight(.medium))
+        .appFont(.caption.weight(.medium))
         .lineLimit(1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Model status")

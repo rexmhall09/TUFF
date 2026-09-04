@@ -150,7 +150,7 @@ typealias MacModelSettings = AppModelSettingsProfile
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 6
+    static let currentVersion = 7
     static let defaultProfileKey = TUFFModelCatalog.default.id.rawValue
 
     var version: Int = currentVersion
@@ -161,6 +161,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var loadModelOnLaunch: Bool = false
     var accentColorMode: AppAccentColorMode = .appDefault
     var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
+    var zoomLevel: AppZoomLevel = .default
     /// Lets this Mac download and load models its measured capabilities say it
     /// cannot host, and load a model at manual settings above Auto's budget.
     /// Applies to every model, because it is a statement about the person's
@@ -220,6 +221,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case accentColorMode
         case customAccentColorHex
         case bypassModelRestrictions
+        case zoomLevel
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -261,6 +263,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          accentColorMode: AppAccentColorMode = .appDefault,
          customAccentColorHex: String = AppHexColor.defaultPurple.hexString,
          bypassModelRestrictions: Bool = false,
+         zoomLevel: AppZoomLevel = .default,
          modelProfiles: [String: AppModelSettingsProfile]? = nil) {
         self.version = version
         self.modelProfiles = modelProfiles ?? [Self.defaultProfileKey: AppModelSettingsProfile(
@@ -284,6 +287,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.accentColorMode = accentColorMode
         self.customAccentColorHex = customAccentColorHex
         self.bypassModelRestrictions = bypassModelRestrictions
+        self.zoomLevel = zoomLevel
     }
 
     init(from decoder: Decoder) throws {
@@ -308,6 +312,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
                 ?? AppHexColor.defaultPurple.hexString
             bypassModelRestrictions = try container.decodeIfPresent(
                 Bool.self, forKey: .bypassModelRestrictions) ?? false
+            zoomLevel = try container.decodeIfPresent(
+                AppZoomLevel.self, forKey: .zoomLevel) ?? .default
             return
         }
 

@@ -23,7 +23,7 @@ struct GenerateControl: View {
             // Always "Send". An unloaded model is loaded first, but that is the
             // app's business, not a different button.
             Label("Send", systemImage: "arrow.up")
-                .font(.callout.weight(.semibold))
+                .appFont(.callout.weight(.semibold))
                 .padding(.horizontal, 24)
                 .frame(minWidth: 124, minHeight: controlHeight)
                 .contentShape(Capsule())
@@ -47,7 +47,7 @@ struct GenerateControl: View {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
                 Text(model.presentation.label)
-                    .font(.callout.weight(.medium))
+                    .appFont(.callout.weight(.medium))
                 Label("Cancel model load", systemImage: "xmark.circle.fill")
                     .labelStyle(.iconOnly)
             }
@@ -71,21 +71,21 @@ struct GenerateControl: View {
             HStack(spacing: 10) {
                 if model.isCancellationPending {
                     Text("Stopping")
-                        .font(.callout.weight(.medium))
+                        .appFont(.callout.weight(.medium))
                 } else if model.phase == .prefill {
                     Text(model.presentation.label)
-                        .font(.callout.weight(.medium))
+                        .appFont(.callout.weight(.medium))
                         .monospacedDigit()
                         .contentTransition(.numericText())
                 } else {
                     Text("\(MetricFormat.rate(model.liveTokensPerSecond)) tok/s")
-                        .font(.callout.weight(.semibold))
+                        .appFont(.callout.weight(.semibold))
                         .monospacedDigit()
                         .contentTransition(.numericText())
                 }
                 Label("Stop generation", systemImage: "stop.fill")
                     .labelStyle(.iconOnly)
-                    .font(.callout)
+                    .appFont(.callout)
                     .frame(width: 28, height: 28)
             }
             .padding(.leading, 18)

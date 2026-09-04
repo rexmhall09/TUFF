@@ -40,6 +40,15 @@ struct RootView: View {
 
     var body: some View {
         splitView
+        // Every `appFont` in the app resolves its point size against this.
+        // macOS has no Dynamic Type, and scaling the rendered view instead
+        // only magnifies a bitmap, so the zoom has to reach the fonts
+        // themselves.
+        .environment(\.appFontScale, model.zoomLevel.scale)
+        // The default font as well, for the text that never asks for one —
+        // the sidebar's own labels among it. At 100% this is the body font
+        // the app was already inheriting.
+        .font(AppFont.body.resolved(scale: model.zoomLevel.scale))
         .task(id: AccentSettingsKey(mode: model.accentColorMode, hex: model.customAccentColorHex)) {
             TUFFAccentThemeStore.shared.update(
                 mode: model.accentColorMode, customHex: model.customAccentColorHex)
@@ -83,18 +92,23 @@ struct RootView: View {
         }
     }
 
+    /// The sidebar and detail columns are sized in points, so they are scaled
+    /// with the text they hold — at 150% an unscaled 160pt sidebar clipped its
+    /// own labels.
+    private var zoom: CGFloat { model.zoomLevel.scale }
+
     @ViewBuilder private var splitView: some View {
         if isFullScreen {
             HSplitView {
                 sidebar
                     .frame(
-                        minWidth: AppWindowLayout.sidebarMinimumWidth,
-                        idealWidth: AppWindowLayout.sidebarIdealWidth,
-                        maxWidth: AppWindowLayout.sidebarMaximumWidth,
+                        minWidth: AppWindowLayout.sidebarMinimumWidth * zoom,
+                        idealWidth: AppWindowLayout.sidebarIdealWidth * zoom,
+                        maxWidth: AppWindowLayout.sidebarMaximumWidth * zoom,
                         maxHeight: .infinity)
                 workspace
                     .frame(
-                        minWidth: AppWindowLayout.detailMinimumWidth,
+                        minWidth: AppWindowLayout.detailMinimumWidth * zoom,
                         maxWidth: .infinity,
                         maxHeight: .infinity)
             }
@@ -102,9 +116,9 @@ struct RootView: View {
             NavigationSplitView {
                 sidebar
                     .navigationSplitViewColumnWidth(
-                        min: AppWindowLayout.sidebarMinimumWidth,
-                        ideal: AppWindowLayout.sidebarIdealWidth,
-                        max: AppWindowLayout.sidebarMaximumWidth)
+                        min: AppWindowLayout.sidebarMinimumWidth * zoom,
+                        ideal: AppWindowLayout.sidebarIdealWidth * zoom,
+                        max: AppWindowLayout.sidebarMaximumWidth * zoom)
             } detail: {
                 workspace
             }
@@ -128,7 +142,11 @@ struct RootView: View {
                         navigation.select(item)
                     } label: {
                         HStack(spacing: 9) {
+                            // Stated rather than inherited: the sidebar list
+                            // style puts its own font on row content, so the
+                            // zoom does not reach these labels otherwise.
                             Label(item.title, systemImage: item.systemImage)
+                                .appFont(.body)
                             Spacer(minLength: 0)
                         }
                         .contentShape(Rectangle())
@@ -155,13 +173,14 @@ struct RootView: View {
                     model.clearOutput()
                 } label: {
                     Label("New Chat", systemImage: "square.and.pencil")
+                        .appFont(.body)
                 }
                 .disabled(!canStartNewChat)
             }
             Section("Chats") {
                 if model.conversationStore.conversations.isEmpty {
                     Text("No saved chats")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.tertiary)
                 } else {
                     ForEach(model.conversationStore.conversations) { conversation in
@@ -227,9 +246,10 @@ struct RootView: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(conversation.title)
+                        .appFont(.body)
                         .lineLimit(1)
                     Text(modelName(for: conversation.modelID))
-                        .font(.caption2)
+                        .appFont(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -297,9 +317,9 @@ struct RootView: View {
                         material: .thin),
                     in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 1) {
-                Text("TUFF").font(.headline)
+                Text("TUFF").appFont(.headline)
                 Text("Runs on this Mac")
-                    .font(.caption2)
+                    .appFont(.caption2)
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
@@ -316,21 +336,21 @@ struct RootView: View {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("CURRENT MODEL")
-                        .font(.caption2.weight(.semibold))
+                        .appFont(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
                     Text(model.selectedDescriptor.displayName)
-                        .font(.caption.weight(.medium))
+                        .appFont(.caption.weight(.medium))
                         .lineLimit(2)
                     Label(model.presentation.label, systemImage: model.loadState.isReady
                           ? "circle.fill" : "circle")
-                        .font(.caption2)
+                        .appFont(.caption2)
                         .foregroundStyle(model.loadState.isReady
                                          ? TUFFMacTheme.accentColor
                                          : .secondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
+                    .appFont(.caption2.weight(.semibold))
                     .foregroundStyle(.tertiary)
                     .accessibilityHidden(true)
             }
@@ -548,14 +568,14 @@ private struct ServerWorkspaceView: View {
                     Circle()
                         .fill(TUFFMacTheme.accentColor.opacity(0.12))
                     Image(systemName: "network")
-                        .font(.title2)
+                        .appFont(.title2)
                         .foregroundStyle(TUFFMacTheme.accentColor)
                 }
                 .frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Local server").font(.headline)
+                    Text("Local server").appFont(.headline)
                     Text(serverStatus)
-                        .font(.callout)
+                        .appFont(.callout)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -565,10 +585,10 @@ private struct ServerWorkspaceView: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Endpoint")
-                        .font(.caption.weight(.semibold))
+                        .appFont(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Text(endpointText)
-                        .font(.body.monospaced())
+                        .appFont(.body.monospaced())
                         .textSelection(.enabled)
                 }
                 Spacer()
@@ -619,7 +639,7 @@ private struct ServerWorkspaceView: View {
     private var configurationCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Configuration")
-                .font(.headline)
+                .appFont(.headline)
             Picker("Model", selection: selectedModelBinding) {
                 ForEach(model.installs) { install in
                     Text(install.descriptor.displayName).tag(install.id)
@@ -630,7 +650,7 @@ private struct ServerWorkspaceView: View {
 
             LabeledContent("API model ID") {
                 Text(model.selectedDescriptor.apiModelID)
-                    .font(.callout.monospaced())
+                    .appFont(.callout.monospaced())
                     .textSelection(.enabled)
             }
             HStack(spacing: 18) {
@@ -646,7 +666,7 @@ private struct ServerWorkspaceView: View {
                 Spacer()
             }
             Text("The server binds only to 127.0.0.1. Chat and API requests share one model process and run one at a time.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(18)
@@ -656,7 +676,7 @@ private struct ServerWorkspaceView: View {
     private var activityCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Health and activity").font(.headline)
+                Text("Health and activity").appFont(.headline)
                 Spacer()
                 Button {
                     controller.refreshHealth()
@@ -690,11 +710,11 @@ private struct ServerWorkspaceView: View {
 
     private var errorsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Recent errors").font(.headline)
+            Text("Recent errors").appFont(.headline)
             ForEach(Array(model.serverStore.recentErrors.enumerated()), id: \.offset) {
                 _, message in
                 Label(message, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
@@ -805,9 +825,9 @@ private struct ServerMetric: View {
                 .foregroundStyle(accent
                     ? TUFFMacTheme.accentColor : .secondary)
             Text(value)
-                .font(.title3.weight(.semibold))
+                .appFont(.title3.weight(.semibold))
             Text(title)
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -845,10 +865,10 @@ private struct WorkspaceTitle: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.largeTitle.bold())
+                .appFont(.largeTitle.bold())
                 .accessibilityHeading(.h1)
             Text(subtitle)
-                .font(.callout)
+                .appFont(.callout)
                 .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .contain)

@@ -40,7 +40,17 @@ public struct ResponseMarkdownRenderer {
         let kind: BlockKind
     }
 
-    public init() {}
+    /// How much larger than the system default this transcript is set.
+    /// Passed in rather than read from the environment: the text is built as
+    /// an `NSAttributedString`, so the size has to be baked into the fonts.
+    private let scale: CGFloat
+
+    /// The body size everything else is derived from, at the current zoom.
+    private var baseSize: CGFloat { NSFont.systemFontSize * scale }
+
+    public init(scale: CGFloat = 1) {
+        self.scale = scale
+    }
 
     public func render(_ source: String) -> Result {
         guard !source.isEmpty else {
@@ -241,7 +251,7 @@ public struct ResponseMarkdownRenderer {
 
     private func baseAttributes() -> [NSAttributedString.Key: Any] {
         [
-            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .font: NSFont.systemFont(ofSize: baseSize),
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle(for: .paragraph),
         ]
@@ -253,7 +263,7 @@ public struct ResponseMarkdownRenderer {
     ) -> NSFont {
         if block == .code || inlineIntent?.contains(.code) == true {
             return NSFont.monospacedSystemFont(
-                ofSize: NSFont.systemFontSize - 0.5,
+                ofSize: baseSize - 0.5 * scale,
                 weight: .regular)
         }
 
@@ -261,10 +271,10 @@ public struct ResponseMarkdownRenderer {
         let baseWeight: NSFont.Weight
         switch block {
         case .heading(let level):
-            size = max(NSFont.systemFontSize + 1, 22 - CGFloat(level - 1) * 2)
+            size = max(baseSize + scale, (22 - CGFloat(level - 1) * 2) * scale)
             baseWeight = .semibold
         default:
-            size = NSFont.systemFontSize
+            size = baseSize
             baseWeight = .regular
         }
 
@@ -356,7 +366,7 @@ public struct ResponseMarkdownRenderer {
             .replacingOccurrences(of: #"\rVert"#, with: #"\Vert"#)
         var math = MathImage(
             latex: supportedBody,
-            fontSize: formula.isDisplay ? 17 : NSFont.systemFontSize,
+            fontSize: formula.isDisplay ? 17 * scale : baseSize,
             textColor: NSColor.labelColor,
             labelMode: formula.isDisplay ? .display : .text,
             textAlignment: .left)

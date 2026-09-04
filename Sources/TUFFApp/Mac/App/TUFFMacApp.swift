@@ -13,7 +13,12 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor static var model: AppModel?
 
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { Self.model?.releaseAllAttachments() }
+        MainActor.assumeIsolated {
+            // Settings edits are coalesced, so the newest one can still be
+            // waiting to be written when the app is asked to quit.
+            Self.model?.flushPendingSettings()
+            Self.model?.releaseAllAttachments()
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -69,9 +74,12 @@ struct TUFFMacApp: App {
                 model: model,
                 serverController: serverController,
                 updateController: updateController)
+                // Scaled with the zoom: at 150% the text and the columns that
+                // hold it are half again as wide, so the smallest window that
+                // still fits the layout grows with it.
                 .frame(
-                    minWidth: AppWindowLayout.minimumWidth,
-                    minHeight: AppWindowLayout.minimumHeight)
+                    minWidth: AppWindowLayout.minimumWidth * model.zoomLevel.scale,
+                    minHeight: AppWindowLayout.minimumHeight * model.zoomLevel.scale)
                 // Once, when the window first appears: the setting is read
                 // from disk in init, and loadModelAtLaunchIfEnabled ignores a
                 // model that is missing or already busy.
@@ -106,6 +114,20 @@ struct TUFFMacApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             AppNavigationCommands()
+            // Into the View menu macOS already puts Enter Full Screen in, not a
+            // `CommandMenu("View")` — that builds a second menu with the same
+            // name and the app ends up with two of them in the bar.
+            CommandGroup(after: .toolbar) {
+                Button("Zoom In") { model.setZoomLevel(model.zoomLevel.zoomedIn) }
+                    .keyboardShortcut("=", modifiers: .command)
+                    .disabled(model.zoomLevel == AppZoomLevel.allCases.last)
+                Button("Zoom Out") { model.setZoomLevel(model.zoomLevel.zoomedOut) }
+                    .keyboardShortcut("-", modifiers: .command)
+                    .disabled(model.zoomLevel == AppZoomLevel.allCases.first)
+                Button("Actual Size") { model.setZoomLevel(.default) }
+                    .keyboardShortcut("0", modifiers: .command)
+                    .disabled(model.zoomLevel == .default)
+            }
             CommandGroup(replacing: .appInfo) {
                 Button("About TUFF") {
                     NSApp.orderFrontStandardAboutPanel(

@@ -59,18 +59,18 @@ struct DocumentAttachmentTile: View {
                 RoundedRectangle(cornerRadius: 7)
                     .fill(TUFFMacTheme.accentColor.opacity(0.16))
                 Image(systemName: symbolName)
-                    .font(.system(size: 13, weight: .medium))
+                    .appFont(.system(size: 13, weight: .medium))
                     .foregroundStyle(TUFFMacTheme.accentColor)
             }
             .frame(width: 30, height: 30)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(document.displayName)
-                    .font(.callout.weight(.medium))
+                    .appFont(.callout.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text("\(document.kindLabel) · \(document.estimatedTokensLabel) tokens")
-                    .font(.caption2)
+                    .appFont(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -118,7 +118,7 @@ private struct RemovableAttachment<Content: View>: View {
                     Button(action: onRemove) {
                         Image(systemName: "xmark.circle.fill")
                             .symbolRenderingMode(.hierarchical)
-                            .font(.body)
+                            .appFont(.body)
                     }
                     .buttonStyle(.plain)
                     .background(

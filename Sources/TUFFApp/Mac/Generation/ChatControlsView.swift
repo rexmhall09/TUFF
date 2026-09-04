@@ -33,7 +33,7 @@ struct ChatControlsView: View {
 
             reasoningControl
         }
-        .font(.callout)
+        .appFont(.callout)
         .disabled(model.isRunning || model.loadState.isLoading)
     }
 

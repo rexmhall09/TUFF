@@ -47,14 +47,14 @@ struct InspectorView: View {
         Section("Image Support") {
             LabeledContent("State") {
                 Text(visionStatusLabel)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(visionStatusColor)
             }
             if model.isVisionRuntimeSupported, !model.isVisionPackInstalled,
                let descriptor = model.visionInstallDescriptor {
                 LabeledContent("Download") {
                     Text(MetricFormat.storage(descriptor.approximateDownloadBytes))
-                        .font(.caption.monospacedDigit())
+                        .appFont(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
@@ -68,69 +68,69 @@ struct InspectorView: View {
                         Text(eta)
                     }
                 }
-                .font(.caption.monospacedDigit())
+                .appFont(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
             } else if model.isInstallingVisionPack {
                 ProgressView()
                     .controlSize(.small)
                 if let eta = model.visionInstallETAText {
                     Text(eta)
-                        .font(.caption.monospacedDigit())
+                        .appFont(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
             if !model.isVisionRuntimeSupported {
                 Text("Image support requires an M2 or newer Mac. "
                     + "Text generation remains available on this Mac.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             } else if case .failed(let message) = model.visionInstallState {
                 Text(message)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.red)
             } else if case .recoverable(let message) = model.visionInstallState {
                 Text(message)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.orange)
             } else if case .partial(let message) = model.visionInstallationStatus,
                       !model.isInstallingVisionPack {
                 Text(message)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.orange)
             } else if case .unsupportedLayout = model.visionInstallationStatus {
                 Text("Image support needs a model directory named "
                     + "\"<name>.gturbo\", which is where the companion pack lives.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             } else if case .failed(let message) = model.visionInstallReadiness,
                       !model.isInstallingVisionPack {
                 Text(message)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.orange)
             } else if case .insufficientSpace(let requirement) = model.visionInstallReadiness,
                       !model.isInstallingVisionPack {
                 Text("Free \(MetricFormat.storage(requirement.shortfallBytes)) more storage.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.orange)
             } else if model.isVisionCompanionOperationInProgress {
                 Text("Model actions stay unavailable until this finishes. "
                     + "Your prompt, images, and transcript are kept.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             } else if case .readyToActivate = model.visionInstallState,
                       model.loadState.isReady {
                 Text("The separate image-support download is ready. "
                     + "Unload the model once to activate it.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             } else if !model.isVisionPackInstalled && model.loadState.isReady {
                 Text("Image support downloads separately while the text model "
                     + "stays installed. Unload only when the download is ready to activate.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             } else if model.isVisionPackInstalled && model.loadState.isReady {
                 Text("Unload the model before removing image support.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             }
 
@@ -217,7 +217,7 @@ struct InspectorView: View {
             LabeledContent("Path") {
                 HStack(spacing: 6) {
                     Text(model.modelPathText)
-                        .font(.caption)
+                        .appFont(.caption)
                         .truncationMode(.middle)
                         .lineLimit(1)
                         .foregroundStyle(.secondary)
@@ -238,24 +238,24 @@ struct InspectorView: View {
             }
             LabeledContent("State") {
                 Text(model.presentation.label)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             }
             if model.requiresModelInstallation {
                 LabeledContent("Download") {
                     Text(MetricFormat.storage(model.installDescriptor.approximateDownloadBytes))
-                        .font(.caption.monospacedDigit())
+                        .appFont(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent("Installed size") {
                     Text(MetricFormat.storage(model.installDescriptor.installedBytes))
-                        .font(.caption.monospacedDigit())
+                        .appFont(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 if let requirement = model.installRequirement {
                     LabeledContent("Available") {
                         Text(MetricFormat.storage(requirement.availableBytes))
-                            .font(.caption.monospacedDigit())
+                            .appFont(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -274,7 +274,7 @@ struct InspectorView: View {
                 .listRowInsets(EdgeInsets())
             Text("Downloads are per model and keep running while you use "
                  + "another one.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
         }
     }
@@ -302,7 +302,7 @@ struct InspectorView: View {
                 .fixedSize()
             }
             Text("More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 8K context and 16 slots and apply after reloading the model.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
         }
         .disabled(model.isRunning || model.loadState.isLoading
@@ -320,7 +320,7 @@ struct InspectorView: View {
                 }
             }
             Text("0 uses deterministic greedy decoding. Higher values make sampling more varied.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
             Toggle("Top-K", isOn: $model.topKEnabled)
                 .toggleStyle(.switch)
@@ -364,11 +364,11 @@ struct InspectorView: View {
                 .labelsHidden()
             }
             Text("RDADVISE is experimental. It may speed up short decodes but slow down long decodes.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
             if model.hasStaleLoadedRuntime {
                 Text("Reload required")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             }
         }

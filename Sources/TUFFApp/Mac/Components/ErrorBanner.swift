@@ -12,7 +12,7 @@ struct ErrorBanner: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                 Text(error.userMessage)
-                    .font(.callout)
+                    .appFont(.callout)
                     .lineLimit(2)
                 Spacer(minLength: 8)
                 Button {
@@ -20,7 +20,7 @@ struct ErrorBanner: View {
                 } label: {
                     Label("Dismiss error", systemImage: "xmark")
                         .labelStyle(.iconOnly)
-                        .font(.caption.weight(.semibold))
+                        .appFont(.caption.weight(.semibold))
                         .frame(width: 28, height: 28)
                         .contentShape(Circle())
                 }

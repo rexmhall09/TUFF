@@ -17,7 +17,8 @@ struct PromptComposerView: View {
     @State private var pickerKind: AttachmentPickerKind = .image
     @State private var showingPicker = false
     @State private var isImageDropTargeted = false
-    @State private var measuredEditorHeight: CGFloat = PromptComposerMetrics.minimumEditorHeight
+    @State private var measuredEditorHeight = PromptComposerMetrics.baseMinimumEditorHeight
+    @Environment(\.appFontScale) private var fontScale
 
     enum AttachmentPickerKind {
         case image
@@ -72,6 +73,7 @@ struct PromptComposerView: View {
                 get: { promptFocused },
                 set: { promptFocused = $0 }),
             contentHeight: $measuredEditorHeight,
+            fontScale: fontScale,
             newlineShortcut: model.newlineShortcut,
             canRun: model.canSubmit,
             canAcceptImages: model.isImageInputAvailable
@@ -103,7 +105,7 @@ struct PromptComposerView: View {
                     // Matches the NSTextView text origin: 5pt line fragment
                     // padding, no vertical inset.
                     Text("Message \(model.selectedDescriptor.shortName)")
-                        .font(PromptComposerMetrics.font)
+                        .appFont(PromptComposerMetrics.font)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, 5)
                         .allowsHitTesting(false)
@@ -123,8 +125,9 @@ struct PromptComposerView: View {
     /// height that still leaves the conversation the larger half of the window.
     /// A fixed box was two or three empty lines tall for every one-line question.
     private var editorHeight: CGFloat {
-        min(max(measuredEditorHeight, PromptComposerMetrics.minimumEditorHeight),
-            PromptComposerMetrics.maximumEditorHeight)
+        min(max(measuredEditorHeight,
+                PromptComposerMetrics.minimumEditorHeight(scale: fontScale)),
+            PromptComposerMetrics.maximumEditorHeight(scale: fontScale))
     }
 
     /// What the context meter has to say, and nothing when it has nothing to
@@ -153,7 +156,7 @@ struct PromptComposerView: View {
     private func contextNoticeText(_ notice: (text: String, isError: Bool)) -> some View {
         Label(notice.text, systemImage: notice.isError
               ? "exclamationmark.triangle" : "info.circle")
-            .font(.caption)
+            .appFont(.caption)
             .foregroundStyle(notice.isError ? AnyShapeStyle(.red)
                              : AnyShapeStyle(.secondary))
             .fixedSize(horizontal: false, vertical: true)
@@ -211,7 +214,7 @@ struct PromptComposerView: View {
             }
         } label: {
             Image(systemName: "plus")
-                .font(.body.weight(.medium))
+                .appFont(.body.weight(.medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 28, height: 28)
                 .contentShape(Circle())
@@ -241,7 +244,7 @@ struct PromptComposerView: View {
                     .frame(width: 6, height: 6)
                 Text("\(MetricFormat.tokens(usage.estimatedTokens)) / "
                      + MetricFormat.tokens(usage.maxTokens))
-                    .font(.caption.monospacedDigit())
+                    .appFont(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
             .help("About \(usage.estimatedTokens) of \(usage.maxTokens) context "
@@ -291,7 +294,7 @@ struct PromptComposerView: View {
 
     private func attachmentNoticeText(_ notice: (text: String, isError: Bool)) -> some View {
         Text(notice.text)
-            .font(.caption)
+            .appFont(.caption)
             .foregroundStyle(notice.isError ? AnyShapeStyle(.red)
                              : AnyShapeStyle(.secondary))
             .fixedSize(horizontal: false, vertical: true)
@@ -336,13 +339,23 @@ enum PromptComposerMetrics {
     /// A point larger than the system default. At 13 the message you are
     /// writing was set smaller than the answers around it.
     static let pointSize: CGFloat = 14
-    static var font: Font { .system(size: pointSize) }
-    static var nsFont: NSFont { .systemFont(ofSize: pointSize) }
-    /// One line.
-    static let minimumEditorHeight: CGFloat = 21
-    /// About eight lines. Past that the box scrolls rather than eating the
-    /// conversation.
-    static let maximumEditorHeight: CGFloat = 168
+    static var font: AppFont { .system(size: pointSize) }
+    /// The text view is AppKit, so it is handed a concrete size rather than
+    /// reading the zoom out of the environment the way `font` does.
+    static func nsFont(scale: CGFloat) -> NSFont {
+        .systemFont(ofSize: pointSize * scale)
+    }
+    /// One line, and about eight. Both scale with the zoom, because they are
+    /// heights for text whose size is changing. Past the maximum the box
+    /// scrolls rather than eating the conversation.
+    static let baseMinimumEditorHeight: CGFloat = 21
+    static let baseMaximumEditorHeight: CGFloat = 168
+    static func minimumEditorHeight(scale: CGFloat) -> CGFloat {
+        baseMinimumEditorHeight * scale
+    }
+    static func maximumEditorHeight(scale: CGFloat) -> CGFloat {
+        baseMaximumEditorHeight * scale
+    }
 }
 
 private struct PromptTextEditor: NSViewRepresentable {
@@ -351,6 +364,9 @@ private struct PromptTextEditor: NSViewRepresentable {
     /// The height the typed text needs. The view is given a clamped version of
     /// it, so the box grows with the message and stops.
     @Binding var contentHeight: CGFloat
+    /// The zoom, passed in because an NSViewRepresentable's AppKit views do
+    /// not read the environment themselves.
+    let fontScale: CGFloat
     let newlineShortcut: AppNewlineShortcut
     let canRun: Bool
     let canAcceptImages: Bool
@@ -372,7 +388,7 @@ private struct PromptTextEditor: NSViewRepresentable {
         let textView = AttachmentDropTextView()
         textView.delegate = context.coordinator
         textView.string = text
-        textView.font = PromptComposerMetrics.nsFont
+        textView.font = PromptComposerMetrics.nsFont(scale: fontScale)
         textView.textColor = .labelColor
         textView.drawsBackground = false
         textView.isRichText = false
@@ -405,6 +421,10 @@ private struct PromptTextEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? AttachmentDropTextView else { return }
         context.coordinator.parent = self
+        // The view is not rebuilt when the zoom changes, so the font is
+        // re-applied here or the message box keeps the size it was made with.
+        let font = PromptComposerMetrics.nsFont(scale: fontScale)
+        if textView.font != font { textView.font = font }
         textView.onContentHeightChange = { measured in contentHeight = measured }
         textView.canAcceptImages = canAcceptImages
         textView.canAcceptDocuments = canAcceptDocuments

@@ -13,7 +13,7 @@ struct ModelActionBanner: View {
                     .foregroundStyle(iconColor(for: action))
                     .accessibilityHidden(true)
                 Text(message(for: action))
-                    .font(.callout)
+                    .appFont(.callout)
                     .lineLimit(2)
                 Spacer(minLength: 8)
                 Button(buttonTitle(for: action)) {
@@ -31,7 +31,7 @@ struct ModelActionBanner: View {
                     .foregroundStyle(.orange)
                     .accessibilityHidden(true)
                 Text(notice)
-                    .font(.callout)
+                    .appFont(.callout)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
             }

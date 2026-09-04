@@ -18,6 +18,10 @@ struct StreamingResponseView: NSViewRepresentable {
     var mailbox: GenerationTranscriptMailbox?
     var isTerminal: Bool
     var showsPrefillPlaceholder: Bool
+    /// The zoom. The streamed answer is an attributed string built with baked
+    /// point sizes, so the controller is made for one scale and the view is
+    /// rebuilt (see the `id` at the call site) if that changes.
+    var scale: CGFloat
     @Binding var height: CGFloat
 
     @MainActor
@@ -28,7 +32,11 @@ struct StreamingResponseView: NSViewRepresentable {
         var showsPrefillPlaceholder = false
         var timer: Timer?
         var prefillAnimationTimer: Timer?
-        let documentController = StreamingResponseDocumentController()
+        let documentController: StreamingResponseDocumentController
+
+        init(scale: CGFloat) {
+            documentController = StreamingResponseDocumentController(scale: scale)
+        }
 
         func attach(_ textView: MessageTextView) {
             self.textView = textView
@@ -133,7 +141,7 @@ struct StreamingResponseView: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(scale: scale) }
 
     func makeNSView(context: Context) -> MessageTextView {
         let textView = MessageTextView.make()

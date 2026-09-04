@@ -665,6 +665,10 @@ import TUFFModelCatalog
         var effective = model.settingsProfile(for: selected)
         effective.temperature = 0.6
         model.updateSettingsProfile(effective, for: selected)
+        // Profile edits are coalesced — the sliders and the prompt editor call
+        // this per tick and per keystroke — so the write is asked for before
+        // the file is read back.
+        model.flushPendingSettings()
         let whileAutomatic = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory,
             profileKey: key).profile(for: key)
@@ -680,6 +684,71 @@ import TUFFModelCatalog
         #expect(model.maxContextTokens == 32_768)
         #expect(model.runtimeOptions.expertCacheSlots == 24)
         #expect(!model.runtimeOptions.prefillEnabled)
+    }
+
+    /// Edits made through the profile controls are coalesced rather than
+    /// written per keystroke, so what matters is that the flush on quit still
+    /// gets them to disk.
+    @MainActor
+    @Test func aCoalescedProfileEditIsOnDiskAfterAFlush() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let model = makeAppModel(
+            modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
+        let install = try #require(model.installs.first { $0.descriptor == .default })
+        var profile = model.settingsProfile(for: install)
+        profile.temperature = 0.77
+
+        model.updateSettingsProfile(profile, for: install)
+        model.flushPendingSettings()
+
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory,
+            profileKey: install.descriptor.settingsProfileKey)
+        #expect(saved.profile(for: install.descriptor.settingsProfileKey).temperature == 0.77)
+    }
+
+    @MainActor
+    @Test func zoomLevelPersistsImmediately() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let model = makeAppModel(
+            modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
+
+        model.setZoomLevel(.percent150)
+
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory)
+        #expect(saved.zoomLevel == .percent150)
+    }
+
+    /// A file written before zoom existed has no key for it, and must open at
+    /// 100% rather than failing validation and being replaced by defaults.
+    @Test func settingsWrittenBeforeZoomExistedOpenAtActualSize() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: modelDirectory)
+        var previous = MacAppSettings()
+        previous.newlineShortcut = .shiftReturn
+        try MacAppSettingsFileStore.save(previous, forModelDirectory: modelDirectory)
+        var json = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: fileURL)) as? [String: Any] ?? [:]
+        json.removeValue(forKey: "zoomLevel")
+        try JSONSerialization.data(withJSONObject: json).write(to: fileURL)
+
+        let settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory)
+
+        #expect(settings.zoomLevel == .percent100)
+        #expect(settings.newlineShortcut == .shiftReturn,
+                "the rest of the file must survive the missing key")
     }
 
     @MainActor
@@ -771,10 +840,14 @@ import TUFFModelCatalog
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: modelDirectory)
 
-        // A plausible future version with a schema this build does not understand.
+        // A plausible future version with a schema this build does not
+        // understand. Derived from the current version rather than written as
+        // a literal, so bumping the schema cannot quietly turn this case into
+        // "the build reads its own version" — which is what happened when the
+        // zoom setting took version 7.
         let newer = """
         {
-          "version": 7,
+          "version": \(MacAppSettings.currentVersion + 1),
           "profilesByModel": {}
         }
         """

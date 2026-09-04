@@ -9,7 +9,7 @@ struct ModelStatusBadge: View {
         HStack(spacing: 6) {
             statusDot
             Text(model.installDescriptor.displayName)
-                .font(.callout.weight(.semibold))
+                .appFont(.callout.weight(.semibold))
                 .lineLimit(1)
                 .help(model.installDescriptor.repoID)
                 .accessibilityLabel("Model")

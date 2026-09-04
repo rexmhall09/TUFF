@@ -62,7 +62,7 @@ struct RunnerDiagnosticsSection: View {
                 }
             } else {
                 Text("No runs yet")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -98,7 +98,7 @@ struct RunnerDiagnosticsSection: View {
 
     private func groupLabel(_ title: String) -> some View {
         Text(title)
-            .font(.caption)
+            .appFont(.caption)
             .textCase(.uppercase)
             .foregroundStyle(.tertiary)
             .accessibilityHeading(.h3)
@@ -152,7 +152,7 @@ private struct DiagnosticRow: View {
     var body: some View {
         LabeledContent {
             Text(value)
-                .font(.caption)
+                .appFont(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)

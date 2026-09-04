@@ -64,6 +64,17 @@ struct AppSettingsView: View {
                 Toggle("Show prompt examples", isOn: showPromptExamplesBinding)
             }
             Section("Appearance") {
+                Picker("Zoom", selection: zoomLevelBinding) {
+                    ForEach(AppZoomLevel.allCases) { level in
+                        Text(level.settingsLabel).tag(level)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Scales the whole interface — text, icons, and controls. "
+                    + "Also on the View menu as Zoom In (⌘+), Zoom Out (⌘−), "
+                    + "and Actual Size (⌘0).")
+                    .appFont(.caption)
+                    .foregroundStyle(.secondary)
                 Picker("Accent color", selection: accentColorModeBinding) {
                     ForEach(AppAccentColorMode.allCases) { mode in
                         Text(mode.settingsLabel).tag(mode)
@@ -80,27 +91,27 @@ struct AppSettingsView: View {
                     }
                 } else if model.accentColorMode == .system {
                     Text("Follows the accent color set in System Settings.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             Section("Model restrictions") {
                 Toggle("Bypass model restrictions",
-                       isOn: bypassModelRestrictionsBinding)
+                       isOn: $model.bypassModelRestrictions)
                 Text("TUFF normally hides Download and Load for models this Mac "
                     + "does not meet the requirements for, and refuses to load "
                     + "any model whose context and expert cache exceed "
                     + "\(MetricFormat.storage(model.deviceCapabilities.safeAppMemoryBudgetBytes)), "
                     + "the share of this Mac's memory it plans against. Turning "
                     + "this on removes both gates.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
                 if model.bypassModelRestrictions {
                     Label("A model that does not fit will swap heavily, and macOS "
                         + "can terminate TUFF while it is loading or generating. "
                         + "Nothing is damaged, and the download stays on disk.",
                           systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.orange)
                 }
             }
@@ -110,7 +121,7 @@ struct AppSettingsView: View {
                 Text("TUFF will only load when the model is installed and it "
                     + "is allowed to load — a memory profile within budget, or "
                     + "restrictions bypassed.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             }
             Section("Updates") {
@@ -130,7 +141,7 @@ struct AppSettingsView: View {
                     Text("Updates come from TUFF's GitHub Releases feed. Each "
                         + "download must pass Sparkle's embedded EdDSA signature "
                         + "check before it can be installed.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 } else {
                     Label(
@@ -140,7 +151,7 @@ struct AppSettingsView: View {
                         .foregroundStyle(.secondary)
                     Text("Clone builds stay usable, but only packaged builds with "
                         + "TUFF's update-signing public key can install releases.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -161,7 +172,7 @@ struct AppSettingsView: View {
                    model.hasStaleLoadedRuntime {
                     Label("Reload the model to apply memory changes.",
                           systemImage: "arrow.clockwise")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -191,11 +202,11 @@ struct AppSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 Text(selectedProfile.automaticMemoryProfile.explanation)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
                 if let plan = model.automaticMemoryPlan(for: selectedProfileInstall) {
                     Text(automaticMemorySummary(plan))
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -238,7 +249,7 @@ struct AppSettingsView: View {
             }
             if let explanation = eligibility.explanation {
                 Label(explanation, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.orange)
                 Text(model.bypassModelRestrictions
                      ? "Bypass model restrictions is on, so TUFF will still load "
@@ -247,7 +258,7 @@ struct AppSettingsView: View {
                      : "TUFF will not load the model at these settings. Lower "
                         + "Context or Expert cache, switch this model to Auto, "
                         + "or turn on Bypass model restrictions in General.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             }
         }
@@ -258,12 +269,12 @@ struct AppSettingsView: View {
     private var systemPromptSettings: some View {
         Section("System prompt") {
             TextEditor(text: profileBinding(\.systemPrompt))
-                .font(.body)
+                .appFont(.body)
                 .frame(minHeight: 96)
                 .overlay(alignment: .topLeading) {
                     if selectedProfile.systemPrompt.isEmpty {
                         Text("Sent ahead of every chat with this model.")
-                            .font(.body)
+                            .appFont(.body)
                             .foregroundStyle(.tertiary)
                             .padding(.leading, 5)
                             .padding(.top, 8)
@@ -285,7 +296,7 @@ struct AppSettingsView: View {
             Text("Sent as a system message before the conversation. It applies "
                  + "from the next message; answers already given were not "
                  + "written with it.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
         }
     }
@@ -312,12 +323,12 @@ struct AppSettingsView: View {
                     LabeledContent("Thinking", value: "Always On")
                     Text("This model always reasons before answering. TUFF keeps "
                         + "that reasoning separate from the visible answer.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 if control != .alwaysOn {
                     Text("Chat can override this for the current conversation.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -366,14 +377,14 @@ struct AppSettingsView: View {
                         < RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill)
                 if selectedProfile.automaticMemory {
                     Text("Auto manages chunked prefill with this model's memory plan.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 } else if selectedProfile.expertCacheSlots
                     < RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill {
                     Text("Chunked prefill needs at least "
                         + "\(RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill) "
                         + "expert-cache slots.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Picker("RDADVISE", selection: profileBinding(\.rdadvisePolicy)) {
@@ -383,7 +394,7 @@ struct AppSettingsView: View {
                 }
                 Text("RDADVISE is experimental. Changes to memory mapping apply "
                     + "after the selected model is reloaded.")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             }
             if selectedProfileInstall.descriptor.reasoningControl
@@ -394,13 +405,13 @@ struct AppSettingsView: View {
                     Text("When enabled, Qwen receives its earlier thinking text as "
                         + "part of conversation history. TUFF always keeps that text "
                         + "available for you in the transcript.")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             Section("Location") {
                 Text(selectedProfileInstall.directoryURL.path)
-                    .font(.caption.monospaced())
+                    .appFont(.caption.monospaced())
                     .textSelection(.enabled)
             }
             if selectedProfileInstall.id == model.selectedModelID,
@@ -471,12 +482,6 @@ struct AppSettingsView: View {
             var profile = selectedProfile
             profile.automaticMemoryProfile = newValue
             model.updateSettingsProfile(profile, for: selectedProfileInstall)
-        }
-    }
-
-    private var bypassModelRestrictionsBinding: Binding<Bool> {
-        Binding { model.bypassModelRestrictions } set: {
-            model.bypassModelRestrictions = $0
         }
     }
 
@@ -551,6 +556,10 @@ struct AppSettingsView: View {
 
     private var accentColorModeBinding: Binding<AppAccentColorMode> {
         Binding { model.accentColorMode } set: { model.setAccentColorMode($0) }
+    }
+
+    private var zoomLevelBinding: Binding<AppZoomLevel> {
+        Binding { model.zoomLevel } set: { model.setZoomLevel($0) }
     }
 
     private var customAccentColorBinding: Binding<Color> {

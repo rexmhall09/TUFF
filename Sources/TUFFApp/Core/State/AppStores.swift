@@ -438,6 +438,7 @@ public final class AppSettingsStore {
     public var loadModelOnLaunch = false
     public var accentColorMode: AppAccentColorMode = .appDefault
     public var customAccentColorHex: String = AppHexColor.defaultPurple.hexString
+    public var zoomLevel: AppZoomLevel = .default
     /// App-wide escape hatch from the hardware and memory gates.
     public var bypassModelRestrictions = false
     /// The selected model's system prompt, loaded from its profile.

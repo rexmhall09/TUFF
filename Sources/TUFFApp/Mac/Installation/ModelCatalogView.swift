@@ -43,7 +43,7 @@ struct ModelCatalogView: View {
 
     private func groupHeader(_ group: ModelCatalogGroup) -> some View {
         Text(group.title)
-            .font(.headline)
+            .appFont(.headline)
             .padding(.top, 4)
             .accessibilityAddTraits(.isHeader)
     }
@@ -154,10 +154,10 @@ struct ModelCatalogRow: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(install.descriptor.displayName)
-                .font(compact ? .callout.weight(.medium) : .headline)
+                .appFont(compact ? .callout.weight(.medium) : .headline)
             if isSelected {
                 Text("Selected")
-                    .font(.caption2.weight(.semibold))
+                    .appFont(.caption2.weight(.semibold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(TUFFMacTheme.accentColor.opacity(0.18),
@@ -165,7 +165,7 @@ struct ModelCatalogRow: View {
             }
             if install.descriptor.isRecommended {
                 Text("Recommended")
-                    .font(.caption2.weight(.semibold))
+                    .appFont(.caption2.weight(.semibold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .foregroundStyle(TUFFMacTheme.accentColor)
@@ -193,15 +193,15 @@ struct ModelCatalogRow: View {
             Label("Installed", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .labelStyle(.titleAndIcon)
-                .font(.caption)
+                .appFont(.caption)
         case .downloading:
             Label("Downloading", systemImage: "arrow.down.circle")
                 .foregroundStyle(TUFFMacTheme.accentColor)
-                .font(.caption)
+                .appFont(.caption)
         case .paused:
             Label("Paused", systemImage: "pause.circle")
                 .foregroundStyle(.secondary)
-                .font(.caption)
+                .appFont(.caption)
         case .notInstalled:
             EmptyView()
         }
@@ -275,7 +275,7 @@ struct ModelCatalogRow: View {
 
     private func warning(_ text: String, symbol: String) -> some View {
         Label(text, systemImage: symbol)
-            .font(.caption)
+            .appFont(.caption)
             .foregroundStyle(.orange)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -299,17 +299,17 @@ struct ModelCatalogRow: View {
                         Text(eta)
                     }
                 }
-                .font(.caption.monospacedDigit())
+                .appFont(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 if reused > 0 {
                     Text("Reused \(MetricFormat.storage(reused)) from the saved download")
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text(stageLabel).font(.caption).foregroundStyle(.secondary)
+                    Text(stageLabel).appFont(.caption).foregroundStyle(.secondary)
                     Spacer()
                 }
             }
@@ -329,25 +329,25 @@ struct ModelCatalogRow: View {
             Label("Something is already in the way at this location. "
                   + "Remove and Retry clears it and downloads again.",
                   systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         }
         switch install.state {
         case .failed(let text):
             Label(text, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.red)
                 .fixedSize(horizontal: false, vertical: true)
         case .recoverable(let text):
             Label(text, systemImage: "exclamationmark.triangle")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         default:
             if case .failed(let text) = install.readiness, !install.isInstalled {
                 Label(text, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -397,10 +397,10 @@ struct ModelCatalogRow: View {
             Divider()
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Label(Self.imageSupportName, systemImage: "photo")
-                    .font(.caption.weight(.semibold))
+                    .appFont(.caption.weight(.semibold))
                 Spacer(minLength: 8)
                 Text(visionStatusText)
-                    .font(.caption2)
+                    .appFont(.caption2)
                     .foregroundStyle(visionStatusColor)
             }
 
@@ -414,7 +414,7 @@ struct ModelCatalogRow: View {
                     Spacer()
                     if let eta = model.visionInstallETAText { Text(eta) }
                 }
-                .font(.caption2.monospacedDigit())
+                .appFont(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
             }
 
@@ -426,7 +426,7 @@ struct ModelCatalogRow: View {
                 if !visionIsInstalled, !visionIsPrepared,
                    let visionDescriptor {
                     Text(MetricFormat.storage(visionDescriptor.approximateDownloadBytes))
-                        .font(.caption2.monospacedDigit())
+                        .appFont(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
@@ -443,7 +443,7 @@ struct ModelCatalogRow: View {
             .disabled(!model.canCancelVisionInstall)
         } else if visionIsInstalled {
             Label("Image Support installed", systemImage: "checkmark.circle.fill")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.green)
             Button("Remove", role: .destructive) {
                 showingVisionRemoveConfirmation = true
@@ -615,7 +615,7 @@ struct SpecLine: View {
             line(spacing: 14)
             grid
         }
-        .font(.caption)
+        .appFont(.caption)
         .accessibilityElement(children: .combine)
     }
 
