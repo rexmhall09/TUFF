@@ -69,6 +69,7 @@ struct PromptComposerView: View {
     private var editor: some View {
         PromptTextEditor(
             text: $model.promptText,
+            // Bridge SwiftUI focus state to the binding the AppKit editor uses.
             isFocused: Binding(
                 get: { promptFocused },
                 set: { promptFocused = $0 }),

@@ -298,6 +298,7 @@ struct RootView: View {
         }?.descriptor.shortName ?? profileKey
     }
 
+    /// Presentation follows the optional target; dismissal clears it.
     private var renameAlertIsPresented: Binding<Bool> {
         Binding {
             renameTarget != nil
@@ -654,13 +655,15 @@ private struct ServerWorkspaceView: View {
                     .textSelection(.enabled)
             }
             HStack(spacing: 18) {
-                TextField("Port", value: desiredPortBinding, format: .number)
+                TextField("Port",
+                          value: Bindable(model.serverStore).desiredPort,
+                          format: .number)
                     .frame(maxWidth: 150)
                     .textFieldStyle(.roundedBorder)
                     .disabled(model.serverStore.isBusy)
                 Stepper(
                     "Queue: \(model.serverStore.queueLimit)",
-                    value: queueLimitBinding,
+                    value: Bindable(model.serverStore).queueLimit,
                     in: 1...16)
                     .disabled(model.serverStore.isBusy)
                 Spacer()
@@ -728,6 +731,7 @@ private struct ServerWorkspaceView: View {
             reduceTransparency: reduceTransparency)
     }
 
+    /// Route picker changes through model-switch validation.
     private var selectedModelBinding: Binding<String> {
         Binding {
             model.selectedModelID
@@ -735,20 +739,6 @@ private struct ServerWorkspaceView: View {
             guard let install = model.installs.first(where: { $0.id == id }) else { return }
             model.selectModel(install)
         }
-    }
-
-    private var desiredPortBinding: Binding<Int> {
-        Binding {
-            model.serverStore.desiredPort
-        } set: { value in
-            model.serverStore.desiredPort = min(max(value, 1), 65_535)
-        }
-    }
-
-    private var queueLimitBinding: Binding<Int> {
-        Binding {
-            model.serverStore.queueLimit
-        } set: { model.serverStore.queueLimit = $0 }
     }
 
     private var configuration: AppHostedServerConfiguration? {

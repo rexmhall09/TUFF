@@ -118,13 +118,13 @@ struct TUFFMacApp: App {
             // `CommandMenu("View")` — that builds a second menu with the same
             // name and the app ends up with two of them in the bar.
             CommandGroup(after: .toolbar) {
-                Button("Zoom In") { model.setZoomLevel(model.zoomLevel.zoomedIn) }
+                Button("Zoom In") { model.zoomLevel = model.zoomLevel.zoomedIn }
                     .keyboardShortcut("=", modifiers: .command)
                     .disabled(model.zoomLevel == AppZoomLevel.allCases.last)
-                Button("Zoom Out") { model.setZoomLevel(model.zoomLevel.zoomedOut) }
+                Button("Zoom Out") { model.zoomLevel = model.zoomLevel.zoomedOut }
                     .keyboardShortcut("-", modifiers: .command)
                     .disabled(model.zoomLevel == AppZoomLevel.allCases.first)
-                Button("Actual Size") { model.setZoomLevel(.default) }
+                Button("Actual Size") { model.zoomLevel = .default }
                     .keyboardShortcut("0", modifiers: .command)
                     .disabled(model.zoomLevel == .default)
             }
@@ -172,21 +172,25 @@ struct TUFFMacApp: App {
                     .disabled(!model.canRemoveVisionPack)
             }
             CommandMenu("Settings") {
-                Picker("Send Message With", selection: newlineShortcutBinding) {
+                Picker("Send Message With",
+                       selection: Bindable(model).newlineShortcut) {
                     ForEach(AppNewlineShortcut.sendMessageOptions) { shortcut in
                         Text(shortcut.sendMessageLabel).tag(shortcut)
                     }
                 }
-                Picker("Prompt Examples", selection: showPromptExamplesBinding) {
+                Picker("Prompt Examples",
+                       selection: Bindable(model).showPromptExamples) {
                     Text("Show").tag(true)
                     Text("Hide").tag(false)
                 }
-                Picker("After Sending", selection: sentPromptBehaviorBinding) {
+                Picker("After Sending",
+                       selection: Bindable(model).sentPromptBehavior) {
                     ForEach(AppSentPromptBehavior.allCases) { behavior in
                         Text(behavior.settingsLabel).tag(behavior)
                     }
                 }
-                Picker("Load Model At Launch", selection: loadModelOnLaunchBinding) {
+                Picker("Load Model At Launch",
+                       selection: Bindable(model).loadModelOnLaunch) {
                     Text("Off").tag(false)
                     Text("On").tag(true)
                 }
@@ -208,38 +212,6 @@ struct TUFFMacApp: App {
             NSWorkspace.shared.open(url)
         case .unavailable:
             break
-        }
-    }
-
-    private var newlineShortcutBinding: Binding<AppNewlineShortcut> {
-        Binding {
-            model.newlineShortcut
-        } set: { shortcut in
-            model.setNewlineShortcut(shortcut)
-        }
-    }
-
-    private var showPromptExamplesBinding: Binding<Bool> {
-        Binding {
-            model.showPromptExamples
-        } set: { show in
-            model.setShowPromptExamples(show)
-        }
-    }
-
-    private var loadModelOnLaunchBinding: Binding<Bool> {
-        Binding {
-            model.loadModelOnLaunch
-        } set: { enabled in
-            model.setLoadModelOnLaunch(enabled)
-        }
-    }
-
-    private var sentPromptBehaviorBinding: Binding<AppSentPromptBehavior> {
-        Binding {
-            model.sentPromptBehavior
-        } set: { behavior in
-            model.setSentPromptBehavior(behavior)
         }
     }
 }

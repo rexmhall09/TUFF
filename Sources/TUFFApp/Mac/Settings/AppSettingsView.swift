@@ -7,7 +7,7 @@ import SwiftUI
 
 struct AppSettingsView: View {
     @Bindable var model: AppModel
-    let updateController: AppUpdateController
+    @Bindable var updateController: AppUpdateController
     @State private var section: AppSettingsSection = .general
     @State private var profileModelID = ""
     /// Holds text the user is mid-typing into the hex field until it parses,
@@ -51,20 +51,20 @@ struct AppSettingsView: View {
     private var generalSettings: some View {
         Form {
             Section("Chat") {
-                Picker("Send message with", selection: newlineShortcutBinding) {
+                Picker("Send message with", selection: $model.newlineShortcut) {
                     ForEach(AppNewlineShortcut.sendMessageOptions) { shortcut in
                         Text(shortcut.sendMessageLabel).tag(shortcut)
                     }
                 }
-                Picker("After sending", selection: sentPromptBehaviorBinding) {
+                Picker("After sending", selection: $model.sentPromptBehavior) {
                     ForEach(AppSentPromptBehavior.allCases) { behavior in
                         Text(behavior.settingsLabel).tag(behavior)
                     }
                 }
-                Toggle("Show prompt examples", isOn: showPromptExamplesBinding)
+                Toggle("Show prompt examples", isOn: $model.showPromptExamples)
             }
             Section("Appearance") {
-                Picker("Zoom", selection: zoomLevelBinding) {
+                Picker("Zoom", selection: $model.zoomLevel) {
                     ForEach(AppZoomLevel.allCases) { level in
                         Text(level.settingsLabel).tag(level)
                     }
@@ -75,7 +75,7 @@ struct AppSettingsView: View {
                     + "and Actual Size (⌘0).")
                     .appFont(.caption)
                     .foregroundStyle(.secondary)
-                Picker("Accent color", selection: accentColorModeBinding) {
+                Picker("Accent color", selection: $model.accentColorMode) {
                     ForEach(AppAccentColorMode.allCases) { mode in
                         Text(mode.settingsLabel).tag(mode)
                     }
@@ -117,7 +117,7 @@ struct AppSettingsView: View {
             }
             Section("Startup") {
                 Toggle("Load the selected model at launch",
-                       isOn: loadModelOnLaunchBinding)
+                       isOn: $model.loadModelOnLaunch)
                 Text("TUFF will only load when the model is installed and it "
                     + "is allowed to load — a memory profile within budget, or "
                     + "restrictions bypassed.")
@@ -128,10 +128,10 @@ struct AppSettingsView: View {
                 if updateController.isAvailable {
                     Toggle(
                         "Check for updates automatically",
-                        isOn: automaticUpdateChecksBinding)
+                        isOn: $updateController.automaticallyChecksForUpdates)
                     Toggle(
                         "Download and install updates automatically",
-                        isOn: automaticUpdateDownloadsBinding)
+                        isOn: $updateController.automaticallyDownloadsUpdates)
                         .disabled(!updateController.automaticallyChecksForUpdates
                             || !updateController.allowsAutomaticUpdates)
                     Button("Check for Updates Now") {
@@ -195,7 +195,7 @@ struct AppSettingsView: View {
         Section("Memory") {
             Toggle("Auto", isOn: automaticMemoryBinding)
             if selectedProfile.automaticMemory {
-                Picker("Auto profile", selection: automaticMemoryProfileBinding) {
+                Picker("Auto profile", selection: profileBinding(\.automaticMemoryProfile)) {
                     ForEach(AppAutomaticMemoryProfile.allCases) { profile in
                         Text(profileLabel(profile)).tag(profile)
                     }
@@ -429,28 +429,14 @@ struct AppSettingsView: View {
         model.settingsProfile(for: selectedProfileInstall)
     }
 
+    /// An unset picker follows the app's selected model.
     private var profileModelBinding: Binding<String> {
         Binding {
             profileModelID.isEmpty ? model.selectedModelID : profileModelID
         } set: { profileModelID = $0 }
     }
 
-    private var automaticUpdateChecksBinding: Binding<Bool> {
-        Binding {
-            updateController.automaticallyChecksForUpdates
-        } set: { enabled in
-            updateController.setAutomaticallyChecksForUpdates(enabled)
-        }
-    }
-
-    private var automaticUpdateDownloadsBinding: Binding<Bool> {
-        Binding {
-            updateController.automaticallyDownloadsUpdates
-        } set: { enabled in
-            updateController.setAutomaticallyDownloadsUpdates(enabled)
-        }
-    }
-
+    /// Writes a field through profile validation and persistence.
     private func profileBinding<Value>(
         _ keyPath: WritableKeyPath<AppModelSettingsProfile, Value>
     ) -> Binding<Value> {
@@ -475,16 +461,7 @@ struct AppSettingsView: View {
         return "\(profile.title) · \(context)"
     }
 
-    private var automaticMemoryProfileBinding: Binding<AppAutomaticMemoryProfile> {
-        Binding {
-            selectedProfile.automaticMemoryProfile
-        } set: { newValue in
-            var profile = selectedProfile
-            profile.automaticMemoryProfile = newValue
-            model.updateSettingsProfile(profile, for: selectedProfileInstall)
-        }
-    }
-
+    /// The model preserves manual memory values while Auto is enabled.
     private var automaticMemoryBinding: Binding<Bool> {
         Binding {
             selectedProfile.automaticMemory
@@ -493,6 +470,7 @@ struct AppSettingsView: View {
         }
     }
 
+    /// Keep prefill and cache-slot invariants in one edit.
     private var expertCacheSlotsBinding: Binding<Int> {
         Binding {
             selectedProfile.expertCacheSlots
@@ -536,30 +514,6 @@ struct AppSettingsView: View {
         return "Detected \(detected) unified memory, of which TUFF plans against "
             + "\(budget). This model gets \(context) of context\(slots), an "
             + "estimated \(selected)."
-    }
-
-    private var newlineShortcutBinding: Binding<AppNewlineShortcut> {
-        Binding { model.newlineShortcut } set: { model.setNewlineShortcut($0) }
-    }
-
-    private var sentPromptBehaviorBinding: Binding<AppSentPromptBehavior> {
-        Binding { model.sentPromptBehavior } set: { model.setSentPromptBehavior($0) }
-    }
-
-    private var showPromptExamplesBinding: Binding<Bool> {
-        Binding { model.showPromptExamples } set: { model.setShowPromptExamples($0) }
-    }
-
-    private var loadModelOnLaunchBinding: Binding<Bool> {
-        Binding { model.loadModelOnLaunch } set: { model.setLoadModelOnLaunch($0) }
-    }
-
-    private var accentColorModeBinding: Binding<AppAccentColorMode> {
-        Binding { model.accentColorMode } set: { model.setAccentColorMode($0) }
-    }
-
-    private var zoomLevelBinding: Binding<AppZoomLevel> {
-        Binding { model.zoomLevel } set: { model.setZoomLevel($0) }
     }
 
     private var customAccentColorBinding: Binding<Color> {

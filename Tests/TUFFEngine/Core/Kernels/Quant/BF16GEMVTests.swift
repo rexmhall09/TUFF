@@ -185,7 +185,8 @@ import TUFFValidationSupport
         #expect(actual.allSatisfy { abs($0) > Float(Float16.greatestFiniteMagnitude) })
     }
 
-    @Test func batchedArgmaxMatchesPerRowProjectionAndArgmax() throws {
+    @Test(arguments: [false, true])
+    func batchedArgmaxMatchesPerRowProjectionAndArgmax(allInvalid: Bool) throws {
         let context = try MetalContext()
         let kernel = try BF16GEMV(context: context, maxRows: 4,
                                   maxVocabularyRows: 64)
@@ -195,7 +196,7 @@ import TUFFValidationSupport
         let batch = 4
         let stride = columns + 5
         let weights = (0..<(rows * columns)).map { index in
-            Quantization.bf16Bits(Float((index * 19 + 7) % 101 - 50) / 64)
+            Quantization.bf16Bits(allInvalid ? .nan : Float((index * 19 + 7) % 101 - 50) / 64)
         }
         let inputs = (0..<(batch * stride)).map { index in
             index % stride < columns
@@ -258,6 +259,7 @@ import TUFFValidationSupport
         let newPointer = newTokens.contents().assumingMemoryBound(to: UInt32.self)
         for row in 0..<batch {
             #expect(newPointer[row + 1] == oldPointer[row])
+            if allInvalid { #expect(newPointer[row + 1] == 0) }
         }
     }
 

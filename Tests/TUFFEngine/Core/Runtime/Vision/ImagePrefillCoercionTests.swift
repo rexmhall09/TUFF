@@ -10,7 +10,7 @@ import Testing
         let off = PrefillRuntimeConfig.off
         #expect(!off.servesImagePrompt)
 
-        let coerced = try? #require(off.coercedForImagePrompt())
+        let coerced = off.coercedForImagePrompt()
         #expect(coerced?.mode == .chunked)
         #expect(coerced?.servesImagePrompt == true)
     }

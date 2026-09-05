@@ -293,7 +293,7 @@ void bf16_gemv_argmax_rows_reduce(
             ? index : 0xFFFFFFFFu;
         const uint all_index_min = simd_min(all_index);
         if (simd_lane_id == 0u) {
-            out_tokens[batch] = all_index_min;
+            out_tokens[batch] = all_index_min == 0xFFFFFFFFu ? 0u : all_index_min;
         }
     }
 }

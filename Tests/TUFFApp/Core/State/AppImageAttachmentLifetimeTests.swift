@@ -119,7 +119,7 @@ import TUFFEngine
         let model = makeAppModel(modelDirectory: directory, client: client,
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
-        model.setSentPromptBehavior(.clear)
+        model.sentPromptBehavior = .clear
         await attach(model, [source])
         #expect(model.imageAttachments.count == 1)
         model.promptText = "describe it"
@@ -162,7 +162,7 @@ import TUFFEngine
         let model = makeAppModel(modelDirectory: directory, client: client,
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
-        model.setSentPromptBehavior(.clear)
+        model.sentPromptBehavior = .clear
         await attach(model, [source])
         model.promptText = "describe it"
         model.maxNewTokensOverride = 1
@@ -330,7 +330,7 @@ import TUFFEngine
         let model = makeAppModel(modelDirectory: directory, client: client,
                              attachmentStore: store)
         model.loadState = .ready(modelDirectory: directory, loadSeconds: 1)
-        model.setSentPromptBehavior(.keep)
+        model.sentPromptBehavior = .keep
         await attach(model, [source])
         model.promptText = "describe it"
         model.maxNewTokensOverride = 1

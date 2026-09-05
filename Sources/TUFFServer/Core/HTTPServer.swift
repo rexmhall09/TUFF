@@ -71,13 +71,15 @@ public actor TUFFHTTPServer {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 childChannels.insert(channel)
-                return channel.pipeline.addHandler(
-                    IdleStateHandler(readTimeout: idleTimeout)
-                ).flatMap {
-                    channel.pipeline.configureHTTPServerPipeline(
-                        withPipeliningAssistance: true,
-                        withErrorHandling: true)
-                }.flatMap {
+                do {
+                    try channel.pipeline.syncOperations.addHandler(
+                        IdleStateHandler(readTimeout: idleTimeout))
+                } catch {
+                    return channel.eventLoop.makeFailedFuture(error)
+                }
+                return channel.pipeline.configureHTTPServerPipeline(
+                    withPipeliningAssistance: true,
+                    withErrorHandling: true).flatMap {
                     channel.pipeline.addHandler(ServerHTTPHandler(
                         modelID: modelID,
                         chatDialect: chatDialect,

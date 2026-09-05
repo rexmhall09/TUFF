@@ -41,8 +41,8 @@ void argmax_fp16(
     uint bestIndex = 0xFFFFFFFFu;
     for (uint i = lid; i < count; i += lsize) {
         const float value = float(values[i]);
-        if (value > bestValue ||
-            (value == bestValue && i < bestIndex)) {
+        if (isfinite(value) && (value > bestValue ||
+            (value == bestValue && i < bestIndex))) {
             bestValue = value;
             bestIndex = i;
         }
@@ -67,7 +67,7 @@ void argmax_fp16(
             ? index : 0xFFFFFFFFu;
         const uint allIndexMin = simd_min(allIndex);
         if (simd_lane_id == 0) {
-            out_token[0] = allIndexMin;
+            out_token[0] = allIndexMin == 0xFFFFFFFFu ? 0u : allIndexMin;
         }
     }
 }

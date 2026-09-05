@@ -138,36 +138,62 @@ public final class AppModel {
         get { settingsStore.topP }
         set { settingsStore.topP = newValue }
     }
-    public private(set) var newlineShortcut: AppNewlineShortcut {
+    // App-wide settings persist from their setters so views can bind directly.
+    public var newlineShortcut: AppNewlineShortcut {
         get { settingsStore.newlineShortcut }
-        set { settingsStore.newlineShortcut = newValue }
+        set {
+            guard settingsStore.newlineShortcut != newValue else { return }
+            settingsStore.newlineShortcut = newValue
+            persistSettings()
+        }
     }
-    public private(set) var showPromptExamples: Bool {
+    public var showPromptExamples: Bool {
         get { settingsStore.showPromptExamples }
-        set { settingsStore.showPromptExamples = newValue }
+        set {
+            guard settingsStore.showPromptExamples != newValue else { return }
+            settingsStore.showPromptExamples = newValue
+            persistSettings()
+        }
     }
-    public private(set) var sentPromptBehavior: AppSentPromptBehavior {
+    public var sentPromptBehavior: AppSentPromptBehavior {
         get { settingsStore.sentPromptBehavior }
-        set { settingsStore.sentPromptBehavior = newValue }
+        set {
+            guard settingsStore.sentPromptBehavior != newValue else { return }
+            settingsStore.sentPromptBehavior = newValue
+            persistSettings()
+        }
     }
-    public private(set) var loadModelOnLaunch: Bool {
+    /// Whether launching the app should load the model straight away. Off by
+    /// default, because loading takes minutes and holds gigabytes.
+    public var loadModelOnLaunch: Bool {
         get { settingsStore.loadModelOnLaunch }
-        set { settingsStore.loadModelOnLaunch = newValue }
+        set {
+            guard settingsStore.loadModelOnLaunch != newValue else { return }
+            settingsStore.loadModelOnLaunch = newValue
+            persistSettings()
+        }
     }
-    public private(set) var accentColorMode: AppAccentColorMode {
+    public var accentColorMode: AppAccentColorMode {
         get { settingsStore.accentColorMode }
-        set { settingsStore.accentColorMode = newValue }
+        set {
+            guard settingsStore.accentColorMode != newValue else { return }
+            settingsStore.accentColorMode = newValue
+            persistSettings()
+        }
     }
+    /// Updated through `setCustomAccentColorHex`, which rejects malformed input.
     public private(set) var customAccentColorHex: String {
         get { settingsStore.customAccentColorHex }
         set { settingsStore.customAccentColorHex = newValue }
     }
-    public private(set) var zoomLevel: AppZoomLevel {
+    public var zoomLevel: AppZoomLevel {
         get { settingsStore.zoomLevel }
-        set { settingsStore.zoomLevel = newValue }
+        set {
+            guard settingsStore.zoomLevel != newValue else { return }
+            settingsStore.zoomLevel = newValue
+            persistSettings()
+        }
     }
-    /// Whether launching the app should load the model straight away. Off by
-    /// default, because loading takes minutes and holds gigabytes.
     public var diagnostics: AppDiagnostics? {
         get { inferenceStore.diagnostics }
         set { inferenceStore.diagnostics = newValue }
@@ -314,6 +340,8 @@ public final class AppModel {
     private let settingsPersistenceEnabled: Bool
     /// The debounced settings write. See `persistSettingsSoon`.
     @ObservationIgnored private var pendingSettingsSave: Task<Void, Never>?
+    /// Non-selected profiles waiting for the next coalesced save.
+    @ObservationIgnored private var unsavedProfileKeys: Set<String> = []
     private let installETAClock: SuspendingClock
     private let installETAOrigin: SuspendingClock.Instant
     private var visionInstallETAEstimator = DownloadETAEstimator()
@@ -393,13 +421,13 @@ public final class AppModel {
         self.reasoningEffort = modelSettings.defaultReasoningEffort
         self.preserveThinking = modelSettings.preserveThinking
         self.settingsStore.systemPrompt = modelSettings.systemPrompt
-        self.newlineShortcut = settings.newlineShortcut
-        self.showPromptExamples = settings.showPromptExamples
-        self.sentPromptBehavior = settings.sentPromptBehavior
-        self.loadModelOnLaunch = settings.loadModelOnLaunch
-        self.accentColorMode = settings.accentColorMode
+        self.settingsStore.newlineShortcut = settings.newlineShortcut
+        self.settingsStore.showPromptExamples = settings.showPromptExamples
+        self.settingsStore.sentPromptBehavior = settings.sentPromptBehavior
+        self.settingsStore.loadModelOnLaunch = settings.loadModelOnLaunch
+        self.settingsStore.accentColorMode = settings.accentColorMode
         self.customAccentColorHex = settings.customAccentColorHex
-        self.zoomLevel = settings.zoomLevel
+        self.settingsStore.zoomLevel = settings.zoomLevel
         self.settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
 
@@ -421,6 +449,13 @@ public final class AppModel {
                 self.installs.insert(selected, at: 0)
             }
         }
+        // Cache every profile so edits to non-selected models are observable.
+        self.settingsStore.modelProfiles = Self.storedProfiles(
+            for: self.installs,
+            selected: selected,
+            selectedProfile: savedModelSettings,
+            selectedSettings: settings,
+            persistenceEnabled: settingsPersistenceEnabled)
         for coordinator in self.installs {
             coordinator.onInstalled = { [weak self] finished in
                 self?.modelDidInstall(finished)
@@ -682,6 +717,9 @@ public final class AppModel {
     public func deleteConversation(_ record: AppConversationRecord) {
         guard canDeleteConversation(record) else { return }
         if conversationStore.selectedConversationID == record.id {
+            // Deletion may select a chat for another model. Save this profile
+            // before that changes which profile key persistence resolves.
+            persistSettings()
             releaseTranscriptImages()
             generationTranscriptMailbox?.reset()
             diagnostics = nil
@@ -1239,14 +1277,19 @@ public final class AppModel {
         guard !isRunning else { return }
         let path = url.standardizedFileURL.path
         guard path != modelPathText else { return }
+        // Save against the old directory before the coordinator moves.
+        persistSettings()
         selectedInstall.setDirectory(url)
-        applySelectedModelDirectory(url)
+        applySelectedModelDirectory(url, adoptingStoredProfile: false)
     }
 
     /// Shared tail of selecting a model and repointing one: adopt the
     /// directory's persisted settings and drop everything tied to the runtime
     /// that was loaded from the previous one.
-    private func applySelectedModelDirectory(_ url: URL) {
+    private func applySelectedModelDirectory(
+        _ url: URL,
+        adoptingStoredProfile: Bool = true
+    ) {
         let path = url.standardizedFileURL.path
         let preservesPreparedVisionPack = visionInstallTargetModelID == selectedModelID
             && visionInstallTargetDirectory?.standardizedFileURL.path == path
@@ -1257,7 +1300,8 @@ public final class AppModel {
         modelPathText = path
         clearImages()
         applyPersistedSettings(
-            forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
+            forModelDirectory: URL(fileURLWithPath: path, isDirectory: true),
+            adoptingStoredProfile: adoptingStoredProfile)
         loadGeneration &+= 1
         loadTask?.cancel()
         loadTask = nil
@@ -1311,36 +1355,6 @@ public final class AppModel {
         }
     }
 
-    public func setNewlineShortcut(_ shortcut: AppNewlineShortcut) {
-        guard newlineShortcut != shortcut else { return }
-        newlineShortcut = shortcut
-        persistSettings()
-    }
-
-    public func setShowPromptExamples(_ show: Bool) {
-        guard showPromptExamples != show else { return }
-        showPromptExamples = show
-        persistSettings()
-    }
-
-    public func setSentPromptBehavior(_ behavior: AppSentPromptBehavior) {
-        guard sentPromptBehavior != behavior else { return }
-        sentPromptBehavior = behavior
-        persistSettings()
-    }
-
-    public func setLoadModelOnLaunch(_ enabled: Bool) {
-        guard loadModelOnLaunch != enabled else { return }
-        loadModelOnLaunch = enabled
-        persistSettings()
-    }
-
-    public func setAccentColorMode(_ mode: AppAccentColorMode) {
-        guard accentColorMode != mode else { return }
-        accentColorMode = mode
-        persistSettings()
-    }
-
     /// Ignores a hex string that fails to parse, so a malformed value typed
     /// into the settings field never reaches disk or the shared theme.
     public func setCustomAccentColorHex(_ hex: String) {
@@ -1349,29 +1363,67 @@ public final class AppModel {
         persistSettings()
     }
 
-    public func setZoomLevel(_ level: AppZoomLevel) {
-        guard zoomLevel != level else { return }
-        zoomLevel = level
-        persistSettings()
+    /// Loads every profile once, sharing reads for models in the same directory.
+    private static func storedProfiles(
+        for installs: [ModelInstallCoordinator],
+        selected: ModelInstallCoordinator,
+        selectedProfile: AppModelSettingsProfile,
+        selectedSettings: MacAppSettings,
+        persistenceEnabled: Bool
+    ) -> [String: AppModelSettingsProfile] {
+        var profiles = [selected.descriptor.settingsProfileKey: selectedProfile]
+        let others = installs.filter { $0.id != selected.id }
+        guard persistenceEnabled else {
+            for install in others {
+                let profileKey = install.descriptor.settingsProfileKey
+                profiles[profileKey] = .defaults(for: profileKey)
+            }
+            return profiles
+        }
+        var loaded = [
+            MacAppSettingsFileStore.fileURL(forModelDirectory: selected.directoryURL):
+                selectedSettings
+        ]
+        for install in others {
+            let profileKey = install.descriptor.settingsProfileKey
+            let fileURL = MacAppSettingsFileStore.fileURL(
+                forModelDirectory: install.directoryURL)
+            let settings = loaded[fileURL] ?? MacAppSettingsFileStore.loadOrCreate(
+                forModelDirectory: install.directoryURL,
+                profileKey: profileKey)
+            loaded[fileURL] = settings
+            profiles[profileKey] = settings.profile(for: profileKey)
+        }
+        return profiles
     }
 
+    /// The saved profile before Auto resolves its runtime values.
+    private func storedSettingsProfile(
+        for coordinator: ModelInstallCoordinator
+    ) -> AppModelSettingsProfile {
+        let profileKey = coordinator.descriptor.settingsProfileKey
+        return settingsStore.modelProfiles[profileKey] ?? .defaults(for: profileKey)
+    }
+
+    /// The effective profile, including Auto's resolved runtime values.
     public func settingsProfile(
         for coordinator: ModelInstallCoordinator
     ) -> AppModelSettingsProfile {
         if coordinator.id == selectedModelID {
             return currentSettingsProfile
         }
-        guard settingsPersistenceEnabled else {
-            return .defaults(for: coordinator.descriptor.settingsProfileKey)
-        }
-        let saved = MacAppSettingsFileStore.loadOrCreate(
-            forModelDirectory: coordinator.directoryURL,
-            profileKey: coordinator.descriptor.settingsProfileKey)
-            .profile(for: coordinator.descriptor.settingsProfileKey)
         return AppAutomaticMemoryPlanner.applying(
-            saved,
+            storedSettingsProfile(for: coordinator),
             for: coordinator.descriptor,
             on: deviceCapabilities)
+    }
+
+    /// Captures live settings without replacing Auto's saved manual values.
+    private func captureSelectedSettingsProfile() {
+        let profileKey = selectedDescriptor.settingsProfileKey
+        settingsStore.modelProfiles[profileKey] = Self.preservingManualMemorySettings(
+            in: currentSettingsProfile,
+            from: storedSettingsProfile(for: selectedInstall))
     }
 
     public func automaticMemoryPlan(
@@ -1400,52 +1452,41 @@ public final class AppModel {
         _ enabled: Bool,
         for coordinator: ModelInstallCoordinator
     ) {
-        guard settingsPersistenceEnabled else {
-            var profile = settingsProfile(for: coordinator)
-            profile.automaticMemory = enabled
-            updateSettingsProfile(profile, for: coordinator)
-            return
-        }
-        let profileKey = coordinator.descriptor.settingsProfileKey
-        var settings = MacAppSettingsFileStore.loadOrCreate(
-            forModelDirectory: coordinator.directoryURL,
-            profileKey: profileKey)
-        var stored = settings.profile(for: profileKey)
+        var stored = storedSettingsProfile(for: coordinator)
         guard stored.automaticMemory != enabled else { return }
         stored.automaticMemory = enabled
+        let profileKey = coordinator.descriptor.settingsProfileKey
+        settingsStore.modelProfiles[profileKey] = stored
         if coordinator.id == selectedModelID {
             applySettingsProfile(stored)
             persistSettings()
         } else {
-            settings.setProfile(stored, for: profileKey)
-            try? MacAppSettingsFileStore.save(
-                settings,
-                forModelDirectory: coordinator.directoryURL)
+            markProfileUnsaved(profileKey)
+            persistSettingsSoon()
         }
     }
 
+    /// Updates observable state immediately and coalesces the file write.
     public func updateSettingsProfile(
         _ profile: AppModelSettingsProfile,
         for coordinator: ModelInstallCoordinator
     ) {
         guard profile.isValid() else { return }
+        let profileKey = coordinator.descriptor.settingsProfileKey
+        settingsStore.modelProfiles[profileKey] = Self.preservingManualMemorySettings(
+            in: profile,
+            from: storedSettingsProfile(for: coordinator))
         if coordinator.id == selectedModelID {
             applySettingsProfile(profile)
-            persistSettingsSoon()
-            return
+        } else {
+            markProfileUnsaved(profileKey)
         }
+        persistSettingsSoon()
+    }
+
+    private func markProfileUnsaved(_ profileKey: String) {
         guard settingsPersistenceEnabled else { return }
-        let profileKey = coordinator.descriptor.settingsProfileKey
-        var settings = MacAppSettingsFileStore.loadOrCreate(
-            forModelDirectory: coordinator.directoryURL,
-            profileKey: profileKey)
-        let stored = Self.preservingManualMemorySettings(
-            in: profile,
-            from: settings.profile(for: profileKey))
-        settings.setProfile(stored, for: profileKey)
-        try? MacAppSettingsFileStore.save(
-            settings,
-            forModelDirectory: coordinator.directoryURL)
+        unsavedProfileKeys.insert(profileKey)
     }
 
     /// Starts the launch load if it is switched on and the model can be loaded.
@@ -2293,22 +2334,27 @@ public final class AppModel {
         visionInstallETAText = nil
     }
 
-    private func applyPersistedSettings(forModelDirectory modelDirectory: URL) {
-        guard settingsPersistenceEnabled else { return }
-        let profileKey = selectedDescriptor.settingsProfileKey
-        let settings = MacAppSettingsFileStore.loadOrCreate(
-            forModelDirectory: modelDirectory,
-            profileKey: profileKey)
-        let modelSettings = settings.profile(for: profileKey)
-        applySettingsProfile(modelSettings)
-        newlineShortcut = settings.newlineShortcut
-        showPromptExamples = settings.showPromptExamples
-        sentPromptBehavior = settings.sentPromptBehavior
-        loadModelOnLaunch = settings.loadModelOnLaunch
-        accentColorMode = settings.accentColorMode
-        customAccentColorHex = settings.customAccentColorHex
-        zoomLevel = settings.zoomLevel
-        settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
+    /// Loads app-wide settings and adopts either the cached or on-disk profile.
+    private func applyPersistedSettings(forModelDirectory modelDirectory: URL,
+                                        adoptingStoredProfile: Bool) {
+        if settingsPersistenceEnabled {
+            let profileKey = selectedDescriptor.settingsProfileKey
+            let settings = MacAppSettingsFileStore.loadOrCreate(
+                forModelDirectory: modelDirectory,
+                profileKey: profileKey)
+            if !adoptingStoredProfile || settingsStore.modelProfiles[profileKey] == nil {
+                settingsStore.modelProfiles[profileKey] = settings.profile(for: profileKey)
+            }
+            settingsStore.newlineShortcut = settings.newlineShortcut
+            settingsStore.showPromptExamples = settings.showPromptExamples
+            settingsStore.sentPromptBehavior = settings.sentPromptBehavior
+            settingsStore.loadModelOnLaunch = settings.loadModelOnLaunch
+            settingsStore.accentColorMode = settings.accentColorMode
+            customAccentColorHex = settings.customAccentColorHex
+            settingsStore.zoomLevel = settings.zoomLevel
+            settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
+        }
+        applySettingsProfile(storedSettingsProfile(for: selectedInstall))
     }
 
     private var currentSettingsProfile: AppModelSettingsProfile {
@@ -2384,23 +2430,25 @@ public final class AppModel {
 
     /// Writes whatever `persistSettingsSoon` is still holding, now.
     public func flushPendingSettings() {
-        guard pendingSettingsSave != nil else { return }
+        guard pendingSettingsSave != nil || !unsavedProfileKeys.isEmpty else { return }
         pendingSettingsSave?.cancel()
         pendingSettingsSave = nil
         persistSettings()
     }
 
     private func persistSettings() {
-        guard settingsPersistenceEnabled else { return }
+        // Keep the profile cache current even when persistence is disabled.
+        captureSelectedSettingsProfile()
+        guard settingsPersistenceEnabled else {
+            unsavedProfileKeys.removeAll()
+            return
+        }
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
         let profileKey = selectedDescriptor.settingsProfileKey
         var settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory,
             profileKey: profileKey)
-        let stored = Self.preservingManualMemorySettings(
-            in: currentSettingsProfile,
-            from: settings.profile(for: profileKey))
-        settings.setProfile(stored, for: profileKey)
+        settings.setProfile(storedSettingsProfile(for: selectedInstall), for: profileKey)
         settings.newlineShortcut = newlineShortcut
         settings.showPromptExamples = showPromptExamples
         settings.sentPromptBehavior = sentPromptBehavior
@@ -2409,9 +2457,32 @@ public final class AppModel {
         settings.customAccentColorHex = customAccentColorHex
         settings.zoomLevel = zoomLevel
         settings.bypassModelRestrictions = bypassModelRestrictions
-        try? MacAppSettingsFileStore.save(
+        if (try? MacAppSettingsFileStore.save(
             settings,
-            forModelDirectory: modelDirectory)
+            forModelDirectory: modelDirectory)) != nil {
+            unsavedProfileKeys.remove(profileKey)
+        }
+        persistUnsavedProfiles(excluding: profileKey)
+    }
+
+    /// Merges dirty non-selected profiles into their own settings files.
+    private func persistUnsavedProfiles(excluding selectedKey: String) {
+        let pending = unsavedProfileKeys.subtracting([selectedKey])
+        guard !pending.isEmpty else { return }
+        for coordinator in installs
+        where pending.contains(coordinator.descriptor.settingsProfileKey) {
+            let profileKey = coordinator.descriptor.settingsProfileKey
+            var settings = MacAppSettingsFileStore.loadOrCreate(
+                forModelDirectory: coordinator.directoryURL,
+                profileKey: profileKey)
+            settings.setProfile(
+                storedSettingsProfile(for: coordinator), for: profileKey)
+            if (try? MacAppSettingsFileStore.save(
+                settings,
+                forModelDirectory: coordinator.directoryURL)) != nil {
+                unsavedProfileKeys.remove(profileKey)
+            }
+        }
     }
 
     private static func preservingManualMemorySettings(

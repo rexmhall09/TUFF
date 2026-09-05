@@ -88,6 +88,7 @@ struct ChatControlsView: View {
         }
     }
 
+    /// Route picker changes through model-switch validation.
     private var modelSelection: Binding<String> {
         Binding {
             model.selectedModelID

@@ -59,9 +59,31 @@ public enum AppUpdateConfigurationError: Error, Equatable, Sendable {
 public final class AppUpdateController {
     public let configuration: AppUpdateConfiguration?
     public private(set) var unavailableReason: String?
-    public private(set) var automaticallyChecksForUpdates = false
-    public private(set) var automaticallyDownloadsUpdates = false
     public private(set) var allowsAutomaticUpdates = false
+
+    // Sparkle owns the persisted values; expose its confirmed state to SwiftUI.
+    public var automaticallyChecksForUpdates: Bool {
+        get { checksForUpdates }
+        set {
+            guard let updater = standardController?.updater else { return }
+            updater.automaticallyChecksForUpdates = newValue
+            checksForUpdates = updater.automaticallyChecksForUpdates
+            allowsAutomaticUpdates = updater.allowsAutomaticUpdates
+            // Automatic downloads require automatic checks.
+            if !checksForUpdates { automaticallyDownloadsUpdates = false }
+        }
+    }
+    public var automaticallyDownloadsUpdates: Bool {
+        get { downloadsUpdates }
+        set {
+            guard let updater = standardController?.updater else { return }
+            updater.automaticallyDownloadsUpdates = newValue
+            downloadsUpdates = updater.automaticallyDownloadsUpdates
+        }
+    }
+
+    private var checksForUpdates = false
+    private var downloadsUpdates = false
 
     @ObservationIgnored
     private var standardController: SPUStandardUpdaterController?
@@ -80,17 +102,15 @@ public final class AppUpdateController {
             do {
                 try controller.updater.start()
                 standardController = controller
-                automaticallyChecksForUpdates =
-                    controller.updater.automaticallyChecksForUpdates
-                automaticallyDownloadsUpdates =
-                    controller.updater.automaticallyDownloadsUpdates
+                checksForUpdates = controller.updater.automaticallyChecksForUpdates
+                downloadsUpdates = controller.updater.automaticallyDownloadsUpdates
                 allowsAutomaticUpdates = controller.updater.allowsAutomaticUpdates
                 // Sparkle's own scheduler only checks once its interval has
                 // elapsed since the last check, so a launch shortly after the
                 // previous one would otherwise check for nothing. Sparkle's
                 // header docs recommend calling this once, right after
                 // starting, to force a check on every launch instead.
-                if automaticallyChecksForUpdates {
+                if checksForUpdates {
                     controller.updater.checkForUpdatesInBackground()
                 }
             } catch {
@@ -109,21 +129,5 @@ public final class AppUpdateController {
         guard let standardController,
               standardController.updater.canCheckForUpdates else { return }
         standardController.checkForUpdates(nil)
-    }
-
-    public func setAutomaticallyChecksForUpdates(_ enabled: Bool) {
-        guard let updater = standardController?.updater else { return }
-        updater.automaticallyChecksForUpdates = enabled
-        automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
-        allowsAutomaticUpdates = updater.allowsAutomaticUpdates
-        if !automaticallyChecksForUpdates {
-            setAutomaticallyDownloadsUpdates(false)
-        }
-    }
-
-    public func setAutomaticallyDownloadsUpdates(_ enabled: Bool) {
-        guard let updater = standardController?.updater else { return }
-        updater.automaticallyDownloadsUpdates = enabled
-        automaticallyDownloadsUpdates = updater.automaticallyDownloadsUpdates
     }
 }

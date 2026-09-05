@@ -220,7 +220,7 @@ import Testing
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
-        model.setNewlineShortcut(.shiftReturn)
+        model.newlineShortcut = .shiftReturn
 
         #expect(model.newlineShortcut == .shiftReturn)
         #expect(!model.hasStaleLoadedRuntime)
@@ -233,7 +233,7 @@ import Testing
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
-        model.setShowPromptExamples(false)
+        model.showPromptExamples = false
 
         #expect(!model.showPromptExamples)
         #expect(!model.hasStaleLoadedRuntime)
@@ -295,7 +295,7 @@ import Testing
             response: "answer",
             tokenDelayNanos: 20_000_000)
         let model = readyModel(client: client)
-        model.setSentPromptBehavior(.clear)
+        model.sentPromptBehavior = .clear
         model.promptText = "original prompt"
         model.maxNewTokensOverride = 1
 
@@ -317,7 +317,7 @@ import Testing
     @MainActor
     @Test func failedValidationDoesNotClearPrompt() {
         let model = readyModel(client: MockInferenceClient(response: "answer"))
-        model.setSentPromptBehavior(.clear)
+        model.sentPromptBehavior = .clear
         model.promptText = "keep invalid prompt"
         model.maxNewTokensOverride = 0
 

@@ -414,8 +414,7 @@ public final class AppModelLibraryStore {
     public init() {}
 }
 
-/// User-configurable defaults. Model profiles are loaded into this store when
-/// selection changes, while persistence remains coordinated by AppModel.
+/// User-configurable defaults and observable profiles, persisted by AppModel.
 @MainActor
 @Observable
 public final class AppSettingsStore {
@@ -443,6 +442,8 @@ public final class AppSettingsStore {
     public var bypassModelRestrictions = false
     /// The selected model's system prompt, loaded from its profile.
     public var systemPrompt = ""
+    /// Observable stored profiles, including manual values hidden by Auto.
+    public internal(set) var modelProfiles: [String: AppModelSettingsProfile] = [:]
 
     public init() {}
 }
@@ -491,9 +492,19 @@ public enum AppServerHealth: Equatable, Sendable {
 @Observable
 public final class AppServerStore {
     public static let maximumRecentErrors = 8
+    public static let portRange = 1...65_535
     public var status: AppServerStatus = .stopped
     public var health: AppServerHealth = .unknown
-    public var desiredPort = 8_080
+    /// Clamped at the state boundary so every writer produces a valid port.
+    public var desiredPort: Int {
+        get { storedDesiredPort }
+        set {
+            storedDesiredPort = min(
+                max(newValue, Self.portRange.lowerBound),
+                Self.portRange.upperBound)
+        }
+    }
+    private var storedDesiredPort = 8_080
     public var queueLimit = 4
     public var boundPort: Int?
     public var modelID: String?

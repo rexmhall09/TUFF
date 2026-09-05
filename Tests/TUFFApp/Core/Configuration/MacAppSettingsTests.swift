@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 import TUFFEngine
 import TUFFModelCatalog
@@ -721,7 +722,7 @@ import TUFFModelCatalog
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
 
-        model.setZoomLevel(.percent150)
+        model.zoomLevel = .percent150
 
         let saved = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
@@ -761,7 +762,7 @@ import TUFFModelCatalog
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
 
-        model.setNewlineShortcut(.shiftReturn)
+        model.newlineShortcut = .shiftReturn
 
         let saved = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
@@ -778,7 +779,7 @@ import TUFFModelCatalog
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
 
-        model.setShowPromptExamples(false)
+        model.showPromptExamples = false
 
         let saved = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
@@ -795,7 +796,7 @@ import TUFFModelCatalog
             installer: MockModelInstallerClient(descriptor: .default),
             settingsPersistenceEnabled: true)
 
-        model.setSentPromptBehavior(.clear)
+        model.sentPromptBehavior = .clear
 
         let saved = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
@@ -877,6 +878,372 @@ import TUFFModelCatalog
         let reloaded = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: modelDirectory)
 
         #expect(reloaded.rdadvisePolicy == .bounded)
+    }
+
+
+    // MARK: - Live editing of a model that is not selected
+
+    /// Two models installed side by side, so a profile can be edited while its
+    /// model is not the one the app is focused on.
+    @MainActor
+    private func makeTwoModelHost(
+        root: URL,
+        persistence: Bool = true,
+        conversationStore: AppConversationStore = AppConversationStore()
+    ) -> (model: AppModel, gemma: ModelInstallCoordinator, qwen: ModelInstallCoordinator) {
+        let gemmaDirectory = root.appendingPathComponent(
+            "gemma4.gturbo", isDirectory: true)
+        let qwenDirectory = root.appendingPathComponent(
+            "qwen36.gturbo", isDirectory: true)
+        let qwen = ModelInstallCoordinator(
+            descriptor: .qwen36,
+            directoryURL: qwenDirectory,
+            client: MockModelInstallerClient(descriptor: .qwen36))
+        let model = makeAppModel(
+            modelDirectory: gemmaDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            otherInstalls: [qwen],
+            conversationStore: conversationStore,
+            settingsPersistenceEnabled: persistence)
+        let gemma = model.installs.first { $0.descriptor == .default } ?? qwen
+        return (model, gemma, qwen)
+    }
+
+    /// A sibling view must observe edits made through another control.
+    @MainActor
+    @Test func editingANonselectedProfileMutatesObservableState() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        // `onChange` is @Sendable, so the flag it sets cannot be a local var.
+        let observedChange = Mutex(false)
+        withObservationTracking {
+            _ = host.model.settingsProfile(for: host.qwen).temperature
+        } onChange: {
+            observedChange.withLock { $0 = true }
+        }
+
+        var profile = host.model.settingsProfile(for: host.qwen)
+        profile.temperature = 0.65
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+
+        #expect(observedChange.withLock { $0 },
+                "a sibling view reading this profile has nothing to recompute from")
+        #expect(host.model.settingsProfile(for: host.qwen).temperature == 0.65)
+        #expect(host.model.selectedModelID != host.qwen.id)
+    }
+
+    /// The same edit, on a model with no settings file behind it at all. What
+    /// the screen shows must come from memory, not from whether a write
+    /// happened to succeed.
+    @MainActor
+    @Test func aNonselectedProfileEditAppliesWithoutPersistence() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root, persistence: false)
+
+        var profile = host.model.settingsProfile(for: host.qwen)
+        profile.automaticMemory = false
+        profile.contextTokens = AppContextLengthOption.thirtyTwoK.tokens
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+
+        #expect(host.model.settingsProfile(for: host.qwen).contextTokens
+            == AppContextLengthOption.thirtyTwoK.tokens)
+    }
+
+    /// The derived text under the memory controls — the working-set estimate,
+    /// the eligibility warning — is computed from the same profile, so it has
+    /// to move with the edit rather than after a relaunch.
+    @MainActor
+    @Test func aNonselectedProfileEditMovesTheDerivedMemoryEstimate() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        var profile = host.model.settingsProfile(for: host.qwen)
+        profile.automaticMemory = false
+        profile.contextTokens = AppContextLengthOption.fourK.tokens
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+        let before = host.model.contextEligibility(
+            for: host.qwen,
+            contextTokens: host.model.settingsProfile(for: host.qwen).contextTokens,
+            expertCacheSlots: host.model.settingsProfile(for: host.qwen).expertCacheSlots)
+
+        profile.contextTokens = AppContextLengthOption.thirtyTwoK.tokens
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+        let after = host.model.contextEligibility(
+            for: host.qwen,
+            contextTokens: host.model.settingsProfile(for: host.qwen).contextTokens,
+            expertCacheSlots: host.model.settingsProfile(for: host.qwen).expertCacheSlots)
+
+        #expect(after.estimatedWorkingSetBytes > before.estimatedWorkingSetBytes)
+    }
+
+    /// Immediate in memory, coalesced on disk — the same bargain the selected
+    /// model's own edits make.
+    @MainActor
+    @Test func aNonselectedProfileEditIsOnDiskAfterAFlush() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        let qwenKey = AppModelInstallDescriptor.qwen36.settingsProfileKey
+        var profile = host.model.settingsProfile(for: host.qwen)
+        profile.temperature = 0.65
+        profile.defaultReasoning = .on
+
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+        host.model.flushPendingSettings()
+
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: host.qwen.directoryURL,
+            profileKey: qwenKey).profile(for: qwenKey)
+        #expect(saved.temperature == 0.65)
+        #expect(saved.defaultReasoning == .on)
+    }
+
+    /// Editing one model must not disturb the model that is loaded, and the
+    /// selected model's own edits must not be lost to a sibling's write —
+    /// they share one settings file.
+    @MainActor
+    @Test func editsToBothModelsSurviveOneAnother() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        let gemmaKey = AppModelInstallDescriptor.default.settingsProfileKey
+        let qwenKey = AppModelInstallDescriptor.qwen36.settingsProfileKey
+
+        var qwenProfile = host.model.settingsProfile(for: host.qwen)
+        qwenProfile.temperature = 0.65
+        host.model.updateSettingsProfile(qwenProfile, for: host.qwen)
+        var gemmaProfile = host.model.settingsProfile(for: host.gemma)
+        gemmaProfile.temperature = 0.15
+        host.model.updateSettingsProfile(gemmaProfile, for: host.gemma)
+        host.model.flushPendingSettings()
+
+        #expect(host.model.temperature == 0.15, "the selected model still runs its own")
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: host.gemma.directoryURL,
+            profileKey: gemmaKey)
+        #expect(saved.profile(for: gemmaKey).temperature == 0.15)
+        #expect(saved.profile(for: qwenKey).temperature == 0.65)
+    }
+
+    /// Selecting a model whose edit has not been written yet must adopt the
+    /// edit, not the file it is still on its way to. Reading the file here is
+    /// what would put a stale snapshot on screen.
+    @MainActor
+    @Test func selectingAModelAdoptsItsUnwrittenEdit() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        var profile = host.model.settingsProfile(for: host.qwen)
+        profile.temperature = 0.65
+        profile.automaticMemory = false
+        profile.contextTokens = AppContextLengthOption.thirtyTwoK.tokens
+
+        // No flush: the write is still sitting behind the debounce.
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+        host.model.selectModel(host.qwen)
+
+        #expect(host.model.selectedModelID == host.qwen.id)
+        #expect(host.model.temperature == 0.65)
+        #expect(host.model.maxContextTokens == AppContextLengthOption.thirtyTwoK.tokens)
+    }
+
+    /// Switching away and back keeps each model on its own values.
+    @MainActor
+    @Test func switchingBetweenProfilesShowsEachModelsOwnValues() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        var qwenProfile = host.model.settingsProfile(for: host.qwen)
+        qwenProfile.temperature = 0.65
+        host.model.updateSettingsProfile(qwenProfile, for: host.qwen)
+        host.model.temperature = 0.15
+
+        host.model.selectModel(host.qwen)
+        #expect(host.model.temperature == 0.65)
+        #expect(host.model.settingsProfile(for: host.gemma).temperature == 0.15)
+
+        host.model.selectModel(host.gemma)
+        #expect(host.model.temperature == 0.15)
+        #expect(host.model.settingsProfile(for: host.qwen).temperature == 0.65)
+    }
+
+    /// Auto on a model that is not selected has to behave exactly as it does
+    /// on the selected one: its plan shows through, and the manual context and
+    /// cache underneath survive to be handed back.
+    @MainActor
+    @Test func automaticMemoryOnANonselectedModelKeepsItsManualSettings() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let qwenKey = AppModelInstallDescriptor.qwen36.settingsProfileKey
+        var settings = MacAppSettings()
+        settings.setProfile(AppModelSettingsProfile(
+            automaticMemory: false,
+            contextTokens: AppContextLengthOption.thirtyTwoK.tokens,
+            expertCacheSlots: 24,
+            prefillEnabled: false), for: qwenKey)
+        try MacAppSettingsFileStore.save(
+            settings,
+            forModelDirectory: root.appendingPathComponent(
+                "gemma4.gturbo", isDirectory: true))
+        let host = makeTwoModelHost(root: root)
+
+        host.model.setAutomaticMemory(true, for: host.qwen)
+
+        let automatic = host.model.settingsProfile(for: host.qwen)
+        let plan = try #require(host.model.automaticMemoryPlan(for: host.qwen))
+        #expect(automatic.automaticMemory)
+        #expect(automatic.contextTokens == plan.contextTokens,
+                "Auto's plan is what the screen shows")
+        #expect(automatic.expertCacheSlots == plan.expertCacheSlots)
+
+        // Whatever Auto resolved, the manual choices are still what is stored.
+        host.model.flushPendingSettings()
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: host.qwen.directoryURL,
+            profileKey: qwenKey).profile(for: qwenKey)
+        #expect(saved.automaticMemory)
+        #expect(saved.contextTokens == AppContextLengthOption.thirtyTwoK.tokens)
+        #expect(saved.expertCacheSlots == 24)
+        #expect(!saved.prefillEnabled)
+
+        host.model.setAutomaticMemory(false, for: host.qwen)
+
+        let manual = host.model.settingsProfile(for: host.qwen)
+        #expect(!manual.automaticMemory)
+        #expect(manual.contextTokens == AppContextLengthOption.thirtyTwoK.tokens)
+        #expect(manual.expertCacheSlots == 24)
+        #expect(!manual.prefillEnabled)
+    }
+
+    @MainActor
+    @Test func anInvalidProfileIsRefusedForANonselectedModelToo() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        var profile = host.model.settingsProfile(for: host.qwen)
+        profile.automaticMemory = false
+        profile.temperature = 0.42
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+
+        profile.temperature = 9
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+
+        #expect(host.model.settingsProfile(for: host.qwen).temperature == 0.42)
+    }
+
+    /// The app-wide settings own their persistence now, so the Settings pane
+    /// and the Settings menu can both bind straight to the property. Both
+    /// still have to reach disk on the write itself, not on a flush.
+    @MainActor
+    @Test func appWideSettingsPersistOnAssignment() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let model = makeAppModel(
+            modelDirectory: modelDirectory,
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
+
+        model.newlineShortcut = .return
+        model.showPromptExamples = true
+        model.sentPromptBehavior = .keep
+        model.loadModelOnLaunch = true
+        model.accentColorMode = .system
+        model.zoomLevel = .percent150
+
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory)
+        #expect(saved.newlineShortcut == .return)
+        #expect(saved.showPromptExamples)
+        #expect(saved.sentPromptBehavior == .keep)
+        #expect(saved.loadModelOnLaunch)
+        #expect(saved.accentColorMode == .system)
+        #expect(saved.zoomLevel == .percent150)
+    }
+
+    @MainActor
+    @Test func aMalformedAccentHexIsIgnored() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = makeAppModel(
+            modelDirectory: root.appendingPathComponent("gemma4.gturbo", isDirectory: true),
+            installer: MockModelInstallerClient(descriptor: .default),
+            settingsPersistenceEnabled: true)
+        model.setCustomAccentColorHex("#123456")
+
+        // Four digits: what "#6F4DFF" looks like halfway through being typed,
+        // and not one of the two lengths that parse.
+        model.setCustomAccentColorHex("#6F4D")
+
+        #expect(model.customAccentColorHex == "#123456")
+    }
+
+    @MainActor
+    @Test func deletingSelectedChatSavesItsPendingProfile() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AppConversationStore()
+        let gemmaKey = AppModelInstallDescriptor.default.settingsProfileKey
+        let qwenKey = AppModelInstallDescriptor.qwen36.settingsProfileKey
+        store.recordCompletedTurn(AppChatTurn(prompt: "other", response: "answer"),
+                                  attachments: [], modelID: qwenKey)
+        store.startNewConversation(modelID: gemmaKey)
+        store.recordCompletedTurn(AppChatTurn(prompt: "selected", response: "answer"),
+                                  attachments: [], modelID: gemmaKey)
+        let host = makeTwoModelHost(root: root, conversationStore: store)
+        var profile = host.model.settingsProfile(for: host.gemma)
+        profile.temperature = 0.15
+        host.model.updateSettingsProfile(profile, for: host.gemma)
+
+        host.model.deleteConversation(try #require(store.selectedConversation))
+        host.model.flushPendingSettings()
+
+        #expect(host.model.selectedModelID == host.qwen.id)
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: host.gemma.directoryURL)
+        #expect(saved.profile(for: gemmaKey).temperature == 0.15)
+    }
+
+    @MainActor
+    @Test func changingDirectorySavesPendingEditsAtTheOldLocation() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        let oldDirectory = host.gemma.directoryURL
+        var profile = host.model.settingsProfile(for: host.gemma)
+        profile.temperature = 0.15
+        host.model.updateSettingsProfile(profile, for: host.gemma)
+
+        host.model.setModelURL(root.appendingPathComponent("new/model.gturbo"))
+        host.model.flushPendingSettings()
+
+        let saved = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: oldDirectory)
+        #expect(saved.profile(for: host.gemma.descriptor.settingsProfileKey).temperature == 0.15)
+        #expect(host.model.temperature != 0.15)
+    }
+
+    @MainActor
+    @Test func failedNonselectedProfileWriteCanBeRetried() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let host = makeTwoModelHost(root: root)
+        let blockedParent = root.appendingPathComponent("blocked")
+        try Data("not a directory".utf8).write(to: blockedParent)
+        host.qwen.setDirectory(blockedParent.appendingPathComponent("model.gturbo"))
+        var profile = host.model.settingsProfile(for: host.qwen)
+        profile.temperature = 0.65
+        host.model.updateSettingsProfile(profile, for: host.qwen)
+        host.model.flushPendingSettings()
+
+        try FileManager.default.removeItem(at: blockedParent)
+        host.model.flushPendingSettings()
+
+        let saved = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: host.qwen.directoryURL,
+            profileKey: host.qwen.descriptor.settingsProfileKey)
+        #expect(saved.profile(for: host.qwen.descriptor.settingsProfileKey).temperature == 0.65)
     }
 
     private func makeTemporaryRoot() throws -> URL {
