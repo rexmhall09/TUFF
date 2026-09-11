@@ -120,27 +120,17 @@ for name in "${required_bundles[@]}"; do
   ditto "$binary_directory/$name" "$app/Contents/Resources/$name"
 done
 
-# SwiftMath ships twelve math fonts at ~7 MB; the renderer never sets
-# `MathImage.font`, so it only ever registers the default. Registration is by
-# name and on demand — BundleManager never enumerates the directory — so the
-# rest are dead weight. Guarded rather than assumed: if the font the renderer
-# actually uses is missing, packaging stops instead of shipping an app that
-# renders no math at all.
+# Vendor/SwiftMath carries only Latin Modern Math, the default the renderer
+# uses; it never sets `MathImage.font`. SwiftMath loads the font by name the
+# first time a formula is drawn and stops the app if the file is missing, so
+# check for it here rather than in someone's chat.
 math_fonts="$app/Contents/Resources/SwiftMath_SwiftMath.bundle/mathFonts.bundle"
-math_font_kept="latinmodern-math"
-if [[ -d "$math_fonts" ]]; then
-  if [[ ! -s "$math_fonts/$math_font_kept.otf" \
-     || ! -s "$math_fonts/$math_font_kept.plist" ]]; then
-    echo "SwiftMath is missing $math_font_kept; refusing to trim" >&2
+for extension in otf plist; do
+  if [[ ! -s "$math_fonts/latinmodern-math.$extension" ]]; then
+    echo "SwiftMath is missing latinmodern-math.$extension" >&2
     exit 1
   fi
-  while IFS= read -r -d '' font; do
-    base="$(basename "$font")"
-    base="${base%.*}"
-    [[ "$base" == "$math_font_kept" ]] && continue
-    rm -f "$math_fonts/$base.otf" "$math_fonts/$base.plist"
-  done < <(find "$math_fonts" -name '*.otf' -print0)
-fi
+done
 for name in "${required_frameworks[@]}"; do
   ditto "$binary_directory/$name" "$app/Contents/Frameworks/$name"
 done

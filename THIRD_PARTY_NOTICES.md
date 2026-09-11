@@ -45,12 +45,14 @@ and Qwen3.6 revisions listed above; they carry no separate terms.
 
 The following table covers the complete graph reported by
 `swift package show-dependencies` from the checked-in
-[`Package.resolved`](Package.resolved). Exact revisions are recorded there.
+[`Package.resolved`](Package.resolved). Exact revisions are recorded there,
+except SwiftMath's, which is vendored and recorded in
+[`Vendor/SwiftMath/README.md`](Vendor/SwiftMath/README.md).
 
 | Package | Version | License in locked checkout |
 | --- | --- | --- |
 | [swift-transformers](https://github.com/huggingface/swift-transformers) | 1.3.3 | Apache-2.0 |
-| [SwiftMath](https://github.com/mgriebling/SwiftMath) | 1.7.3 | MIT; bundled math fonts retain their GUST and SIL Open Font licenses |
+| [SwiftMath](https://github.com/mgriebling/SwiftMath) | 1.7.3, vendored with a resource-lookup patch | MIT; the bundled Latin Modern Math font retains its GUST Font License |
 | [Sparkle](https://github.com/sparkle-project/Sparkle) | 2.9.2 | BSD-3-Clause |
 | [swift-jinja](https://github.com/huggingface/swift-jinja) | 2.3.6 | Apache-2.0 |
 | [swift-huggingface](https://github.com/huggingface/swift-huggingface) | 0.9.0 | Apache-2.0 |
