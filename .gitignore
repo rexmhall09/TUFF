@@ -49,3 +49,6 @@ tmp/
 __pycache__/
 *.pyc
 .venv/
+
+# Small, reproducible kernel reference vectors used by the test suite.
+!Tests/TUFFEngine/Core/Kernels/Fixtures/qwen4exp/golden.bin
