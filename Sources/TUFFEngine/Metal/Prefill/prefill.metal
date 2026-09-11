@@ -6,10 +6,15 @@ using namespace metal;
 using namespace mpp::tensor_ops;
 #endif
 
-constant constexpr uint kPrefillGroupSize = 64;
+// The affine group size lives in quant_group.metal, which the shared
+// library compiles first.
 constant constexpr uint kPrefillRmsMaxSimdGroups = 8;
+constant constexpr uint kPrefillHCCombineGroups = 4;
 constant constexpr uint kPrefillPostMaxD = 4096;
-constant constexpr uint kPrefillRouterMaxExperts = 256;
+// Qwen3.8 Flash Next routes ten of 512. The scores live in threadgroup
+// memory — 512 floats is 2 KiB against a 32 KiB budget — and the expert loop
+// is already strided, so only the array bound had to move.
+constant constexpr uint kPrefillRouterMaxExperts = 512;
 constant constexpr uint kPrefillRouterMaxTopK = 64;
 constant constexpr uint kPrefillAttentionMaxSimdGroups = 16;
 constant constexpr uint kPrefillMaxTileExperts = 16;
@@ -42,6 +47,9 @@ kernel void prefill_embed_lookup_int4_block(
     constant uint&        T         [[buffer(5)]],
     constant uint&        D         [[buffer(6)]],
     constant float&       out_scale [[buffer(7)]],
+    // Rows are `D` apart on an ordinary residual and `streams * D` apart on a
+    // hyper-connection one, where each token's streams sit side by side.
+    constant uint&        out_stride [[buffer(8)]],
     uint2                 gid       [[thread_position_in_grid]]
 ) {
     const uint d = gid.x;
@@ -49,16 +57,16 @@ kernel void prefill_embed_lookup_int4_block(
     if (t >= T || d >= D) return;
 
     const uint token = tokens[t];
-    const uint groups_per_row = D / kPrefillGroupSize;
+    const uint groups_per_row = D / quant_group_size();
     device const uint8_t* row_q = table  + token * (D / 2u);
     device const bfloat*  row_s = scales + token * groups_per_row;
     device const bfloat*  row_b = biases + token * groups_per_row;
 
     const uint8_t byte = row_q[d >> 1];
     const uint q = (d & 1u) == 0u ? uint(byte & 0x0Fu) : uint(byte >> 4);
-    const float s = float(row_s[d / kPrefillGroupSize]);
-    const float b = float(row_b[d / kPrefillGroupSize]);
-    out[t * D + d] = half((float(q) * s + b) * out_scale);
+    const float s = float(row_s[d / quant_group_size()]);
+    const float b = float(row_b[d / quant_group_size()]);
+    out[t * out_stride + d] = half((float(q) * s + b) * out_scale);
 }
 
 static inline float prefill_rms_block_inv(
@@ -150,6 +158,41 @@ void prefill_rmsnorm_bf16w_perhead_block(
 
     for (uint i = lid; i < head_dim; i += lsize) {
         yh[i] = half(float(xh[i]) * inv * float(weight[i]));
+    }
+}
+
+// The same per-head norm with weights centered at zero: Qwen4-Exp stores `w`
+// and applies `1 + w`, where Qwen 3.6 applies `w`.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void prefill_rmsnorm_bf16w_perhead_centered_block(
+    device const half*   x                   [[buffer(0)]],
+    device const bfloat* weight              [[buffer(1)]],
+    device half*         out                 [[buffer(2)]],
+    constant uint&       T                   [[buffer(3)]],
+    constant uint&       head_dim            [[buffer(4)]],
+    constant uint&       num_heads           [[buffer(5)]],
+    constant uint&       token_stride_elems  [[buffer(6)]],
+    constant float&      eps                 [[buffer(7)]],
+    uint3                tg                  [[threadgroup_position_in_grid]],
+    uint3                lid3                [[thread_position_in_threadgroup]],
+    uint3                lsize3              [[threads_per_threadgroup]],
+    uint                 lane                [[thread_index_in_simdgroup]],
+    uint                 sg                  [[simdgroup_index_in_threadgroup]],
+    uint                 sgs                 [[simdgroups_per_threadgroup]]
+) {
+    const uint h = tg.x;
+    const uint t = tg.y;
+    const uint lid = lid3.x;
+    const uint lsize = lsize3.x;
+    if (t >= T || h >= num_heads) return;
+
+    threadgroup float partial[kPrefillRmsMaxSimdGroups];
+    device const half* xh = x + t * token_stride_elems + h * head_dim;
+    device half* yh = out + t * token_stride_elems + h * head_dim;
+    const float inv = prefill_rms_block_inv(xh, head_dim, eps, lid, lsize, lane, sg, sgs, partial);
+
+    for (uint i = lid; i < head_dim; i += lsize) {
+        yh[i] = half(float(xh[i]) * inv * (1.0f + float(weight[i])));
     }
 }
 
@@ -421,7 +464,7 @@ static inline float prefill_moe_int4_gemv_row_dev(
     uint row,
     uint N
 ) {
-    const uint groups = N / kPrefillGroupSize;
+    const uint groups = N / quant_group_size();
     const uint row_bytes = N / 2u;
     device const uint8_t* W_row = W + row * row_bytes;
     device const bfloat* s_row = S + row * groups;
@@ -431,11 +474,11 @@ static inline float prefill_moe_int4_gemv_row_dev(
     for (uint g = 0; g < groups; ++g) {
         const float scale = float(s_row[g]);
         const float bias = float(b_row[g]);
-        device const uint8_t* Wg = W_row + g * (kPrefillGroupSize / 2u);
-        device const half* xg = x + g * kPrefillGroupSize;
+        device const uint8_t* Wg = W_row + g * (quant_group_size() / 2u);
+        device const half* xg = x + g * quant_group_size();
         float dot_qx = 0.0f;
         float sum_x = 0.0f;
-        for (uint k = 0; k < kPrefillGroupSize / 2u; ++k) {
+        for (uint k = 0; k < quant_group_size() / 2u; ++k) {
             const uint8_t packed = Wg[k];
             const float x0 = float(xg[2u * k]);
             const float x1 = float(xg[2u * k + 1u]);
@@ -457,7 +500,7 @@ static inline float prefill_moe_int4_gemv_row_tg(
     uint row,
     uint N
 ) {
-    const uint groups = N / kPrefillGroupSize;
+    const uint groups = N / quant_group_size();
     const uint row_bytes = N / 2u;
     device const uint8_t* W_row = W + row * row_bytes;
     device const bfloat* s_row = S + row * groups;
@@ -467,11 +510,11 @@ static inline float prefill_moe_int4_gemv_row_tg(
     for (uint g = 0; g < groups; ++g) {
         const float scale = float(s_row[g]);
         const float bias = float(b_row[g]);
-        device const uint8_t* Wg = W_row + g * (kPrefillGroupSize / 2u);
-        threadgroup const half* xg = x + g * kPrefillGroupSize;
+        device const uint8_t* Wg = W_row + g * (quant_group_size() / 2u);
+        threadgroup const half* xg = x + g * quant_group_size();
         float dot_qx = 0.0f;
         float sum_x = 0.0f;
-        for (uint k = 0; k < kPrefillGroupSize / 2u; ++k) {
+        for (uint k = 0; k < quant_group_size() / 2u; ++k) {
             const uint8_t packed = Wg[k];
             const float x0 = float(xg[2u * k]);
             const float x1 = float(xg[2u * k + 1u]);
@@ -510,7 +553,7 @@ kernel void prefill_router_gemma4_block(
     device const half* row_hidden = hidden + row * hidden_stride;
 
     for (uint e = tid; e < NE; e += tg_size) {
-        const uint n_groups = D / kPrefillGroupSize;
+        const uint n_groups = D / quant_group_size();
         device const uint8_t* W_row = W + e * D;
         device const bfloat* s_row = scales + e * n_groups;
         device const bfloat* b_row = biases + e * n_groups;
@@ -519,12 +562,12 @@ kernel void prefill_router_gemma4_block(
         for (uint g = 0; g < n_groups; ++g) {
             float s = float(s_row[g]);
             float b = float(b_row[g]);
-            device const uint8_t* Wg = W_row + g * kPrefillGroupSize;
-            device const half* xg = row_hidden + g * kPrefillGroupSize;
-            device const bfloat* eg = effective_scale + g * kPrefillGroupSize;
+            device const uint8_t* Wg = W_row + g * quant_group_size();
+            device const half* xg = row_hidden + g * quant_group_size();
+            device const bfloat* eg = effective_scale + g * quant_group_size();
             float dot_qx = 0.0f;
             float sum_x = 0.0f;
-            for (uint k = 0; k < kPrefillGroupSize; ++k) {
+            for (uint k = 0; k < quant_group_size(); ++k) {
                 float q = float(uint(Wg[k]));
                 float xv = float(xg[k]) * float(eg[k]);
                 dot_qx = fma(q, xv, dot_qx);
@@ -607,7 +650,7 @@ kernel void prefill_router_minimax_block(
     device const half* row_hidden = hidden + row * hidden_stride;
 
     for (uint e = tid; e < NE; e += tg_size) {
-        const uint n_groups = D / kPrefillGroupSize;
+        const uint n_groups = D / quant_group_size();
         device const uint8_t* W_row = W + e * D;
         device const bfloat* s_row = scales + e * n_groups;
         device const bfloat* b_row = biases + e * n_groups;
@@ -615,12 +658,12 @@ kernel void prefill_router_minimax_block(
         for (uint g = 0; g < n_groups; ++g) {
             const float s = float(s_row[g]);
             const float b = float(b_row[g]);
-            device const uint8_t* Wg = W_row + g * kPrefillGroupSize;
-            device const half* xg = row_hidden + g * kPrefillGroupSize;
-            device const bfloat* eg = effective_scale + g * kPrefillGroupSize;
+            device const uint8_t* Wg = W_row + g * quant_group_size();
+            device const half* xg = row_hidden + g * quant_group_size();
+            device const bfloat* eg = effective_scale + g * quant_group_size();
             float dot_qx = 0.0f;
             float sum_x = 0.0f;
-            for (uint k = 0; k < kPrefillGroupSize; ++k) {
+            for (uint k = 0; k < quant_group_size(); ++k) {
                 const float q = float(uint(Wg[k]));
                 const float xv = float(xg[k]) * float(eg[k]);
                 dot_qx = fma(q, xv, dot_qx);
@@ -780,7 +823,7 @@ kernel void prefill_dequant_int4_qmm_f16_block(
     const uint t = tgid.y * 8u + tid.y;
     if (t >= T || n >= N) return;
 
-    const uint groups = K / kPrefillGroupSize;
+    const uint groups = K / quant_group_size();
     const uint row_bytes = K / 2u;
     device const uint8_t* w_row = W + n * row_bytes;
     device const bfloat* s_row = scales + n * groups;
@@ -791,8 +834,8 @@ kernel void prefill_dequant_int4_qmm_f16_block(
     for (uint g = 0; g < groups; ++g) {
         const float scale = float(s_row[g]);
         const float bias = float(b_row[g]);
-        const uint group_base = g * kPrefillGroupSize;
-        for (uint kk = 0; kk < kPrefillGroupSize; ++kk) {
+        const uint group_base = g * quant_group_size();
+        for (uint kk = 0; kk < quant_group_size(); ++kk) {
             const uint k = group_base + kk;
             const uint8_t packed = w_row[k >> 1];
             const uint q = (k & 1u) == 0u ? uint(packed & 0x0Fu) : uint(packed >> 4);
@@ -1349,3 +1392,129 @@ kernel void attention_prefill_full_tensorops_2d_validity_v2(
 }
 
 #endif
+
+// ============================================================================
+// Hyper-connection block kernels — Qwen4-Exp's four-stream residual, one
+// threadgroup per (stream, token) or per token, over a whole prefill chunk.
+//
+// The decode path in `hyper_connection.metal` does the same arithmetic one
+// token at a time. What changes here is only the addressing: `hidden` and
+// `normed` hold `streams * D` values per token, and every buffer is indexed
+// by token first so a chunk is contiguous.
+// ============================================================================
+
+// Grouped RMSNorm whose checkpoint weights are centered at zero: each stream
+// is normalized over its own D values and scaled by `1 + w`, not `w`.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void prefill_rmsnorm_bf16w_grouped_centered_block(
+    device const half*   x       [[buffer(0)]],   // [T, S * D]
+    device const bfloat* weight  [[buffer(1)]],   // [S * D]
+    device half*         out     [[buffer(2)]],   // [T, S * D]
+    constant uint&       T       [[buffer(3)]],
+    constant uint&       D       [[buffer(4)]],
+    constant uint&       S       [[buffer(5)]],
+    constant float&      eps     [[buffer(6)]],
+    uint3                tg3     [[threadgroup_position_in_grid]],
+    uint3                lid3    [[thread_position_in_threadgroup]],
+    uint3                lsize3  [[threads_per_threadgroup]],
+    uint                 lane    [[thread_index_in_simdgroup]],
+    uint                 sg      [[simdgroup_index_in_threadgroup]],
+    uint                 sgs     [[simdgroups_per_threadgroup]]
+) {
+    const uint stream = tg3.x;
+    const uint token = tg3.y;
+    const uint lid = lid3.x;
+    const uint lsize = lsize3.x;
+    if (token >= T || stream >= S) return;
+    threadgroup float partial[kPrefillRmsMaxSimdGroups];
+    const uint base = token * S * D + stream * D;
+    device const half* xr = x + base;
+    device half* yr = out + base;
+    device const bfloat* w = weight + stream * D;
+    const float inv = prefill_rms_block_inv(xr, D, eps, lid, lsize, lane, sg, sgs, partial);
+    for (uint i = lid; i < D; i += lsize) {
+        yr[i] = half(float(xr[i]) * inv * (1.0f + float(w[i])));
+    }
+}
+
+// silu(x / streams), in place, over every token's low-rank row.
+[[kernel]]
+void prefill_hc_lowrank_silu_block(
+    device half*        x       [[buffer(0)]],   // [T, R]
+    constant uint&      total   [[buffer(1)]],   // T * R
+    constant float&     scale   [[buffer(2)]],   // 1 / streams
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= total) return;
+    const float v = float(x[gid]) * scale;
+    x[gid] = half(v / (1.0f + exp(-v)));
+}
+
+// mixed[t][d] = mean over streams of sigmoid(up[t][s][d]) * normed[t][s][d].
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void prefill_hc_combine_block(
+    device const half*  up      [[buffer(0)]],   // [T, S * D]
+    device const half*  normed  [[buffer(1)]],   // [T, S * D]
+    device half*        mixed   [[buffer(2)]],   // [T, D]
+    constant uint&      T       [[buffer(3)]],
+    constant uint&      D       [[buffer(4)]],
+    constant uint&      S       [[buffer(5)]],
+    uint3 tg3   [[threadgroup_position_in_grid]],
+    uint3 lid3  [[thread_position_in_threadgroup]],
+    uint3 lsize3 [[threads_per_threadgroup]]
+) {
+    const uint token = tg3.y;
+    const uint lid = lid3.x;
+    const uint lsize = lsize3.x;
+    if (token >= T) return;
+    device const half* u = up + token * S * D;
+    device const half* n = normed + token * S * D;
+    device half* m = mixed + token * D;
+    for (uint d = lid + tg3.x * lsize; d < D; d += lsize * kPrefillHCCombineGroups) {
+        float acc = 0.0f;
+        for (uint s = 0; s < S; ++s) {
+            const float gate = 1.0f / (1.0f + exp(-float(u[s * D + d])));
+            acc = fma(gate, float(n[s * D + d]), acc);
+        }
+        m[d] = half(acc / float(S));
+    }
+}
+
+// hidden[t][s][d] += branch[t][d] * 2 * sigmoid(injRaw[t][s] / streams).
+[[kernel]]
+void prefill_hc_inject_block(
+    device half*        hidden  [[buffer(0)]],   // [T, S * D]
+    device const half*  branch  [[buffer(1)]],   // [T, D]
+    device const half*  injRaw  [[buffer(2)]],   // [T, S]
+    constant uint&      T       [[buffer(3)]],
+    constant uint&      D       [[buffer(4)]],
+    constant uint&      S       [[buffer(5)]],
+    constant float&     scale   [[buffer(6)]],   // 1 / streams
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = T * S * D;
+    if (gid >= total) return;
+    const uint d = gid % D;
+    const uint s = (gid / D) % S;
+    const uint t = gid / (D * S);
+    const float gate = 2.0f / (1.0f + exp(-float(injRaw[t * S + s]) * scale));
+    hidden[gid] = half(float(hidden[gid]) + float(branch[t * D + d]) * gate);
+}
+
+// Tile one token's embedding across every stream, so all four start from the
+// same vector and diverge only through what each block injects.
+[[kernel]]
+void prefill_hc_tile_embedding_block(
+    device half*        hidden  [[buffer(0)]],   // [T, S * D], stream 0 written
+    constant uint&      T       [[buffer(1)]],
+    constant uint&      D       [[buffer(2)]],
+    constant uint&      S       [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = T * (S - 1) * D;
+    if (gid >= total) return;
+    const uint d = gid % D;
+    const uint s = (gid / D) % (S - 1) + 1;
+    const uint t = gid / (D * (S - 1));
+    hidden[t * S * D + s * D + d] = hidden[t * S * D + d];
+}

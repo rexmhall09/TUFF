@@ -577,8 +577,12 @@ public final class RemoteVisionPackInstaller {
         weightsSha256: String,
         paths: RemoteInstallPaths
     ) throws {
-        let visionFamily: GTurboVisionFamilyV1 =
-            options.repoID == SupportedModelSource.qwen36.repoID ? .qwen36 : .gemma4
+        let visionFamily: GTurboVisionFamilyV1
+        switch options.repoID {
+        case SupportedModelSource.qwen36.repoID: visionFamily = .qwen36
+        case SupportedModelSource.qwen38FlashNext.repoID: visionFamily = .qwen4Exp
+        default: visionFamily = .gemma4
+        }
         guard textBinding.family == visionFamily.rawValue else {
             throw RepackError.configurationInvalid(
                 detail: "\(visionFamily.rawValue) vision source cannot bind to \(textBinding.family) text model")

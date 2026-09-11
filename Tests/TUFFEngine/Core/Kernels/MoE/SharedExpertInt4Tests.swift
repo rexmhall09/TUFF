@@ -54,7 +54,7 @@ import TUFFValidationSupport
 
     private static func pack(_ values: [[Float]]) ->
         (rows: [Quantization.Int4AffineRow], packed: [UInt8], scales: [UInt16], biases: [UInt16]) {
-        let rows = values.map(Quantization.quantizeInt4Affine)
+        let rows = values.map { Quantization.quantizeInt4Affine($0) }
         return (rows,
                 rows.flatMap(\.packed),
                 rows.flatMap(\.scales),

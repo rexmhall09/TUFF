@@ -22,7 +22,7 @@ public enum VisionImageTokenBudget {
 
     public static func maximumTokensPerImage(family: ModelFamily) -> Int {
         switch family {
-        case .gemma4, .qwen36:
+        case .gemma4, .qwen36, .qwen4Exp:
             VisionConfig(family: family).maximumPooledTokens + markerTokensPerImage
         case .gptOss, .minimaxM2:
             0
@@ -73,6 +73,7 @@ public enum VisionImageTokenBudget {
         // stills are much smaller and are measured before encode. Refusing the
         // first attachment solely because the theoretical maximum equals the
         // whole context would make image support unusable.
-        return family == .qwen36 ? max(1, conservative) : max(0, conservative)
+        return family.usesQwenVisionTower
+            ? max(1, conservative) : max(0, conservative)
     }
 }

@@ -6,7 +6,8 @@ private let visionMPPTensorOpsAvailable = MTLCreateSystemDefaultDevice()?
     .supportsFamily(.apple8) == true
 
 @Suite struct VisionAttentionTests {
-    @Test func qwenScoreScaleMatchesScaledDotProductReference() throws {
+    @Test(arguments: [ModelFamily.qwen36, .qwen4Exp])
+    func qwenScoreScaleMatchesScaledDotProductReference(family: ModelFamily) throws {
         let context = try MetalContext()
         let length = 2
         let heads = 1
@@ -31,10 +32,10 @@ private let visionMPPTensorOpsAvailable = MTLCreateSystemDefaultDevice()?
             length: q.count * MemoryLayout<UInt16>.stride,
             options: .storageModeShared))
         let scoreScale = 1 / sqrt(Float(dimension))
-        let attention = try VisionAttention(
-            context: context,
+        let attention = try VisionRuntime.makeAttention(
+            context: context, config: VisionConfig(family: family),
             environment: ["TUFF_VISION_ATTENTION_Q8": "1"],
-            scoreScale: scoreScale)
+            allowFusedPaddedLayout: false)
         let commandBuffer = try #require(context.queue.makeCommandBuffer())
         attention.encode(
             commandBuffer: commandBuffer,

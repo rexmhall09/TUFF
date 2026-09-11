@@ -8,6 +8,7 @@ final class FusedQKVGEMV {
         var n: UInt32
     }
 
+    let groupSize: Int
     private let pso: MTLComputePipelineState
     private let specializedPSOs: [Shape: MTLComputePipelineState]
 
@@ -16,15 +17,31 @@ final class FusedQKVGEMV {
         Shape(qRows: 8192, kvRows: 1024, n: 2816),
     ]
 
-    init(context: MetalContext) throws {
+    /// `groupSize` reaches the packed q/k/v GEMV, which dequantizes INT4.
+    /// Function constants are per-pipeline: omitting it decodes at 64.
+    init(context: MetalContext,
+         additionalShapes: [(qRows: Int, kvRows: Int, n: Int)] = [],
+         groupSize: Int = Quantization.groupSize) throws {
+        precondition(Quantization.supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
+        self.groupSize = groupSize
+        let groupConstants: [MetalFunctionConstant] =
+            groupSize == Quantization.groupSize
+                ? []
+                : [MetalFunctionConstant(
+                    index: Quantization.groupSizeFunctionConstantIndex,
+                    value: .uint32(UInt32(groupSize)))]
         self.pso = try context.pipeline("dequant_int4_qkv_gemv_simd",
-                                        constants: [],
+                                        constants: groupConstants,
                                         maxTotalThreadsPerThreadgroup: 512)
         var variants: [Shape: MTLComputePipelineState] = [:]
-        for shape in Self.realDecodeShapes {
+        let shapes = Self.realDecodeShapes + additionalShapes.map {
+            Shape(qRows: UInt32($0.qRows), kvRows: UInt32($0.kvRows), n: UInt32($0.n))
+        }
+        for shape in Set(shapes) {
             variants[shape] = try context.pipeline(
                 "dequant_int4_qkv_gemv_simd",
-                constants: [
+                constants: groupConstants + [
                     MetalFunctionConstant(index: 23, value: .uint32(shape.qRows)),
                     MetalFunctionConstant(index: 24, value: .uint32(shape.kvRows)),
                     MetalFunctionConstant(index: 25, value: .uint32(shape.n)),
@@ -52,8 +69,8 @@ final class FusedQKVGEMV {
                        qRows: UInt32,
                        kvRows: UInt32,
                        n: UInt32) {
-        precondition(n % UInt32(Quantization.groupSize) == 0,
-                     "N must be a multiple of \(Quantization.groupSize)")
+        precondition(n % UInt32(groupSize) == 0,
+                     "N must be a multiple of \(groupSize)")
         precondition(qWeightsOffset % 2 == 0 &&
                      kWeightsOffset % 2 == 0 &&
                      vWeightsOffset % 2 == 0,

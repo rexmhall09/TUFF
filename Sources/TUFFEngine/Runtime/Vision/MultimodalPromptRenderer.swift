@@ -94,10 +94,23 @@ public enum MultimodalPromptRenderer {
             endImageTokenID: 248_054,
             rendererAddsBoundaryTokens: false)
 
+        /// Flash Next tokenizes the image markers to the same ids as Qwen
+        /// 3.6 — 248,053 / 248,056 / 248,054 — because it inherits the same
+        /// vocabulary. Only the family differs, and that is what the feature
+        /// buffers are checked against.
+        public static let qwen4Exp = FamilyPolicy(
+            family: .qwen4Exp,
+            placeholder: qwen36.placeholder,
+            imageTokenID: qwen36.imageTokenID,
+            beginImageTokenID: qwen36.beginImageTokenID,
+            endImageTokenID: qwen36.endImageTokenID,
+            rendererAddsBoundaryTokens: qwen36.rendererAddsBoundaryTokens)
+
         public static func forFamily(_ family: ModelFamily) -> FamilyPolicy {
             switch family {
             case .gemma4: return .gemma4
             case .qwen36: return .qwen36
+            case .qwen4Exp: return .qwen4Exp
             case .gptOss, .minimaxM2:
                 preconditionFailure("This model family does not accept image input")
             }

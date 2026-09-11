@@ -358,14 +358,31 @@ final class PrefillGroupedRoutedMoE {
         return PrefillStreamedTileArgumentBuffer(buffer: buffer)
     }
 
-    init(context: MetalContext, siluActivation: Bool = false) throws {
-        let activationConstants: [MetalFunctionConstant] = siluActivation
+    /// `groupSize` reaches `prefill_moe_int4_gemv_row_dev`, which every routed
+    /// expert row goes through. The call is inside a helper rather than the
+    /// kernel body, which is how it survived an audit of the kernels
+    /// themselves — and a pipeline built without the constant decodes a
+    /// group-32 checkpoint at 64 and routes real tokens through nonsense
+    /// experts.
+    init(context: MetalContext, siluActivation: Bool = false,
+         groupSize: Int = Quantization.groupSize) throws {
+        precondition(Quantization.supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
+        let groupConstants: [MetalFunctionConstant] =
+            groupSize == Quantization.groupSize
+                ? []
+                : [MetalFunctionConstant(
+                    index: Quantization.groupSizeFunctionConstantIndex,
+                    value: .uint32(UInt32(groupSize)))]
+        let activationConstants: [MetalFunctionConstant] = groupConstants + (siluActivation
             ? [MetalFunctionConstant(index: 77, value: .bool(true))]
-            : []
+            : [])
         self.batchedPhase1PSO = try context.pipeline(
             "prefill_grouped_routed_moe_batched_phase1",
             constants: activationConstants)
-        self.batchedDownPSO = try context.pipeline("prefill_grouped_routed_moe_batched_down")
+        self.batchedDownPSO = try context.pipeline(
+            "prefill_grouped_routed_moe_batched_down",
+            constants: groupConstants)
         guard let streamedFn = context.library.makeFunction(name: "prefill_grouped_routed_moe_batched_phase1") else {
             throw MetalError.missingFunction("prefill_grouped_routed_moe_batched_phase1")
         }

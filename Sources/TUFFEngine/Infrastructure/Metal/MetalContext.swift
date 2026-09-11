@@ -70,18 +70,29 @@ public final class MetalContext: @unchecked Sendable {
         self.library = try Self.compileShaderLibrary(device: dev)
     }
 
+    /// Declares the function constants the quantized kernels share. Compiled
+    /// first into the shared library, and prepended to any private library
+    /// whose module reads them.
+    private static let quantConstantsModule = "quant_group"
+
     /// Production shader modules compiled into the shared runtime library.
     private static let shaderModules: [String] = [
+        // First: it declares the function constants the quantized kernels
+        // share, and the library is one concatenated translation unit.
+        "quant_group",
         "dequant_int4",
         "dequant_int8",
         "mxfp4",
         "rmsnorm",
         "rope",
         "attention",
+        "qsa",
         "moe",
         "logit",
         "utility",
         "per_layer_embedding",
+        "hyper_connection",
+        "ngram_ple",
         "fused",
         "prefill",
         "gdn",
@@ -91,14 +102,18 @@ public final class MetalContext: @unchecked Sendable {
     /// Bundle locations for runtime shader modules.
     private static let shaderSubdirectories: [String: String] = [
         "attention": "Metal/Attention",
+        "qsa": "Metal/Attention",
         "dequant_int4": "Metal/Quant",
         "dequant_int8": "Metal/Quant",
         "mxfp4": "Metal/Quant",
+        "quant_group": "Metal/Quant",
         "fused": "Metal/Fusions",
         "gdn": "Metal/GDN",
         "logit": "Metal/Sampling",
         "moe": "Metal/MoE",
         "prefill": "Metal/Prefill",
+        "hyper_connection": "Metal/Primitives",
+        "ngram_ple": "Metal/Primitives",
         "per_layer_embedding": "Metal/Primitives",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
@@ -166,7 +181,16 @@ public final class MetalContext: @unchecked Sendable {
         guard let url = shaderURL(module: module) else {
             throw MetalError.missingShaderResource(module)
         }
-        let src = try String(contentsOf: url, encoding: .utf8)
+        // A private library is one module compiled on its own, so it does not
+        // get the shared library's ordering. Modules that read the quantized
+        // function constants need the prelude that declares them prepended.
+        var src = try String(contentsOf: url, encoding: .utf8)
+        if src.contains("quant_group_size()") {
+            guard let preludeURL = shaderURL(module: quantConstantsModule) else {
+                throw MetalError.missingShaderResource(quantConstantsModule)
+            }
+            src = try String(contentsOf: preludeURL, encoding: .utf8) + "\n" + src
+        }
         let opts = makeCompileOptions(
             mathMode: mathMode,
             includeVisionTensorOps: includeVisionTensorOps)

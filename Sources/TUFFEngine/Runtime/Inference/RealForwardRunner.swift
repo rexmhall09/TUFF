@@ -170,10 +170,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// Difference between Qwen's logical multimodal RoPE position and the
     /// physical KV index. It remains zero for text-only and every Gemma run.
     private var qwenMultimodalRopeDelta: Int32 = 0
+    private let qwenSparseAttention: QwenSparseAttention?
 
     // Prefill kernels. These are initialized once per runner so the chunk path
     // cannot accidentally rebuild PSOs inside a per-layer loop.
     private let prefillEmbed: PrefillEmbedLookupInt4
+    private let prefillHyperConnection: PrefillHyperConnection?
     private let prefillRMS: PrefillRMSNorm
     private let prefillQMM: PrefillInt4QMM
     private let prefillMPPAffineInt4: MPPPrefillInt4QMM?
@@ -188,8 +190,70 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let prefillFinalRowHead: PrefillFinalRowHeadInt4
 
     // Scratch — preallocated per spec'd D / F / vocab.
-    private let hidden: MTLBuffer        // [D] FP16
-    private let normed: MTLBuffer        // [D] FP16
+    private let hidden: MTLBuffer        // [D] FP16, or [streams * D] for qwen4_exp
+    private let normed: MTLBuffer        // [D] FP16, or [streams * D] for qwen4_exp
+    // Qwen4-Exp hyper-connection scratch. Nil for every single-stream
+    // architecture, which is all of them but this one.
+    private let hyperConnection: HyperConnection?
+    private let hcMixed: MTLBuffer?      // [D] FP16, the block's input
+    private let hcLowRank: MTLBuffer?    // [lowRank] FP16
+    private let hcMixUp: MTLBuffer?      // [streams * D] FP16
+    private let hcInject: MTLBuffer?     // [streams] FP16, pre-sigmoid
+    // Qwen4-Exp n-gram per-layer embedding, on one layer of the model.
+    private let ngramPLE: NgramPLE?
+    private let ngramRows: NgramRowIndex?
+    private let ngramTable: NgramTableReader?
+    private let pleEmbedding: MTLBuffer?   // [embedDim] FP16
+    private let pleKeys: MTLBuffer?        // [streams * D] FP16
+    private let pleValues: MTLBuffer?      // [D] FP16
+    private let pleQueries: MTLBuffer?     // [streams * D] FP16
+    private let pleGated: MTLBuffer?       // [streams * D] FP16
+    private let pleNormed: MTLBuffer?      // [streams * D] FP16
+    private let pleConvOut: MTLBuffer?     // [streams * D] FP16
+    /// `(taps - 1) * dilation + 1` rows of `streams * D`, the last being the
+    /// current token. Carried across tokens so decode sees what prefill saw.
+    private let pleConvHistory: MTLBuffer?
+    /// Tokens the n-gram hash needs from before this call.
+    private var ngramContext: [Int32] = []
+
+    /// What an attention or feed-forward block reads.
+    ///
+    /// For a single-stream architecture this is the normalized residual, as it
+    /// always was. With hyper-connections the residual is `streams` wide and
+    /// the block consumes the mixture of them instead, which is one stream
+    /// wide — so every block below stays width-correct without knowing which
+    /// architecture it is running under.
+    private var blockInput: MTLBuffer { hcMixed ?? normed }
+
+    /// What the feed-forward block reads: the router, the shared expert and
+    /// routed phase 1 all take the same vector. With hyper-connections that is
+    /// the feed-forward mixture; otherwise the post-attention norm's output.
+    private var ffnInput: MTLBuffer { hcMixed ?? routedX }
+
+    /// Test-only windows onto the residual and the per-block outputs, so a
+    /// forward pass that goes wrong can be bisected a stage at a time rather
+    /// than inferred from its logits. These found a routed-expert dispatch
+    /// computing eight of ten experts and reducing over uninitialized
+    /// threadgroup memory.
+    var debugResidual: MTLBuffer { hidden }
+    var debugBlockInput: MTLBuffer? { hcMixed }
+    var debugAttentionOut: MTLBuffer { oOut }
+    var debugSharedExpertOut: MTLBuffer { h1Buf }
+    var debugRoutedOut: MTLBuffer { h2Buf }
+
+    /// Test-only: called with the index of the layer about to run, and once
+    /// more with `numLayers`, after every command already encoded for the
+    /// token has completed — so `debugResidual` holds that layer's input. A
+    /// per-layer trace is the only practical way to bisect a 48-layer forward
+    /// against a reference, and setting this forces one commit per layer, so
+    /// nothing but a diagnostic should install it.
+    var debugLayerSink: ((Int) -> Void)?
+
+    /// Test-only: the chunk path's twin of `debugLayerSink`, called with the
+    /// index of the layer just finished and that layer's output for the
+    /// chunk's last token — directly comparable to what `debugLayerSink`
+    /// reports at the same position on the decode path.
+    var debugChunkLayerSink: ((Int, [Float]) -> Void)?
     private let attnOut: MTLBuffer       // [N_HEADS * head_dim] FP16
     private let qScratch: MTLBuffer      // [N_HEADS * head_dim] FP16
     private let kStage: MTLBuffer        // [max KV heads * head_dim] FP16, current token
@@ -283,7 +347,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         self.ctx = context
         self.cfg = config
         self.maxContext = maxContext
+        self.qwenSparseAttention = config.attentionIndexer.isEnabled
+            && maxContext >= config.attentionIndexer.budget + config.attentionIndexer.compressRatio
+            ? try QwenSparseAttention(context: context, config: config, maxContext: maxContext) : nil
+        // The fused head folds the final RMSNorm into the LM head. An
+        // architecture whose "final norm" is a whole hyper-connection mixer —
+        // two projections and a gated collapse over four streams — has nothing
+        // to fold, so it takes the unfused path.
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
+            && !config.hyperConnection.isEnabled
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -293,7 +365,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 byteCap: Self.rdadviseAdaptiveByteCap,
                 slowCallNanos: Self.rdadviseAdaptiveSlowCallNanos))
         self.rdadviseEnabled = runtimeConfiguration.rdadviseEnabled
-        let maximumVisionTokens = (cfg.family == .gemma4 || cfg.family == .qwen36)
+        let maximumVisionTokens = cfg.family.acceptsImageInput
             ? VisionConfig(family: cfg.family).maximumPooledTokens : 0
         self.kv = try KVCacheManager(device: context.device,
                                      config: cfg,
@@ -302,54 +374,92 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      slidingWindow: cfg.slidingWindow,
                                      maxPrefillChunkTokens: max(
                                         PrefillRuntimeConfig.maxChunkTokens,
-                                        min(maxContext, maximumVisionTokens)))
+                                        min(maxContext, maximumVisionTokens)),
+                                     initialFullAttentionCapacityTokens:
+                                        cfg.family == .qwen4Exp ? 2_048 : nil)
 
         let silu = cfg.hiddenActivation == "silu"
-        self.embedInt4 = try EmbedLookupInt4(context: context)
+        // The INT4 group size and the routed-expert count are architecture
+        // facts, not runtime options: every quantized kernel below is
+        // specialized on them, and at their historical values no function
+        // constant is set at all.
+        let int4Groups = cfg.int4GroupSize
+        self.embedInt4 = try EmbedLookupInt4(context: context,
+                                             groupSize: int4Groups)
         self.rms       = try RMSNorm(context: context)
         self.int4      = try DequantInt4GEMV(
             context: context,
-            additionalShapes: cfg.decodeInt4GEMVShapes)
+            additionalShapes: cfg.decodeInt4GEMVShapes,
+            groupSize: int4Groups)
         self.attention = try Attention(context: context)
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
-                                                  siluActivation: silu)
+                                                  siluActivation: silu,
+                                                  groupSize: int4Groups)
         self.moe       = cfg.feedForwardKind == .mixtureOfExperts
             ? try MoE(context: context,
                       siluActivation: silu,
                       specializedD: UInt32(cfg.hiddenSize),
                       specializedF: UInt32(cfg.moeIntermediateSize),
-                      specializedNumExperts: UInt32(cfg.numExperts))
+                      specializedNumExperts: UInt32(cfg.numExperts),
+                      topKExperts: cfg.topKExperts,
+                      groupSize: int4Groups)
             : nil
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
-                                              maxVocab: cfg.vocabSize)
-        self.fusedQKVGEMV = try FusedQKVGEMV(context: context)
+                                              maxVocab: cfg.vocabSize,
+                                              groupSize: int4Groups)
+        self.fusedQKVGEMV = try FusedQKVGEMV(context: context,
+                                             additionalShapes: cfg.attnOutputGate ? [(
+                                                qRows: 2 * cfg.numHeads * cfg.fullHeadDim,
+                                                kvRows: cfg.numFullKVHeads * cfg.fullHeadDim,
+                                                n: cfg.hiddenSize)] : [],
+                                             groupSize: int4Groups)
         self.fusedQKVEpilogue = try FusedQKVEpilogue(context: context)
         self.fusedPostAttentionSetup = try FusedPostAttentionSetup(context: context)
         self.fusedTail = try FusedLayerTail(context: context)
-        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
+        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context,
+                                                       groupSize: int4Groups)
+        self.prefillHyperConnection = cfg.hyperConnection.isEnabled
+            ? try PrefillHyperConnection(context: context) : nil
         self.prefillRMS = try PrefillRMSNorm(context: context)
-        self.prefillQMM = try PrefillInt4QMM(context: context)
-        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context)
+        self.prefillQMM = try PrefillInt4QMM(context: context,
+                                             groupSize: int4Groups)
+        // `tensorops.metal` hardcodes a 64-value quantization group and is
+        // compiled as a private library, where a function constant would force
+        // every pipeline through the specialized-function API. A group-32
+        // checkpoint therefore has to take the ordinary INT4 path instead of
+        // being silently mis-decoded by the tensor-ops one.
+        self.prefillMPPAffineInt4 = int4Groups == Quantization.groupSize
+            ? MPPPrefillInt4QMM(context: context) : nil
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
         self.prefillAttention = try PrefillAttention(context: context)
         self.prefillPostAttention = try PrefillPostAttentionSetup(context: context)
+        // The router keeps the default group: this architecture stores it as
+        // INT8 at 64 regardless of the base INT4 group, exactly as the decode
+        // path's router does.
         self.prefillRouter = try PrefillRouter(context: context)
         self.prefillSharedExpert = try PrefillSharedExpert(
             context: context,
             weightBits: model.sharedExpertWeightBits,
-            siluActivation: silu)
+            siluActivation: silu,
+            groupSize: int4Groups)
         self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(context: context,
-                                                             siluActivation: silu)
+                                                             siluActivation: silu,
+                                                             groupSize: int4Groups)
         self.prefillMoE = try PrefillMoE(context: context)
         self.prefillLayerTail = try PrefillLayerTail(context: context)
         self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(context: context,
-                                                               maxD: cfg.hiddenSize)
+                                                               maxD: cfg.hiddenSize,
+                                                               groupSize: int4Groups)
 
         // Qwen 3.6 kernels, keyed off the data flags so architectures that
         // never dispatch them pay no PSO compile cost.
+        // Hyper-connection architectures also fold the n-gram embedding into
+        // the residual with a plain add, so they need this whether or not they
+        // gate their attention output.
         let needsElementwise = cfg.attnOutputGate
+            || cfg.hyperConnection.isEnabled
             || cfg.sharedExpertGated
             || !cfg.ffnSandwichNorms
             || cfg.hasLinearAttentionLayers
@@ -358,7 +468,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
         if cfg.hasLinearAttentionLayers {
             self.gdn = try GDN(context: context, config: cfg.linearAttention,
-                               specializedHiddenSize: cfg.hiddenSize)
+                               specializedHiddenSize: cfg.hiddenSize,
+                               groupSize: int4Groups)
             self.gdnState = try GDNStateManager(device: context.device, config: cfg)
         } else {
             self.gdn = nil
@@ -388,8 +499,59 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             }
             return b
         }
-        self.hidden        = try buf(D)
-        self.normed        = try buf(D)
+        // The residual is `streamCount` wide for an architecture with
+        // hyper-connections and one stream wide otherwise, so the whole layer
+        // loop can address it the same way.
+        let streams = max(1, cfg.hyperConnection.streamCount)
+        self.hidden        = try buf(D * streams)
+        self.normed        = try buf(D * streams)
+        if cfg.ngramEmbedding.isEnabled {
+            let ngram = cfg.ngramEmbedding
+            self.ngramPLE = try NgramPLE(context: ctx)
+            self.ngramRows = try model.makeNgramRowIndex(
+                eosTokenID: ngram.eosTokenID)
+            self.ngramTable = try model.makeNgramTableReader()
+            self.pleEmbedding = try buf(ngram.embedDim)
+            self.pleKeys = try buf(D * streams)
+            self.pleValues = try buf(D)
+            self.pleQueries = try buf(D * streams)
+            self.pleGated = try buf(D * streams)
+            self.pleNormed = try buf(D * streams)
+            self.pleConvOut = try buf(D * streams)
+            let historyRows = (ngram.convKernelSize - 1) * ngram.ngramSize + 1
+            let history = try buf(historyRows * D * streams)
+            // A fresh Metal buffer is not guaranteed zeroed, and the first
+            // token convolves over the whole window — so the taps behind it
+            // have to start at zero the way the reference's state does.
+            memset(history.contents(), 0, history.length)
+            self.pleConvHistory = history
+            self.ngramContext = self.ngramRows?.initialContext() ?? []
+        } else {
+            self.ngramPLE = nil
+            self.ngramRows = nil
+            self.ngramTable = nil
+            self.pleEmbedding = nil
+            self.pleKeys = nil
+            self.pleValues = nil
+            self.pleQueries = nil
+            self.pleGated = nil
+            self.pleNormed = nil
+            self.pleConvOut = nil
+            self.pleConvHistory = nil
+        }
+        if cfg.hyperConnection.isEnabled {
+            self.hyperConnection = try HyperConnection(context: ctx)
+            self.hcMixed   = try buf(D)
+            self.hcLowRank = try buf(cfg.hyperConnection.lowRank)
+            self.hcMixUp   = try buf(D * streams)
+            self.hcInject  = try buf(streams)
+        } else {
+            self.hyperConnection = nil
+            self.hcMixed = nil
+            self.hcLowRank = nil
+            self.hcMixUp = nil
+            self.hcInject = nil
+        }
         self.attnOut       = try buf(maxQ)
         self.qScratch      = try buf(maxQ)
         self.kStage        = try buf(max(cfg.numKVHeads * cfg.headDim,
@@ -557,10 +719,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     public func reset() {
         kv?.reset()
         gdnState?.reset()
+        resetNgramState()
         qwenMultimodalRopeDelta = 0
         speculativeStartPosition = nil
         speculativeProcessedTokens = 0
         resetTransientState()
+    }
+
+    /// Clear the n-gram hash context and the convolution history, so a new
+    /// sequence starts from EOS padding and zeroed taps rather than carrying
+    /// the previous one's tokens into its first n-grams.
+    private func resetNgramState() {
+        guard let rowIndex = ngramRows else { return }
+        ngramContext = rowIndex.initialContext()
+        if let history = pleConvHistory {
+            memset(history.contents(), 0, history.length)
+        }
     }
 
     public var continuationPosition: Int {
@@ -600,6 +774,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     public private(set) var totalGPUHeadNanos: UInt64 = 0
     public private(set) var totalGPULayerCommandBuffers: UInt64 = 0
     public private(set) var totalGPURoutedNanos: UInt64 = 0
+    /// Shared-expert submissions, including any cache-hit phase 1 work folded into them.
     public private(set) var totalGPUSharedNanos: UInt64 = 0
     /// Decode-only routed-expert traffic. A read is a cache miss that required
     /// an SSD-backed expert fetch; cache hits are reported separately.
@@ -859,6 +1034,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                outputMode: .greedyIfAvailable)
     }
 
+    /// Chunked prefill has no hyper-connection graph, and its quantized
+    /// kernels are not yet built at the architecture's INT4 group size. Until
+    /// they are, a Qwen4-Exp prompt goes through the decode path — slower, but
+    /// through the kernels that were actually validated for it.
+    var supportsChunkedPrefill: Bool { true }
+
     public func prefillChunked(tokens: ArraySlice<Int32>,
                                startPosition: Int,
                                outputMode: PrefillOutputMode,
@@ -925,7 +1106,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             throw PrefillError.chunkedUnsupported(
                 "multimodal prefill requires the complete chunked prefill path")
         }
-        let tokens = input.embeddingTokenIDs
+        // Image embeddings override the token gather, but the n-gram PLE
+        // still hashes the original image-pad IDs, including their history
+        // across the image/text boundary. Hashing the gather's dummy zeros
+        // injects unrelated text features into every image residual.
+        let tokens = cfg.ngramEmbedding.isEnabled
+            ? input.effectiveTokenIDs : input.embeddingTokenIDs
         guard startPosition >= 0,
               startPosition + tokens.count <= maxContext else {
             throw PrefillError.chunkedUnsupported(
@@ -1011,7 +1197,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             completed += item.range.count
             onProgress(completed)
         }
-        if input.family == .qwen36 {
+        if input.family.usesQwenVisionTower {
             qwenMultimodalRopeDelta = resolvedRopeDelta
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
@@ -1036,6 +1222,39 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         let scratch = try PrefillChunkScratchBuffers.allocate(device: ctx.device, layout: layout)
         prefillScratch = scratch
         return scratch
+    }
+
+    /// Copy the chunk's last-token residual out of device-private scratch so a
+    /// diagnostic can read it. Debug-only: it commits and waits.
+    /// Test-only: read an FP16 device buffer that is already shared-storage.
+    private func readHalfBuffer(_ buffer: MTLBuffer, count: Int) -> [Float] {
+        buffer.contents().withMemoryRebound(to: Float16.self, capacity: count) {
+            pointer in (0..<count).map { Float(pointer[$0]) }
+        }
+    }
+
+    private func readChunkResidualTail(scratch: PrefillChunkScratchBuffers,
+                                       tokens: Int,
+                                       streams: Int) throws -> [Float] {
+        let width = cfg.hiddenSize * streams
+        let bytes = width * MemoryLayout<Float16>.stride
+        guard let staging = ctx.device.makeBuffer(length: bytes,
+                                                  options: .storageModeShared),
+              let cb = ctx.queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        blit.copy(from: scratch.hidden,
+                  sourceOffset: (tokens - 1) * bytes,
+                  to: staging, destinationOffset: 0, size: bytes)
+        blit.endEncoding()
+        cb.commit()
+        try waitForCompletion(cb)
+        return staging.contents().withMemoryRebound(
+            to: Float16.self, capacity: width
+        ) { pointer in
+            (0..<width).map { Float(pointer[$0]) }
+        }
     }
 
     private func executePrefillChunk(tokens: ArraySlice<Int32>,
@@ -1063,6 +1282,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill range [\(startPosition), \(startPosition + tokens.count)) exceeds maxContext \(maxContext)")
         }
+        try kv?.ensureCapacity(through: startPosition + tokens.count, on: ctx.queue)
         guard tokens.count <= scratch.layout.chunkTokens else {
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill token count \(tokens.count) exceeds scratch chunk size \(scratch.layout.chunkTokens)")
@@ -1079,8 +1299,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
 
         struct LayerPrefillQKVViews {
-            let inputNorm: TensorView
-            let postAttention: TensorView
+            // A hyper-connection architecture has neither: its two
+            // hyper-connection modules carry the only norms in the layer.
+            let inputNorm: TensorView?
+            let postAttention: TensorView?
             let router: TensorView?
             // Softmax-attention layers only (nil on linear-attention layers).
             let q: TensorView?
@@ -1119,8 +1341,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let sandwich = cfg.ffnSandwichNorms && !dense
             let sharesKV = cfg.layerSharesKV(L)
             return LayerPrefillQKVViews(
-                inputNorm: try model.inputNorm(layer: L),
-                postAttention: try model.postAttnNorm(layer: L),
+                inputNorm: cfg.hyperConnection.isEnabled
+                    ? nil : try model.inputNorm(layer: L),
+                postAttention: cfg.hyperConnection.isEnabled
+                    ? nil : try model.postAttnNorm(layer: L),
                 router: dense ? nil : try model.router(layer: L),
                 q: isLinear ? nil : try model.qProj(layer: L),
                 k: (isLinear || sharesKV) ? nil : try model.kProj(layer: L),
@@ -1177,6 +1401,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             }
             tokenBuffer = allocated
         }
+        // A text-only follow-up still uses the position offset established by
+        // the previous image. Decode already applies it; chunked prefill must
+        // use the same positions when it appends several text tokens at once.
+        let positionIDs: MultimodalPositionIDs? = try positionIDs ?? {
+            guard cfg.family.usesQwenVisionTower, qwenMultimodalRopeDelta != 0 else { return nil }
+            let values = (0..<tokens.count).map { Int32(startPosition + $0) + qwenMultimodalRopeDelta }
+            return try MultimodalPositionIDs(temporal: values, height: values,
+                width: values, ropeDelta: qwenMultimodalRopeDelta)
+        }()
         let mropeBuffers: (temporal: MTLBuffer, height: MTLBuffer, width: MTLBuffer)?
         if let positionIDs {
             guard positionIDs.count == tokens.count,
@@ -1337,21 +1570,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         guard var cb = makePrefillCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
+        let residualStreams = cfg.hyperConnection.isEnabled
+            ? cfg.hyperConnection.streamCount : 1
+        let residualRowElements = D * residualStreams
         if let embeddingOverride {
             // The override spans the whole chunk — the planner emits image spans
             // as standalone chunks — so the INT4 gather it would cover is
             // skipped rather than encoded and fully overwritten.
-            let bytes = t * D * MemoryLayout<Float16>.stride
+            let rowBytes = D * MemoryLayout<Float16>.stride
+            let bytes = t * rowBytes
             guard embeddingOverride.length >= bytes,
                   let blit = cb.makeBlitCommandEncoder() else {
                 throw VisionRuntimeError.invalidInput(
                     "projected image feature buffer is too small")
             }
-            blit.copy(from: embeddingOverride,
-                      sourceOffset: 0,
-                      to: scratch.hidden,
-                      destinationOffset: 0,
-                      size: bytes)
+            if residualStreams == 1 {
+                blit.copy(from: embeddingOverride, sourceOffset: 0,
+                          to: scratch.hidden, destinationOffset: 0, size: bytes)
+            } else {
+                // Image features arrive packed; the residual keeps a token's
+                // streams side by side, so each row lands on its own stride
+                // and the tiling below fills the rest.
+                let destinationStride = residualRowElements * MemoryLayout<Float16>.stride
+                for token in 0..<t {
+                    blit.copy(from: embeddingOverride,
+                              sourceOffset: token * rowBytes,
+                              to: scratch.hidden,
+                              destinationOffset: token * destinationStride,
+                              size: rowBytes)
+                }
+            }
             blit.endEncoding()
         } else {
             prefillEmbed.encode(commandBuffer: cb,
@@ -1365,7 +1613,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                 out: scratch.hidden,
                                 t: UInt32(t),
                                 d: UInt32(D),
-                                outScale: embedOutScale)
+                                outScale: embedOutScale,
+                                outStrideElements: UInt32(residualRowElements))
         }
 
         if cfg.hasPerLayerInputs {
@@ -1397,6 +1646,80 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 yStrideElements: plan.packedWidth)
         }
 
+        // Four residual streams start from the same embedding and diverge only
+        // through what each block injects, exactly as the decode path tiles a
+        // single token's row.
+        let streams = cfg.hyperConnection.streamCount
+        if cfg.hyperConnection.isEnabled, let hc = prefillHyperConnection {
+            hc.encodeTileEmbedding(commandBuffer: cb, hidden: scratch.hidden,
+                                   tokens: t, hiddenSize: D, streamCount: streams)
+        }
+
+        /// The chunk-scale twin of `encodeHyperConnectionRead`: normalize every
+        /// stream, mix them down through the low rank and back up, collapse to
+        /// `hcMixed`, and leave the per-stream injection gate in `hcInject`.
+        /// `layer: nil` selects the model-level mixer, which only collapses.
+        func encodePrefillHyperConnectionRead(
+            _ cb: MTLCommandBuffer,
+            slot: Model.HyperConnectionSlot,
+            layer L: Int?
+        ) throws {
+            guard let hc = prefillHyperConnection else {
+                preconditionFailure("hyper-connection chunk encode without its kernels")
+            }
+            let lowRank = cfg.hyperConnection.lowRank
+            let stacked = D * streams
+            let norm = try model.hyperConnectionNorm(slot: slot, layer: L)
+            hc.encodeGroupedCenteredNorm(
+                commandBuffer: cb, x: scratch.hidden,
+                weight: norm.buffer, weightOffset: Int(norm.offset),
+                out: scratch.normed, tokens: t, hiddenSize: D,
+                streamCount: streams, eps: eps)
+            let down = try model.hyperConnectionMixDown(slot: slot, layer: L)
+            encodeInt4Projection(commandBuffer: cb, family: .shared, weights: down,
+                                 x: scratch.normed, y: scratch.hcLowRank,
+                                 rows: lowRank, columns: stacked,
+                                 tokenCount: t,
+                                 xStrideElements: stacked,
+                                 yStrideElements: lowRank)
+            hc.encodeLowRankSilu(commandBuffer: cb, x: scratch.hcLowRank,
+                                 tokens: t, lowRank: lowRank, streamCount: streams)
+            let up = try model.hyperConnectionMixUp(slot: slot, layer: L)
+            encodeInt4Projection(commandBuffer: cb, family: .shared, weights: up,
+                                 x: scratch.hcLowRank, y: scratch.hcMixUp,
+                                 rows: stacked, columns: lowRank,
+                                 tokenCount: t,
+                                 xStrideElements: lowRank,
+                                 yStrideElements: stacked)
+            hc.encodeCombine(commandBuffer: cb, up: scratch.hcMixUp,
+                             normed: scratch.normed, mixed: scratch.hcMixed,
+                             tokens: t, hiddenSize: D, streamCount: streams)
+            guard let L else { return }
+            let gate = try model.hyperConnectionInject(slot: slot, layer: L)
+            encodeInt4Projection(commandBuffer: cb, family: .shared, weights: gate,
+                                 x: scratch.normed, y: scratch.hcInject,
+                                 rows: streams, columns: stacked,
+                                 tokenCount: t,
+                                 xStrideElements: stacked,
+                                 yStrideElements: streams)
+        }
+
+        func encodePrefillHyperConnectionWrite(_ cb: MTLCommandBuffer,
+                                               branch: MTLBuffer) {
+            guard let hc = prefillHyperConnection else {
+                preconditionFailure("hyper-connection chunk write without its kernels")
+            }
+            hc.encodeInject(commandBuffer: cb, hidden: scratch.hidden,
+                            branch: branch, injectionRaw: scratch.hcInject,
+                            tokens: t, hiddenSize: D, streamCount: streams)
+        }
+
+        // What a block reads. With hyper-connections it is the stream mixture;
+        // otherwise the norm that precedes the block, as before.
+        let usesHyperConnections = cfg.hyperConnection.isEnabled
+        let blockInput = usesHyperConnections ? scratch.hcMixed : scratch.normed
+        let ffnInput = usesHyperConnections ? scratch.hcMixed : scratch.routedX
+
         for L in 0..<cfg.numLayers {
             if cfg.feedForwardKind == .mixtureOfExperts {
                 model.beginOpeningRoutedExpertStreamer(layer: L)
@@ -1409,14 +1732,34 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let qDim = cfg.numHeads * headDim
             let kvDim = numKVHeads * headDim
 
-            prefillRMS.encodeBF16W(commandBuffer: cb,
-                                   x: scratch.hidden,
-                                   weight: views.inputNorm.buffer,
-                                   weightOffset: Int(views.inputNorm.offset),
-                                   out: scratch.normed,
-                                   t: UInt32(t),
-                                   d: UInt32(D),
-                                   eps: eps)
+            if usesHyperConnections {
+                // The n-gram embedding joins the residual before the layer's
+                // first hyper-connection reads it, one token at a time so the
+                // dilated convolution sees the same window a sequential decode
+                // would.
+                if cfg.ngramEmbedding.isEnabled, L == cfg.ngramEmbedding.layer {
+                    let stride = D * streams * MemoryLayout<Float16>.stride
+                    for (index, token) in tokens.enumerated() {
+                        try encodeNgramPLE(cb, layer: L, token: token,
+                                           residual: scratch.hidden,
+                                           residualOffset: index * stride,
+                                           embeddingStaging: scratch.ngramEmbedding,
+                                           embeddingRow: index)
+                    }
+                }
+                // The two hyper-connection modules carry the only norms in the
+                // layer; there is no `input_layernorm` to encode.
+                try encodePrefillHyperConnectionRead(cb, slot: .attention, layer: L)
+            } else {
+                prefillRMS.encodeBF16W(commandBuffer: cb,
+                                       x: scratch.hidden,
+                                       weight: views.inputNorm!.buffer,
+                                       weightOffset: Int(views.inputNorm!.offset),
+                                       out: scratch.normed,
+                                       t: UInt32(t),
+                                       d: UInt32(D),
+                                       eps: eps)
+            }
             if isLinear {
                 // Gated-DeltaNet linear attention over the chunk: batched
                 // projections, causal conv (+ tail carry), delta-rule
@@ -1429,7 +1772,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .q,
                                      weights: views.linQKV!,
-                                     x: scratch.normed,
+                                     x: blockInput,
                                      y: scratch.q,
                                      rows: la.qkvDim,
                                      columns: D,
@@ -1439,7 +1782,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linZ!,
-                                     x: scratch.normed,
+                                     x: blockInput,
                                      y: scratch.gdnZ,
                                      rows: la.valueDim,
                                      columns: D,
@@ -1449,7 +1792,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linA!,
-                                     x: scratch.normed,
+                                     x: blockInput,
                                      y: scratch.gdnA,
                                      rows: la.numVHeads,
                                      columns: D,
@@ -1459,7 +1802,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linB!,
-                                     x: scratch.normed,
+                                     x: blockInput,
                                      y: scratch.gdnB,
                                      rows: la.numVHeads,
                                      columns: D,
@@ -1518,7 +1861,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 encodeInt4Projection(commandBuffer: cb,
                                      family: .q,
                                      weights: views.q!,
-                                     x: scratch.normed,
+                                     x: blockInput,
                                      y: scratch.q,
                                      rows: qProjRows,
                                      columns: D,
@@ -1529,7 +1872,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     encodeInt4Projection(commandBuffer: cb,
                                          family: .kv,
                                          weights: views.k!,
-                                         x: scratch.normed,
+                                         x: blockInput,
                                          y: scratch.kStage,
                                          rows: kvDim,
                                          columns: D,
@@ -1539,7 +1882,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     encodeInt4Projection(commandBuffer: cb,
                                          family: .kv,
                                          weights: views.v!,
-                                         x: scratch.normed,
+                                         x: blockInput,
                                          y: scratch.vStage,
                                          rows: kvDim,
                                          columns: D,
@@ -1631,7 +1974,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             eps: eps,
                             temporalPositions: mropeBuffers.temporal,
                             heightPositions: mropeBuffers.height,
-                            widthPositions: mropeBuffers.width)
+                            widthPositions: mropeBuffers.width,
+                            centered: cfg.normWeightsCenteredAtZero)
                     } else {
                         prefillQKVEpilogue.encodeNeoxSubdimNoVNorm(
                         commandBuffer: cb,
@@ -1650,7 +1994,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         kvTokenStrideElements: UInt32(kvDim),
                         theta: Float(cfg.fullRopeTheta),
                         rotaryDim: rotaryDim,
-                        eps: eps)
+                        eps: eps,
+                        centered: cfg.normWeightsCenteredAtZero)
                     }
                 } else {
                     let rotatedPairs = isFull
@@ -1711,6 +2056,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         let activeRingCapacity = ringCapacity > 0 && startPosition + t > ringCapacity
                             ? UInt32(ringCapacity)
                             : 0
+                        if let qsa = qwenSparseAttention {
+                            let weights = try model.resident(name:
+                                "language_model.model.layers.\(L).self_attn.indexer.index_qk_proj.weight")
+                            let projected = try qsa.projectionBuffer(tokens: t)
+                            encodeInt4Projection(commandBuffer: cb, family: .q, weights: weights,
+                                x: blockInput, y: projected,
+                                rows: cfg.attentionIndexer.projectionRows, columns: D,
+                                tokenCount: t, xStrideElements: D,
+                                yStrideElements: cfg.attentionIndexer.projectionRows)
+                            try qsa.encode(commandBuffer: cb, model: model, layer: L,
+                                projected: projected, start: startPosition, tokens: t,
+                                positions: positionIDs, ropeDelta: qwenMultimodalRopeDelta,
+                                q: attnQ, k: keyBuffer, v: valueBuffer, out: scratch.attentionOutput)
+                        }
+                        if qwenSparseAttention?.usesSparseAttention(endPosition: startPosition + t) != true {
                         prefillAttention.encodeCausal(commandBuffer: cb,
                                                       q: attnQ,
                                                       k: keyBuffer,
@@ -1722,6 +2082,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                       allowsBidirectionalFullAttention:
                                                           cfg.variant == .gemma4_12B_QAT,
                                                       path: prefillAttentionPath)
+                        }
                 } else {
                     throw PrefillError.chunkedUnsupported(
                         "chunked prefill attention requires FP16 KV")
@@ -1749,8 +2110,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 prefillRMS.encodeBF16W(
                     commandBuffer: cb,
                     x: scratch.h1,
-                    weight: views.postAttention.buffer,
-                    weightOffset: Int(views.postAttention.offset),
+                    weight: views.postAttention!.buffer,
+                    weightOffset: Int(views.postAttention!.offset),
                     out: scratch.h2,
                     t: UInt32(t), d: UInt32(D), eps: eps)
                 elementwise!.encodeResidualAdd(commandBuffer: cb,
@@ -1872,8 +2233,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                 denseX: scratch.denseX,
                                                 routedX: scratch.routedX,
                                                 routerX: scratch.routerX,
-                                                postAttentionWeight: views.postAttention.buffer,
-                                                postAttentionWeightOffset: Int(views.postAttention.offset),
+                                                postAttentionWeight: views.postAttention!.buffer,
+                                                postAttentionWeightOffset: Int(views.postAttention!.offset),
                                                 preFFNWeight: views.preFFN!.buffer,
                                                 preFFNWeightOffset: Int(views.preFFN!.offset),
                                                 preFFN2Weight: views.preFFN2!.buffer,
@@ -1886,6 +2247,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                 routedStrideElements: UInt32(D),
                                                 routerStrideElements: UInt32(D),
                                                 eps: eps)
+            } else if usesHyperConnections {
+                // The attention branch reaches every stream through its own
+                // gate, and the layer's second hyper-connection — not a
+                // post-attention norm — is what the feed-forward block reads.
+                encodePrefillHyperConnectionWrite(cb, branch: scratch.h1)
+                try encodePrefillHyperConnectionRead(cb, slot: .feedForward, layer: L)
             } else {
                 // Plain pre-norm residual block: hidden += attention branch,
                 // then one post-attention norm feeds router, shared expert,
@@ -1896,8 +2263,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                count: t * D)
                 prefillRMS.encodeBF16W(commandBuffer: cb,
                                        x: scratch.hidden,
-                                       weight: views.postAttention.buffer,
-                                       weightOffset: Int(views.postAttention.offset),
+                                       weight: views.postAttention!.buffer,
+                                       weightOffset: Int(views.postAttention!.offset),
                                        out: scratch.routedX,
                                        t: UInt32(t),
                                        d: UInt32(D),
@@ -1920,7 +2287,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         scalesOffset: Int(views.router!.scaleOffset),
                         biases: views.router!.buffer,
                         biasesOffset: Int(views.router!.biasOffset),
-                        hidden: scratch.routedX,
+                        hidden: ffnInput,
                         effectiveScale: effectiveScaleBuffers[L],
                         correctionBias: correction.buffer,
                         correctionBiasOffset: Int(correction.offset),
@@ -1940,7 +2307,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         scalesOffset: Int(views.router!.scaleOffset),
                         biases: views.router!.buffer,
                         biasesOffset: Int(views.router!.biasOffset),
-                        hidden: cfg.ffnSandwichNorms ? scratch.routerX : scratch.routedX,
+                        hidden: cfg.ffnSandwichNorms ? scratch.routerX : ffnInput,
                         effectiveScale: effectiveScaleBuffers[L],
                         perExpertScale: perExpertScale.buffer,
                         perExpertScaleOffset: perExpertScale.offset,
@@ -1999,7 +2366,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
                                                         x: cfg.ffnSandwichNorms
                                                             ? scratch.denseX
-                                                            : scratch.routedX,
+                                                            : ffnInput,
                                                         y: scratch.h1,
                                                         gate: sharedProj.gate,
                                                         up: sharedProj.up,
@@ -2036,7 +2403,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                 scalesOffset: Int(gateView.scaleOffset),
                                 biases: gateView.buffer,
                                 biasesOffset: Int(gateView.biasOffset),
-                                x: scratch.routedX,
+                                x: ffnInput,
                                 xOffset: row * D * halfBytes,
                                 y: scratch.sharedScalarGate,
                                 yOffset: row * halfBytes,
@@ -2173,7 +2540,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         }
                         _ = prefillGroupedMoE.encodeStreamedBatched(
                             commandBuffer: tileCB,
-                            hidden: scratch.routedX,
+                            hidden: ffnInput,
                             sortedPairs: metadata.sortedPairs,
                             routePartials: scratch.routePartials,
                             gateUpActScratch: scratch.routedGateUpActScratch,
@@ -2224,6 +2591,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                 hiddenStrideElements: UInt32(D),
                                                 eps: eps,
                                                 layerScalar: Quantization.bf16ToFloat(scalarBits))
+                    } else if usesHyperConnections {
+                        // The gate multiplies the whole feed-forward branch,
+                        // so the shared and routed halves are summed before
+                        // the injection rather than added to the residual
+                        // separately.
+                        if cfg.hasSharedExpert {
+                            elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+                                                           hidden: scratch.h2,
+                                                           delta: scratch.h1,
+                                                           count: t * D)
+                        }
+                        encodePrefillHyperConnectionWrite(tailCB, branch: scratch.h2)
                     } else {
                         // Plain pre-norm tail: hidden += gated shared branch
                         // + routed branch.
@@ -2242,6 +2621,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     try withExtendedLifetime(metadata) {
                         try waitForCompletion(tailCB)
                     }
+                    if let sink = debugChunkLayerSink {
+                        sink(L, try readChunkResidualTail(scratch: scratch,
+                                                          tokens: t,
+                                                          streams: streams))
+                    }
                     if L + 1 < cfg.numLayers {
                         guard let nextCB = makePrefillCommandBuffer() else {
                             throw ModelError.residentBufferWrapFailed
@@ -2257,11 +2641,34 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
 
         if writeFinalHead {
-            let finalNorm = model.finalNorm
             let lm = model.lmHead
             guard let finalCB = makePrefillCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
+            if usesHyperConnections {
+                // No `model.norm` here either: the mixer that collapses the
+                // streams is the last thing before the head and carries the
+                // only normalization left, so the head reads its output
+                // directly rather than norming the residual. The fused greedy
+                // head folds a final RMSNorm into the LM head and has nothing
+                // to fold here, which is why it is off for this architecture.
+                try encodePrefillHyperConnectionRead(finalCB, slot: .attention,
+                                                     layer: nil)
+                int4.encode(commandBuffer: finalCB,
+                            weights: lm.buffer, weightsOffset: Int(lm.offset),
+                            scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                            biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                            x: scratch.hcMixed,
+                            xOffset: (t - 1) * D * MemoryLayout<Float16>.stride,
+                            y: logits,
+                            m: UInt32(cfg.vocabSize), n: UInt32(D))
+                finalCB.commit()
+                try waitForCompletion(finalCB)
+                kv?.advance(by: tokens.count)
+                prefillChunkState.markCommitted()
+                return
+            }
+            let finalNorm = model.finalNorm
             if let speculativeTargetTokens {
                 fusionHead.encodeGreedyDecodeRows(
                     commandBuffer: finalCB,
@@ -2342,6 +2749,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
+        try kv?.ensureCapacity(through: position + 1, on: ctx.queue)
         let D    = UInt32(cfg.hiddenSize)
         let FmoE = UInt32(cfg.moeIntermediateSize)
         let eps: Float = 1e-6
@@ -2400,6 +2808,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                          tokenId: UInt32(bitPattern: token),
                          d: D,
                          outScale: embedOutScale)
+        if cfg.hyperConnection.isEnabled {
+            // The reference tiles the embedding across the streams, so each
+            // starts from the same token vector and they diverge only through
+            // what every block's gate injects.
+            let streams = cfg.hyperConnection.streamCount
+            let rowBytes = cfg.hiddenSize * MemoryLayout<Float16>.size
+            if let blit = firstLayerCommandBuffer!.makeBlitCommandEncoder() {
+                for stream in 1..<streams {
+                    blit.copy(from: hidden, sourceOffset: 0,
+                              to: hidden, destinationOffset: stream * rowBytes,
+                              size: rowBytes)
+                }
+                blit.endEncoding()
+            }
+        }
         if cfg.hasPerLayerInputs {
             let plan = PerLayerEmbeddingPlan(config: cfg)
             let identity = model.perLayerEmbedding
@@ -2422,7 +2845,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 m: UInt32(plan.packedWidth), n: D)
         }
 
+        func drainForDebug() throws {
+            if let pending = pendingRoutedCommand {
+                try finishPendingRoutedCommand(pending, waitIfNeeded: true)
+                pendingRoutedCommand = nil
+            }
+            if let first = firstLayerCommandBuffer {
+                first.commit()
+                waitUntilCompleted(first)
+                try checkCommandBufferError(first.error)
+                firstLayerCommandBuffer = nil
+            }
+        }
+
         for L in 0..<cfg.numLayers {
+            if let sink = debugLayerSink {
+                try drainForDebug()
+                sink(L)
+            }
             let isLinear = cfg.layerIsLinear(L)
             let isFull = cfg.fullAttentionLayerMask[L] == 1
             let headDimL = isFull ? cfg.fullHeadDim : cfg.headDim
@@ -2431,8 +2871,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let kvDim    = UInt32(numKVL * headDimL)
             let seqLen   = UInt32(position + 1)
 
-            let inNorm   = try model.inputNorm(layer: L)
-            let postAttn = try model.postAttnNorm(layer: L)
+            // A hyper-connection architecture has neither of these: its two
+            // hyper-connection modules carry the only norms in the layer.
+            let usesHyperConnections = cfg.hyperConnection.isEnabled
+            let inNorm   = usesHyperConnections
+                ? nil : try model.inputNorm(layer: L)
+            let postAttn = usesHyperConnections
+                ? nil : try model.postAttnNorm(layer: L)
             let sharedProj = sharedExpertProjections[L]
 
             let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
@@ -2446,11 +2891,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             } else {
                 cb = ctx.queue.makeCommandBuffer()!
             }
-            rms.encodeBF16W(commandBuffer: cb,
-                            x: hidden,
-                            weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
-                            out: normed,
-                            d: D, eps: eps)
+            if usesHyperConnections {
+                // The n-gram embedding joins the residual before the layer's
+                // first hyper-connection reads it.
+                if cfg.ngramEmbedding.isEnabled, L == cfg.ngramEmbedding.layer {
+                    try encodeNgramPLE(cb, layer: L, token: token)
+                }
+                try encodeHyperConnectionRead(cb, slot: .attention, layer: L)
+
+            } else if let inNorm {
+                rms.encodeBF16W(commandBuffer: cb,
+                                x: hidden,
+                                weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
+                                out: normed,
+                                d: D, eps: eps)
+            }
 
             if isLinear {
                 // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
@@ -2556,7 +3011,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                     vWeights: vProj.buffer, vWeightsOffset: Int(vProj.offset),
                                     vScales: vProj.buffer, vScalesOffset: Int(vProj.scaleOffset),
                                     vBiases: vProj.buffer, vBiasesOffset: Int(vProj.biasOffset),
-                                    x: normed,
+                                    x: blockInput,
                                     qOut: qScratch,
                                     kOut: kSlot.buffer, kOutOffset: kSlot.offset,
                                     vOut: vSlot.buffer, vOutOffset: vSlot.offset,
@@ -2657,7 +3112,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
             if cfg.feedForwardKind == .dense {
                 try encodeDenseGemmaLayerDecode(
-                    cb, layer: L, postAttention: postAttn,
+                    cb, layer: L, postAttention: postAttn!,
                     projections: sharedProj!, d: D, eps: eps)
                 // A dense layer produces nothing the CPU reads, so the whole
                 // token stays on one command buffer: the layer's work is
@@ -2679,14 +3134,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                denseX: denseX,
                                                routedX: routedX,
                                                routerX: routerInput,
-                                               postAttentionWeight: postAttn.buffer,
-                                               postAttentionWeightOffset: Int(postAttn.offset),
+                                               postAttentionWeight: postAttn!.buffer,
+                                               postAttentionWeightOffset: Int(postAttn!.offset),
                                                preFFNWeight: preFFN.buffer,
                                                preFFNWeightOffset: Int(preFFN.offset),
                                                preFFN2Weight: preFFN2.buffer,
                                                preFFN2WeightOffset: Int(preFFN2.offset),
                                                d: D,
                                                eps: eps)
+            } else if usesHyperConnections {
+                // The attention branch is injected into every residual stream
+                // through its own gate, then the feed-forward hyper-connection
+                // reads the updated streams and leaves the block's input in
+                // `hcMixed`, which `ffnInput` resolves to. There is no
+                // post-attention norm: this pair of modules is the only
+                // normalization the layer has.
+                encodeHyperConnectionWrite(cb, branch: oOut)
+                try encodeHyperConnectionRead(cb, slot: .feedForward, layer: L)
             } else {
                 // Plain pre-norm residual block: hidden += attention branch,
                 // then one post-attention norm feeds router, shared expert,
@@ -2697,8 +3161,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                count: cfg.hiddenSize)
                 rms.encodeBF16W(commandBuffer: cb,
                                 x: hidden,
-                                weight: postAttn.buffer,
-                                weightOffset: Int(postAttn.offset),
+                                weight: postAttn!.buffer,
+                                weightOffset: Int(postAttn!.offset),
                                 out: routedX,
                                 d: D, eps: eps)
             }
@@ -2719,7 +3183,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     weights: routerW.buffer, weightsOffset: Int(routerW.offset),
                     scales: routerW.buffer, scalesOffset: Int(routerW.scaleOffset),
                     biases: routerW.buffer, biasesOffset: Int(routerW.biasOffset),
-                    hidden: routedX,
+                    hidden: ffnInput,
                     effectiveScale: effectiveScaleBuffers[L],
                     correctionBias: correction.buffer,
                     correctionBiasOffset: Int(correction.offset),
@@ -2731,7 +3195,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
                 scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
                 biases:  routerW.buffer, biasesOffset:  Int(routerW.biasOffset),
-                hidden: cfg.ffnSandwichNorms ? routerInput : routedX,
+                hidden: cfg.ffnSandwichNorms ? routerInput : ffnInput,
                 effectiveScale: effectiveScaleBuffers[L],
                 perExpertScale: perExpertScale.buffer,
                 perExpertScaleOffset: perExpertScale.offset,
@@ -2789,7 +3253,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                         routedArgBuffer: argBuf,
                                                         routedBlobs: routedBufs,
                                                         routedOffsets: routedOffsets,
-                                                        x: routedX,
+                                                        x: ffnInput,
                                                         acts: moeActs,
                                                         d: D,
                                                         f: FmoE,
@@ -2809,7 +3273,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     routedArgBuffer: argBuf,
                     routedBlobs: routedBufs,
                     routedOffsets: routedOffsets,
-                    x: routedX,
+                    x: ffnInput,
                     acts: moeActs,
                     activeSlots: activeSlots,
                     activeSlotIndices: activeSlotIndices,
@@ -2819,17 +3283,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     topK: topK)
             }
 
+            // Cache-hit work and the shared expert use the same input and
+            // can share a submission while the missing experts are read.
+            let sharedCB = sharedProj.map { _ in ctx.queue.makeCommandBuffer()! }
             if let plan = plannedFetch,
                plan.hits > 0,
                !plan.misses.isEmpty {
                 let plannedBlobs = try model.routedExpertBuffers(for: plan)
                 phase1HitSplitRoutedBufs = plannedBlobs.map { $0.buffer }
-                phase1HitSplitArgBuf = moe.makeRoutedArgumentBuffer(
+                // The router readback above has drained the previous layer,
+                // so its argument storage is safe to reuse for both subsets.
+                phase1HitSplitArgBuf = moe.makeReusedRoutedArgumentBuffer(
                     routedBlobs: phase1HitSplitRoutedBufs,
                     topK: topK)
                 if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, !plan.misses.isEmpty {
                     writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
-                    let cb = ctx.queue.makeCommandBuffer()!
+                    let cb = sharedCB ?? ctx.queue.makeCommandBuffer()!
                     encodeRoutedPhase1Subset(
                         cb,
                         argBuf: argBuf,
@@ -2837,7 +3306,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         activeSlots: moeHitActiveSlots,
                         activeSlotIndices: phase1HitSlots,
                         activeCount: UInt32(phase1HitSlots.count))
-                    phase1HitCB = cb
+                    if sharedCB == nil { phase1HitCB = cb }
                 }
             }
 
@@ -2845,10 +3314,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             // the routed experts. Commit it without waiting so its GPU work
             // overlaps the routed-expert pread. The routed CB follows it on
             // the same queue, so the combine sees h1Buf.
-            let sharedCB = sharedProj.map { _ in ctx.queue.makeCommandBuffer()! }
             if let sharedCB, let sharedProj {
             try! shared.encode(commandBuffer: sharedCB,
-                               x: cfg.ffnSandwichNorms ? denseX : routedX,
+                               x: cfg.ffnSandwichNorms ? denseX : ffnInput,
                                gate: sharedProj.gate,
                                up: sharedProj.up,
                                down: sharedProj.down,
@@ -2872,7 +3340,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                        scalesOffset: Int(gateView.scaleOffset),
                                        biases: gateView.buffer,
                                        biasesOffset: Int(gateView.biasOffset),
-                                       x: routedX,
+                                       x: ffnInput,
                                        y: sharedScalarGateBuf!,
                                        m: 1, n: D)
                 elementwise!.encodeSigmoidScalarMul(commandBuffer: sharedCB,
@@ -2943,6 +3411,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      eps: eps,
                                      layerScalar: layerScalar)
                 }
+            } else if usesHyperConnections {
+                // Same shape as the plain tail, but the feed-forward output
+                // goes into all four streams through the gate the layer's
+                // second hyper-connection produced.
+                gTail = { [self] cb in
+                    encodeHyperConnectionWrite(cb, branch: h2Buf)
+                }
             } else {
                 // The phase-2 reduce already folded the shared branch (h1Buf
                 // as its residual); the tail is a plain residual add.
@@ -2954,7 +3429,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 }
             }
             let routedCB = ctx.queue.makeCommandBuffer()!
-            let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
+            let splitArgBuf = phase1HitSplitArgBuf != nil && !phase1MissSlots.isEmpty
                 ? phase1HitSplitArgBuf
                 : nil
             let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
@@ -3004,31 +3479,47 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
         // The fused head skips the vocab buffer and leaves a greedy token in
         // greedyTokenBuf; the logits path writes the complete vector.
-        let fNorm = model.finalNorm
+        // A hyper-connection architecture has no `model.norm`: the mixer that
+        // collapses its streams is the last thing before the head, and it
+        // carries the only normalization left.
+        let usesMixer = cfg.hyperConnection.isEnabled
+        let fNorm = usesMixer ? nil : model.finalNorm
         let lm    = model.lmHead
+        let headInput = usesMixer ? (hcMixed ?? normed) : normed
         let gFinalNorm: (MTLCommandBuffer) -> Void = { cb in
-            self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
-                                 weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
-                                 out: self.normed, d: D, eps: eps)
+            if usesMixer {
+                // `layer: nil` selects the model-level mixer, which has no
+                // injection gate and only collapses.
+                try? self.encodeHyperConnectionRead(cb, slot: .attention, layer: nil)
+            } else if let fNorm {
+                self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
+                                     weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
+                                     out: self.normed, d: D, eps: eps)
+            }
         }
         let gLmHead: (MTLCommandBuffer) -> Void = { cb in
             self.int4.encode(commandBuffer: cb,
                              weights: lm.buffer, weightsOffset: Int(lm.offset),
                              scales:  lm.buffer, scalesOffset:  Int(lm.scaleOffset),
                              biases:  lm.buffer, biasesOffset:  Int(lm.biasOffset),
-                             x: self.normed, y: logits, m: UInt32(self.cfg.vocabSize), n: D)
+                             x: headInput, y: logits,
+                             m: UInt32(self.cfg.vocabSize), n: D)
         }
         let gFusionHead: (MTLCommandBuffer) -> Void = { cb in
             self.fusionHead.encodeGreedyDecode(
                 commandBuffer: cb,
                 hidden: self.hidden,
-                normWeight: fNorm.buffer, normOffset: Int(fNorm.offset),
+                normWeight: fNorm!.buffer, normOffset: Int(fNorm!.offset),
                 weights: lm.buffer, weightsOffset: Int(lm.offset),
                 scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
                 biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
                 outToken: self.greedyTokenBuf,
                 d: D, vocab: UInt32(self.cfg.vocabSize),
                 rmsEps: eps)
+        }
+        if let sink = debugLayerSink {
+            try drainForDebug()
+            sink(cfg.numLayers)
         }
         // A dense token carries its layers on `firstLayerCommandBuffer`; the
         // head joins them so the token costs exactly one commit and one wait.
@@ -3180,6 +3671,226 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step.
     /// Reads `normed`, updates the layer's recurrent state + conv tail in
     /// place, and leaves the attention-branch output in `oOut`.
+    /// Encode the n-gram per-layer embedding for one token and add it to the
+    /// residual streams.
+    ///
+    ///     embedding = table[hash(recent tokens)]        // read on the host
+    ///     keys      = norm_key(key_proj(embedding))
+    ///     values    = value_proj(embedding)
+    ///     query     = norm_query(hidden)
+    ///     gated     = sigmoid(signedSqrt(keys·query / sqrt(D))) * values
+    ///     hidden   += gated + silu(conv(norm_conv(gated)))
+    ///
+    /// The rows are resolved and read on the host: sixteen rows of a hundred
+    /// bytes, scattered by a hash across 320 million, is a latency problem
+    /// rather than a bandwidth one.
+    /// One token's n-gram per-layer embedding, folded into `residual` at
+    /// `residualOffset`.
+    ///
+    /// The chunk path drives this per token rather than batching it: only the
+    /// dilated convolution is sequential across tokens, the layer carrying it
+    /// is one of forty-eight, and its projections are small — so a loop costs
+    /// little and avoids a second, differently-shaped implementation of the
+    /// history window.
+    private func encodeNgramPLE(_ cb: MTLCommandBuffer,
+                                layer L: Int,
+                                token: Int32,
+                                residual: MTLBuffer? = nil,
+                                residualOffset: Int = 0,
+                                embeddingStaging: MTLBuffer? = nil,
+                                embeddingRow: Int = 0) throws {
+        guard let ple = ngramPLE, let rowIndex = ngramRows,
+              let table = ngramTable,
+              let embedding = embeddingStaging ?? pleEmbedding, let keys = pleKeys,
+              let values = pleValues, let queries = pleQueries,
+              let gated = pleGated, let normedConv = pleNormed,
+              let convOut = pleConvOut, let history = pleConvHistory else {
+            preconditionFailure("n-gram encode without its scratch")
+        }
+        let ngram = cfg.ngramEmbedding
+        let streams = cfg.hyperConnection.streamCount
+        let width = UInt32(cfg.hiddenSize)
+        let stacked = UInt32(streams * cfg.hiddenSize)
+
+        let (rows, nextContext) = rowIndex.rows(for: [token],
+                                                context: ngramContext)
+        ngramContext = nextContext
+        let gathered = try table.embedding(rows: rows)
+        guard gathered.count == ngram.embedDim else {
+            throw ModelError.indexCorrupt(detail:
+                "n-gram lookup produced \(gathered.count) values, expected "
+                    + "\(ngram.embedDim)")
+        }
+        let embeddingOffset = embeddingRow * ngram.embedDim
+        // A chunk stages one row per token, and an image span is a chunk of
+        // its own pooled length rather than `maxChunkTokens`. Sizing this from
+        // a constant wrote past the buffer and took the decode service down
+        // with a bus error on the first photo large enough to matter.
+        let capacity = embedding.length / MemoryLayout<Float16>.stride
+        guard embeddingOffset + gathered.count <= capacity else {
+            throw PrefillError.chunkedUnsupported(
+                "n-gram staging holds \(capacity / max(ngram.embedDim, 1)) rows, "
+                    + "needed row \(embeddingRow)")
+        }
+        embedding.contents().withMemoryRebound(
+            to: Float16.self,
+            capacity: capacity
+        ) { destination in
+            for index in 0..<gathered.count {
+                destination[embeddingOffset + index] = gathered[index]
+            }
+        }
+        let embeddingByteOffset = embeddingOffset * MemoryLayout<Float16>.stride
+
+        let keyProjection = try model.ngramKeyProjection(layer: L)
+        int4.encode(commandBuffer: cb,
+                    weights: keyProjection.buffer,
+                    weightsOffset: Int(keyProjection.offset),
+                    scales: keyProjection.buffer,
+                    scalesOffset: Int(keyProjection.scaleOffset),
+                    biases: keyProjection.buffer,
+                    biasesOffset: Int(keyProjection.biasOffset),
+                    x: embedding, xOffset: embeddingByteOffset, y: keys,
+                    m: stacked, n: UInt32(ngram.embedDim))
+        let keyNorm = try model.ngramKeyNorm(layer: L)
+        rms.encodeBF16WGroupedCentered(
+            commandBuffer: cb, x: keys,
+            weight: keyNorm.buffer, weightOffset: Int(keyNorm.offset),
+            out: keys, d: width, groups: streams, eps: 1e-6)
+
+        let valueProjection = try model.ngramValueProjection(layer: L)
+        int4.encode(commandBuffer: cb,
+                    weights: valueProjection.buffer,
+                    weightsOffset: Int(valueProjection.offset),
+                    scales: valueProjection.buffer,
+                    scalesOffset: Int(valueProjection.scaleOffset),
+                    biases: valueProjection.buffer,
+                    biasesOffset: Int(valueProjection.biasOffset),
+                    x: embedding, xOffset: embeddingByteOffset, y: values,
+                    m: width, n: UInt32(ngram.embedDim))
+
+        let target = residual ?? hidden
+        let queryNorm = try model.ngramQueryNorm(layer: L)
+        rms.encodeBF16WGroupedCentered(
+            commandBuffer: cb, x: target, xOffset: residualOffset,
+            weight: queryNorm.buffer, weightOffset: Int(queryNorm.offset),
+            out: queries, d: width, groups: streams, eps: 1e-6)
+
+        ple.encodeGateValues(commandBuffer: cb, keys: keys, queries: queries,
+                             values: values, out: gated,
+                             hiddenSize: cfg.hiddenSize, streamCount: streams)
+
+        let convNorm = try model.ngramConvNorm(layer: L)
+        rms.encodeBF16WGroupedCentered(
+            commandBuffer: cb, x: gated,
+            weight: convNorm.buffer, weightOffset: Int(convNorm.offset),
+            out: normedConv, d: width, groups: streams, eps: 1e-6)
+
+        // The convolution is dilated by the n-gram size, so its taps read
+        // every `ngramSize`-th row of the history.
+        let historyRows = (ngram.convKernelSize - 1) * ngram.ngramSize + 1
+        ple.encodeHistoryPush(commandBuffer: cb, history: history,
+                              row: normedConv,
+                              width: Int(stacked), length: historyRows)
+        let convWeight = try model.ngramConv1D(layer: L)
+        ple.encodeDepthwiseConv(commandBuffer: cb, history: history,
+                                weight: convWeight.buffer,
+                                weightOffset: Int(convWeight.offset),
+                                out: convOut,
+                                width: Int(stacked),
+                                taps: ngram.convKernelSize,
+                                dilation: ngram.ngramSize)
+
+        elementwise!.encodeResidualAdd(commandBuffer: cb,
+                                       hidden: target, hiddenOffset: residualOffset,
+                                       delta: gated, count: Int(stacked))
+        elementwise!.encodeResidualAdd(commandBuffer: cb,
+                                       hidden: target, hiddenOffset: residualOffset,
+                                       delta: convOut, count: Int(stacked))
+    }
+
+    /// Encode a hyper-connection's read side, leaving the block's input in
+    /// `hcMixed` and the per-stream injection gate in `hcInject`.
+    ///
+    ///     normed = hc_norm(hidden)                 // grouped, centered
+    ///     mixed  = mean_s sigmoid(W_up @ silu(W_down @ normed / S)) * normed
+    ///     inject = W_inject @ normed               // gated in encodeInject
+    ///
+    /// `hidden` itself is untouched: the residual that survives the block is
+    /// the unnormalized stream, and `normed` only feeds the mix and the gate.
+    private func encodeHyperConnectionRead(
+        _ cb: MTLCommandBuffer,
+        slot: Model.HyperConnectionSlot,
+        layer L: Int?
+    ) throws {
+        guard let hc = hyperConnection,
+              let mixed = hcMixed, let lowRank = hcLowRank,
+              let mixUp = hcMixUp else {
+            preconditionFailure("hyper-connection encode without its scratch")
+        }
+        let config = cfg.hyperConnection
+        let streams = config.streamCount
+        let width = UInt32(cfg.hiddenSize)
+        let stacked = UInt32(streams * cfg.hiddenSize)
+
+        let norm = try model.hyperConnectionNorm(slot: slot, layer: L)
+        rms.encodeBF16WGroupedCentered(
+            commandBuffer: cb,
+            x: hidden,
+            weight: norm.buffer, weightOffset: Int(norm.offset),
+            out: normed,
+            d: width, groups: streams, eps: 1e-6)
+
+        let down = try model.hyperConnectionMixDown(slot: slot, layer: L)
+        int4.encode(commandBuffer: cb,
+                    weights: down.buffer, weightsOffset: Int(down.offset),
+                    scales: down.buffer, scalesOffset: Int(down.scaleOffset),
+                    biases: down.buffer, biasesOffset: Int(down.biasOffset),
+                    x: normed, y: lowRank,
+                    m: UInt32(config.lowRank), n: stacked)
+        hc.encodeLowRankSilu(commandBuffer: cb,
+                             x: lowRank, out: lowRank,
+                             count: config.lowRank,
+                             streamCount: streams)
+
+        let up = try model.hyperConnectionMixUp(slot: slot, layer: L)
+        int4.encode(commandBuffer: cb,
+                    weights: up.buffer, weightsOffset: Int(up.offset),
+                    scales: up.buffer, scalesOffset: Int(up.scaleOffset),
+                    biases: up.buffer, biasesOffset: Int(up.biasOffset),
+                    x: lowRank, y: mixUp,
+                    m: stacked, n: UInt32(config.lowRank))
+        hc.encodeCombine(commandBuffer: cb,
+                         up: mixUp, normed: normed, mixed: mixed,
+                         hiddenSize: cfg.hiddenSize, streamCount: streams)
+
+        // The model-level mixer only collapses; it has no injection gate.
+        guard let L, let inject = hcInject else { return }
+        let gate = try model.hyperConnectionInject(slot: slot, layer: L)
+        int4.encode(commandBuffer: cb,
+                    weights: gate.buffer, weightsOffset: Int(gate.offset),
+                    scales: gate.buffer, scalesOffset: Int(gate.scaleOffset),
+                    biases: gate.buffer, biasesOffset: Int(gate.biasOffset),
+                    x: normed, y: inject,
+                    m: UInt32(streams), n: stacked)
+    }
+
+    /// Accumulate a block's output into every residual stream through the gate
+    /// `encodeHyperConnectionRead` left in `hcInject`.
+    private func encodeHyperConnectionWrite(_ cb: MTLCommandBuffer,
+                                            branch: MTLBuffer,
+                                            branchOffset: Int = 0) {
+        guard let hc = hyperConnection, let inject = hcInject else {
+            preconditionFailure("hyper-connection write without its scratch")
+        }
+        hc.encodeInject(commandBuffer: cb,
+                        hyper: hidden,
+                        branch: branch, branchOffset: branchOffset,
+                        injectionRaw: inject,
+                        hiddenSize: cfg.hiddenSize,
+                        streamCount: cfg.hyperConnection.streamCount)
+    }
+
     private func encodeLinearAttentionDecode(_ cb: MTLCommandBuffer, layer L: Int) throws {
         guard let gdn, let gdnState, let gdnQKVRaw, let gdnConvOut,
               let gdnZ, let gdnA, let gdnB, let gdnY, let gdnOut else {
@@ -3200,7 +3911,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         // One dispatch over the concatenated qkv/z/a/b row space instead of four
         // separate GEMVs (a and b were 4 threadgroups each).
         gdn.encodeInputProjections(commandBuffer: cb,
-                                   x: normed,
+                                   x: blockInput,
                                    qkv: qkvW, qkvOut: gdnQKVRaw,
                                    z: zW, zOut: gdnZ,
                                    a: aW, aOut: gdnA,
@@ -3239,6 +3950,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// [query ; gate] q_proj split per head, weighted per-head q/k norms
     /// (no V norm), NeoX sub-dim RoPE, full attention with the configured
     /// scale, sigmoid output gate, then o_proj into `oOut`.
+    /// Per-head Q/K RMSNorm, in whichever form the architecture stores its
+    /// weights. Qwen3.6 centres them at one and scales by `w`; Qwen4-Exp
+    /// centres them at zero and scales by `1 + w`, so the same tensor name
+    /// means different arithmetic and using the wrong one leaves Q and K
+    /// scaled by roughly zero.
+    private func encodeHeadNorm(_ cb: MTLCommandBuffer,
+                                x: MTLBuffer, xOffset: Int = 0,
+                                weight: MTLBuffer, weightOffset: Int = 0,
+                                out: MTLBuffer, outOffset: Int = 0,
+                                headDim: UInt32, numHeads: Int,
+                                eps: Float) {
+        if cfg.normWeightsCenteredAtZero {
+            rms.encodeBF16WPerHeadCentered(
+                commandBuffer: cb, x: x, xOffset: xOffset,
+                weight: weight, weightOffset: weightOffset,
+                out: out, outOffset: outOffset,
+                headDim: headDim, numHeads: numHeads, eps: eps)
+        } else {
+            rms.encodeBF16WPerHead(
+                commandBuffer: cb, x: x, xOffset: xOffset,
+                weight: weight, weightOffset: weightOffset,
+                out: out, outOffset: outOffset,
+                headDim: headDim, numHeads: numHeads, eps: eps)
+        }
+    }
+
     private func encodeGatedFullAttentionDecode(_ cb: MTLCommandBuffer,
                                                 layer L: Int,
                                                 position: Int,
@@ -3275,7 +4012,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             vWeights: v.buffer, vWeightsOffset: Int(v.offset),
                             vScales: v.buffer, vScalesOffset: Int(v.scaleOffset),
                             vBiases: v.buffer, vBiasesOffset: Int(v.biasOffset),
-                            x: normed,
+                            // With hyper-connections the block reads the
+                            // stream mixture, not `normed` — which here holds
+                            // all four normalized streams stacked, so a GEMV
+                            // over the first D values would silently read
+                            // stream 0 alone.
+                            x: blockInput,
                             qOut: qPackedScratch,
                             kOut: kSlot.buffer, kOutOffset: kSlot.offset,
                             vOut: vSlot.buffer, vOutOffset: vSlot.offset,
@@ -3288,7 +4030,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                      gate: attnGateScratch,
                                      heads: cfg.numHeads,
                                      dim: headDim)
-        rms.encodeBF16WPerHead(commandBuffer: cb,
+        encodeHeadNorm(cb,
                                x: qScratch,
                                weight: qNormW.buffer,
                                weightOffset: Int(qNormW.offset),
@@ -3296,7 +4038,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                headDim: UInt32(headDim),
                                numHeads: cfg.numHeads,
                                eps: eps)
-        rms.encodeBF16WPerHead(commandBuffer: cb,
+        encodeHeadNorm(cb,
                                x: kSlot.buffer, xOffset: kSlot.offset,
                                weight: kNormW.buffer,
                                weightOffset: Int(kNormW.offset),
@@ -3321,6 +4063,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                               numHeads: UInt32(numKV),
                               rotaryDim: rotaryDim,
                               theta: Float(cfg.fullRopeTheta))
+        if let qsa = qwenSparseAttention {
+            let weights = try model.resident(name:
+                "language_model.model.layers.\(L).self_attn.indexer.index_qk_proj.weight")
+            let projected = try qsa.projectionBuffer(tokens: 1)
+            int4.encode(commandBuffer: cb,
+                weights: weights.buffer, weightsOffset: Int(weights.offset),
+                scales: weights.buffer, scalesOffset: Int(weights.scaleOffset),
+                biases: weights.buffer, biasesOffset: Int(weights.biasOffset),
+                x: blockInput, y: projected,
+                m: UInt32(cfg.attentionIndexer.projectionRows), n: D)
+            try qsa.encode(commandBuffer: cb, model: model, layer: L,
+                projected: projected, start: position, tokens: 1,
+                positions: nil, ropeDelta: qwenMultimodalRopeDelta,
+                q: qScratch, k: kSlot.buffer, v: vSlot.buffer, out: attnOut)
+        }
+        if qwenSparseAttention?.usesSparseAttention(endPosition: position + 1) != true {
         attention.encodeFull(commandBuffer: cb,
                              q: qScratch,
                              k: kSlot.buffer, kOffset: 0,
@@ -3331,6 +4089,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                              numKVHeads: UInt32(numKV),
                              seqLen: seqLen,
                              scale: Float(cfg.attentionScale))
+        }
         elementwise.encodeSigmoidGateMul(commandBuffer: cb,
                                          out: attnOut,
                                          gate: attnGateScratch,

@@ -5,7 +5,7 @@ import Testing
     @Test func currentCatalogOrderAndSelectorsAreStable() {
         #expect(TUFFModelCatalog.all.map(\.selector) == [
             "gemma4-e2b", "gemma4-e4b", "gemma4-12b-qat", "gemma4", "qwen36",
-            "gpt-oss-20b", "gpt-oss-120b", "minimax-m2.7",
+            "gpt-oss-20b", "gpt-oss-120b", "minimax-m2.7", "qwen38-flash-next",
         ])
         #expect(TUFFModelCatalog.model(selector: "e2b")?.id == .gemma4_E2B)
         #expect(TUFFModelCatalog.default.id == .gemma4_26B_A4B)
@@ -16,6 +16,8 @@ import Testing
         #expect(TUFFModelCatalog.model(selector: "gpt-oss")?.id == .gptOss_20B)
         #expect(TUFFModelCatalog.model(selector: "gpt-oss-120b")?.id == .gptOss_120B)
         #expect(TUFFModelCatalog.model(selector: "minimax")?.id == .minimaxM27)
+        #expect(TUFFModelCatalog.model(selector: "flash-next")?.id == .qwen38FlashNext)
+        #expect(TUFFModelCatalog.model(selector: "qwen-flash")?.id == .qwen38FlashNext)
         #expect(TUFFModelCatalog.model(selector: "unknown") == nil)
     }
 
@@ -43,7 +45,8 @@ import Testing
                       TUFFModelCatalog.gemma4_E4B,
                       TUFFModelCatalog.gemma4_12B_QAT,
                       TUFFModelCatalog.gemma4_26B_A4B,
-                      TUFFModelCatalog.qwen36_35B_A3B] {
+                      TUFFModelCatalog.qwen36_35B_A3B,
+                      TUFFModelCatalog.qwen38FlashNext] {
             let addon = model.addons[0]
             #expect(addon.kind == .imageInput)
             #expect(addon.hardware.minimumAppleSiliconGeneration == 2)

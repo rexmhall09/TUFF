@@ -45,7 +45,14 @@ import TUFFModelCatalog
                 with: capabilities,
                 contextTokens: descriptor.runtimeDefaults.contextTokens,
                 expertCacheSlots: descriptor.runtimeDefaults.expertCacheSlots)
-            #expect(compatibility.isCompatible, "\(descriptor.displayName)")
+            // A model still awaiting its validation run is refused for that
+            // reason alone, which is not a statement about this Mac. What the
+            // gate must never report at or above the catalogue minimum is a
+            // hardware or memory objection.
+            let hardwareIssues = compatibility.issues.filter {
+                $0 != .requiresRealModelValidation
+            }
+            #expect(hardwareIssues.isEmpty, "\(descriptor.displayName)")
         }
     }
 

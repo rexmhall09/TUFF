@@ -10,6 +10,7 @@ public enum TUFFModelID: String, Codable, CaseIterable, Sendable {
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
     case minimaxM27 = "minimax-m2.7"
+    case qwen38FlashNext = "qwen3.8-flash-next"
 }
 
 public enum TUFFModelFamily: String, Codable, Sendable {
@@ -17,6 +18,7 @@ public enum TUFFModelFamily: String, Codable, Sendable {
     case qwen36
     case gptOss = "gpt-oss"
     case minimaxM2 = "minimax-m2"
+    case qwen4Exp = "qwen4-exp"
 }
 
 public enum TUFFArchitectureID: String, Codable, Sendable {
@@ -28,6 +30,7 @@ public enum TUFFArchitectureID: String, Codable, Sendable {
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
     case minimaxM27 = "minimax-m2.7"
+    case qwen38FlashNext = "qwen3.8-flash-next"
 }
 
 public enum TUFFFeedForwardKind: String, Codable, Sendable {
@@ -103,6 +106,12 @@ public extension TUFFArchitectureProfile {
     static let minimaxM27 = TUFFArchitectureProfile(
         id: .minimaxM27,
         family: .minimaxM2,
+        feedForwardKind: .mixtureOfExperts,
+        weightLayout: .affine)
+
+    static let qwen38FlashNext = TUFFArchitectureProfile(
+        id: .qwen38FlashNext,
+        family: .qwen4Exp,
         feedForwardKind: .mixtureOfExperts,
         weightLayout: .affine)
 }
@@ -408,6 +417,15 @@ public struct TUFFModelAddonDescriptor: Codable, Equatable, Sendable {
 
 public struct TUFFModelDescriptor: Codable, Equatable, Sendable, Identifiable {
     public let id: TUFFModelID
+    /// Native checkpoint limits, without optional RoPE extrapolation.
+    public var maximumContextTokens: Int {
+        switch id {
+        case .gemma4_E2B, .gemma4_E4B, .gptOss_20B, .gptOss_120B: 131_072
+        case .minimaxM27: 204_800
+        case .gemma4_12B_QAT, .gemma4_26B_A4B, .qwen36_35B_A3B, .qwen38FlashNext: 262_144
+        }
+    }
+
     public let selector: String
     public let aliases: [String]
     public let apiModelID: String
@@ -600,6 +618,28 @@ public enum TUFFModelCatalog {
         manifestModelID: "openai/gpt-oss-120b",
         approximateDownloadBytes: 65_300_000_000,
         installedBytes: 65_400_000_000,
+        reserveBytes: oneGiB)
+
+    /// Pinned against the live repository on 2026-09-06: `revision` is the
+    /// commit the Hugging Face API reports for `main`, and `sourceIndexSHA256`
+    /// is the SHA-256 of `model.safetensors.index.json` at that commit.
+    ///
+    /// Byte figures were computed from the checkpoint's own safetensors
+    /// headers rather than estimated. The repository holds 103.86 GiB across
+    /// 22 shards; a text install fetches only the `language_model.*` ranges,
+    /// which coalesce at the 64 MiB chunk policy into 1,884 requests totalling
+    /// 110,840,572,952 bytes — 220 MB of that being gaps between interleaved
+    /// tensors. The 0.84 GiB vision tower is skipped. The installed figure adds
+    /// the tokenizer sidecars and 16 KB page rounding on 24,576 routed expert
+    /// blobs (192 MiB), whose 3,072,000-byte payload is not page-aligned.
+    private static let qwen38FlashNextSource = TUFFModelSource(
+        repoID: "mlx-community/Qwen3.8-Flash-Next-4bit",
+        revision: "07b5dc6c54600a359b87f1e53e7adf6351c72a2c",
+        sourceIndexSHA256:
+            "3581f8d40a330d40009d0417359f5f75b7cf79e9f8fc48ba0b1461eabd43dd5f",
+        manifestModelID: "mlx-community/Qwen3.8-Flash-Next-4bit",
+        approximateDownloadBytes: 110_860_700_000,
+        installedBytes: 110_850_000_000,
         reserveBytes: oneGiB)
 
     private static let minimaxM27Source = TUFFModelSource(
@@ -943,6 +983,100 @@ public enum TUFFModelCatalog {
         capabilities: [.textGeneration, .reasoning],
         reasoningControl: .alwaysOn)
 
+    /// Qwen3.8 Flash Next, the `qwen4_exp` architecture: 48 decoder layers of
+    /// which 36 are gated-DeltaNet linear attention and 12 are full attention,
+    /// 512 routed experts per layer with 10 active, a sigmoid-gated shared
+    /// expert, four-stream hyper-connections in place of a single residual,
+    /// and an n-gram per-layer-embedding table on layer 1.
+    ///
+    /// The checkpoint splits well for streaming. Of its 103.02 GiB of
+    /// `language_model` tensors, 70.31 GiB are routed experts and 29.80 GiB
+    /// are the n-gram table, leaving 2.91 GiB that has to stay resident. Only
+    /// 12 layers keep a KV cache, at 2 KV heads and a 256 head dim, so a token
+    /// costs 24 KiB of cache against MiniMax M2.7's 248 KiB.
+    ///
+    /// The validation run is done: the checkpoint installs, loads and decodes,
+    /// and every stage of a forward pass was compared against mlx-vlm's own
+    /// `qwen4_exp` on the real weights, layer by layer. On the 16 GB M2 it
+    /// answers at ~2.6 tok/s.
+    ///
+    /// The original 2K qualification remains the memory-estimate baseline.
+    /// The runner now implements the compressed-block QSA indexer required
+    /// above that threshold; the native checkpoint limit is 262,144 tokens.
+    public static let qwen38FlashNext = TUFFModelDescriptor(
+        id: .qwen38FlashNext,
+        selector: "qwen38-flash-next",
+        aliases: ["flash-next", "qwen-flash"],
+        apiModelID: "qwen3.8-flash-next",
+        displayName: "Qwen3.8 Flash Next 4-bit",
+        shortName: "Qwen3.8 Flash Next",
+        summary: "512 experts per layer with 10 active, hybrid linear "
+            + "attention, and a 24 KiB-per-token KV cache.",
+        family: .qwen4Exp,
+        architecture: .qwen38FlashNext,
+        installDirectoryName: "qwen38-flash-next.gturbo",
+        source: qwen38FlashNextSource,
+        hardware: TUFFModelHardwareRequirements(
+            minimumUnifiedMemoryBytes: 16 * oneGiB,
+            minimumAppleSiliconGeneration: 2),
+        // The parts that are counted rather than estimated: 3,123,406,360
+        // bytes of resident weights and 119,144,448 bytes of gated-DeltaNet
+        // recurrent and convolution state, both summed from the checkpoint's
+        // safetensors headers; 50,331,648 bytes of KV cache at 2K; and
+        // 4,731,174,912 bytes of routed-expert cache. The remainder is an
+        // allowance for scratch, logits and staging buffers.
+        //
+        // 32 slots, measured rather than reasoned. A 512-expert layer argues
+        // for a large cache — 32 slots hold 6.3% of one — but each slot is its
+        // own Metal buffer and a command buffer that references it pays for it
+        // whether or not the token routed there. On a 160-token answer:
+        //
+        //     16 slots  2.711 tok/s
+        //     32 slots  2.842 tok/s
+        //     48 slots  1.633 tok/s
+        //
+        // 48 was the first choice here, from the hit-rate argument alone. It
+        // is 1.7x slower than 32 and costs 2.4 GB more, which is the same
+        // trade `AppAutomaticMemoryPlanner` documents for Gemma 4 26B-A4B.
+        memory: TUFFModelMemoryProfile(
+            qualifiedDefaultWorkingSetBytes: 8_634_412_544,
+            defaultContextTokens: 2_048,
+            defaultExpertCacheSlots: 32,
+            expertCacheBytesPerSlot: 147_849_216,
+            kvCache: TUFFKVCacheProfile(fullAttentionBytesPerToken: 28_560)),
+        qualification: .qualified,
+        runtimeDefaults: TUFFModelRuntimeDefaults(
+            contextTokens: 2_048,
+            expertCacheSlots: 32,
+            temperature: 1.0,
+            topK: 20,
+            topP: 0.95),
+        capabilities: [.textGeneration, .imageInput, .reasoning],
+        reasoningControl: .toggleWithPreservation,
+        // The tower is Qwen 3.6's, tensor for tensor: 27 blocks at hidden
+        // 1152, patch 16, spatial merge 2, the same 333 tensors and the same
+        // `<|vision_start|>` / `<|image_pad|>` / `<|vision_end|>` ids. Only the
+        // merger's output differs, at 2,560 wide instead of 2,048 — which is
+        // exactly the 4,719,616 bytes by which this pack exceeds Qwen 3.6's.
+        addons: [TUFFModelAddonDescriptor(
+            id: "qwen38-flash-next-image-input",
+            displayName: "Qwen3.8 Flash Next Image Support",
+            kind: .imageInput,
+            source: TUFFModelSource(
+                repoID: qwen38FlashNextSource.repoID,
+                revision: qwen38FlashNextSource.revision,
+                sourceIndexSHA256: qwen38FlashNextSource.sourceIndexSHA256,
+                manifestModelID: qwen38FlashNextSource.manifestModelID,
+                // The coalesced range total, not the tensor sum: the 333
+                // vision tensors are interleaved through shard 1, so fetching
+                // them costs more than they weigh.
+                approximateDownloadBytes: 1_058_209_792,
+                installedBytes: 901_332_992,
+                reserveBytes: oneGiB),
+            hardware: TUFFModelHardwareRequirements(
+                minimumUnifiedMemoryBytes: 16 * oneGiB,
+                minimumAppleSiliconGeneration: 2))])
+
     public static let all: [TUFFModelDescriptor] = [
         gemma4_E2B,
         gemma4_E4B,
@@ -952,6 +1086,7 @@ public enum TUFFModelCatalog {
         gptOss_20B,
         gptOss_120B,
         minimaxM27,
+        qwen38FlashNext,
     ]
     public static let `default` = gemma4_26B_A4B
 

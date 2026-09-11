@@ -2,7 +2,23 @@ import Foundation
 
 public enum Quantization {
 
+    /// Default affine group size: one scale and bias per 64 quantized values.
     public static let groupSize: Int = 64
+
+    /// Group sizes the INT4 kernels can decode. Qwen3.8 Flash Next is
+    /// quantized at 32 because its n-gram PLE rows are 160 values wide and
+    /// 160 is not divisible by 64, so no group-64 conversion of that
+    /// architecture can exist.
+    public static let supportedGroupSizes: Set<Int> = [32, 64]
+
+    /// Function-constant index the INT4 kernels read the group size from.
+    /// Every `.metal` module compiles into one library, so these indices are
+    /// global; 100 sits clear of the blocks already in use.
+    public static let groupSizeFunctionConstantIndex = 100
+
+    /// Function-constant index the streamed MoE kernels read their routed
+    /// expert count from.
+    public static let streamedExpertsFunctionConstantIndex = 101
 
     // MARK: - BF16 helpers
     //
@@ -107,7 +123,12 @@ public enum Quantization {
     /// Affine 4-bit quantize: `q ∈ [0..15]`, `w ≈ q * scale + bias`.
     /// Scale and bias are computed from per-group min/max, then rounded to BF16.
     /// Test-fixture only — the runtime importer never calls this.
-    public static func quantizeInt4Affine(_ row: [Float]) -> Int4AffineRow {
+    public static func quantizeInt4Affine(
+        _ row: [Float],
+        groupSize: Int = Quantization.groupSize
+    ) -> Int4AffineRow {
+        precondition(supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
         precondition(row.count % groupSize == 0,
                      "row length \(row.count) is not a multiple of \(groupSize)")
 
@@ -161,7 +182,13 @@ public enum Quantization {
         return Int4AffineRow(packed: packed, scales: scales, biases: biases)
     }
 
-    public static func dequantizeInt4Affine(_ r: Int4AffineRow, n: Int) -> [Float] {
+    public static func dequantizeInt4Affine(
+        _ r: Int4AffineRow,
+        n: Int,
+        groupSize: Int = Quantization.groupSize
+    ) -> [Float] {
+        precondition(supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
         precondition(n == r.packed.count * 2)
         var out = [Float](repeating: 0, count: n)
         let nGroups = n / groupSize

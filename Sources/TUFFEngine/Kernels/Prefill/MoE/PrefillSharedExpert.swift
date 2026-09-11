@@ -4,10 +4,13 @@ import Metal
 final class PrefillSharedExpert {
     private let shared: SharedExpertRuntime
 
-    init(context: MetalContext, weightBits: Int = 8, siluActivation: Bool = false) throws {
+    init(context: MetalContext, weightBits: Int = 8,
+         siluActivation: Bool = false,
+         groupSize: Int = Quantization.groupSize) throws {
         self.shared = try SharedExpertRuntime(context: context,
                                               weightBits: weightBits,
-                                              siluActivation: siluActivation)
+                                              siluActivation: siluActivation,
+                                              groupSize: groupSize)
     }
 
     func encodeBlock(commandBuffer cb: MTLCommandBuffer,

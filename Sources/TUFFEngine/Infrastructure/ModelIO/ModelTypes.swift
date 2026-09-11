@@ -10,6 +10,28 @@ public enum ModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
     case gptOss = "gpt-oss"
     case minimaxM2 = "minimax-m2"
+    case qwen4Exp = "qwen4-exp"
+
+    /// Whether this family's image input runs Qwen's vision tower: 27 blocks
+    /// at hidden 1152, patch 16, spatial merge 2, and the `<|vision_start|>`
+    /// / `<|image_pad|>` / `<|vision_end|>` markers. Qwen 3.6 and Qwen3.8
+    /// Flash Next ship the same 333 tensors and the same token ids, and
+    /// differ only in the width the merger projects into — so the tower code
+    /// belongs behind one predicate rather than a growing list of families.
+    public var usesQwenVisionTower: Bool {
+        switch self {
+        case .qwen36, .qwen4Exp: true
+        case .gemma4, .gptOss, .minimaxM2: false
+        }
+    }
+
+    /// Whether the family accepts image input at all.
+    public var acceptsImageInput: Bool {
+        switch self {
+        case .gemma4, .qwen36, .qwen4Exp: true
+        case .gptOss, .minimaxM2: false
+        }
+    }
 }
 
 public enum ModelVariant: String, Sendable, Equatable {
@@ -21,6 +43,7 @@ public enum ModelVariant: String, Sendable, Equatable {
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
     case minimaxM27 = "minimax-m2.7"
+    case qwen38FlashNext = "qwen3.8-flash-next"
 
     static func legacyDefault(for family: ModelFamily) -> ModelVariant {
         switch family {
@@ -28,6 +51,7 @@ public enum ModelVariant: String, Sendable, Equatable {
         case .qwen36: return .qwen36_35B_A3B
         case .gptOss: return .gptOss_20B
         case .minimaxM2: return .minimaxM27
+        case .qwen4Exp: return .qwen38FlashNext
         }
     }
 }
@@ -60,20 +84,33 @@ public struct YaRNRopeConfig: Sendable, Equatable {
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
 /// without linear-attention layers.
 public struct LinearAttentionConfig: Sendable, Equatable {
+    /// Activation applied to the z projection in the gated output norm. Qwen
+    /// 3.6 uses the model's own `hidden_act`; Qwen4-Exp sets
+    /// `output_gate_type: sigmoid`, which is not the same function and not a
+    /// rescaling of it — silu(z) is z * sigmoid(z), so the gate carries the
+    /// magnitude of z as well as its sign.
+    public enum OutputGate: String, Sendable, Equatable {
+        case silu
+        case sigmoid
+    }
+
     public let numKHeads: Int
     public let numVHeads: Int
     public let keyHeadDim: Int
     public let valueHeadDim: Int
     public let convKernelSize: Int
+    public let outputGate: OutputGate
 
     public init(numKHeads: Int, numVHeads: Int,
                 keyHeadDim: Int, valueHeadDim: Int,
-                convKernelSize: Int) {
+                convKernelSize: Int,
+                outputGate: OutputGate = .silu) {
         self.numKHeads = numKHeads
         self.numVHeads = numVHeads
         self.keyHeadDim = keyHeadDim
         self.valueHeadDim = valueHeadDim
         self.convKernelSize = convKernelSize
+        self.outputGate = outputGate
     }
 
     public static let none = LinearAttentionConfig(
@@ -85,6 +122,115 @@ public struct LinearAttentionConfig: Sendable, Equatable {
     public var qkvDim: Int { 2 * numKHeads * keyHeadDim + numVHeads * valueHeadDim }
     /// Value dim, also the z-gate projection rows and out_proj columns.
     public var valueDim: Int { numVHeads * valueHeadDim }
+}
+
+/// Hyper-connection residual topology. `streamCount` residual streams run in
+/// parallel where other architectures carry one, and each block reads a
+/// low-rank mixture of them and writes back through a learned per-stream
+/// injection. Zeroed for architectures with an ordinary residual.
+///
+/// The streams replace the pre-norms too: a `qwen4_exp` layer has no
+/// `input_layernorm` or `post_attention_layernorm`, only the `hc_norm` inside
+/// each of its two hyper-connection modules, and a model-level
+/// `hyper_connection_mixer` collapses the streams before the LM head.
+public struct HyperConnectionConfig: Sendable, Equatable {
+    public let streamCount: Int
+    public let lowRank: Int
+
+    public init(streamCount: Int, lowRank: Int) {
+        self.streamCount = streamCount
+        self.lowRank = lowRank
+    }
+
+    public static let none = HyperConnectionConfig(streamCount: 0, lowRank: 0)
+
+    public var isEnabled: Bool { streamCount > 0 }
+    /// Width of the stacked residual streams, and of `hc_norm`.
+    public func stackedWidth(hiddenSize: Int) -> Int { streamCount * hiddenSize }
+}
+
+/// n-gram per-layer embedding table. One decoder layer looks up a rolling hash
+/// of the last `ngramSize` tokens in a table of `heads` independently-hashed
+/// slices, each roughly `vocabSizeBase` rows, and feeds the result through a
+/// depthwise convolution and key/value projections.
+///
+/// Unlike Gemma's per-layer embeddings this table is far too large to hold
+/// resident — 29.80 GiB in the pinned checkpoint, against 2.91 GiB for every
+/// other resident tensor combined — while a token touches only `heads` rows of
+/// it. Zeroed for architectures without one.
+public struct NgramEmbeddingConfig: Sendable, Equatable {
+    /// Decoder layer carrying the module. The pinned checkpoint declares
+    /// `ple_layer_ids: [2]` but emits its tensors under `layers.1`, and the
+    /// tensor names are what the loader resolves against.
+    public let layer: Int
+    public let ngramSize: Int
+    /// Independently-hashed slices of the table, concatenated to `embedDim`.
+    public let heads: Int
+    public let headsPerNgram: Int
+    /// Nominal rows per head. Each head's real vocabulary is the next value at
+    /// or above this that the checkpoint's `ngram_heads_vocab_sizes` records.
+    public let vocabSizeBase: Int
+    /// Files the table is split across.
+    public let shardCount: Int
+    public let embedDim: Int
+    public let convKernelSize: Int
+    /// The token that both pads a fresh sequence and bounds a segment. The
+    /// hash never reaches across it, so n-grams from one turn cannot mix with
+    /// the previous one's.
+    public let eosTokenID: Int32
+
+    public init(layer: Int, ngramSize: Int, heads: Int, headsPerNgram: Int,
+                vocabSizeBase: Int, shardCount: Int, embedDim: Int,
+                convKernelSize: Int, eosTokenID: Int32) {
+        self.layer = layer
+        self.ngramSize = ngramSize
+        self.heads = heads
+        self.headsPerNgram = headsPerNgram
+        self.vocabSizeBase = vocabSizeBase
+        self.shardCount = shardCount
+        self.embedDim = embedDim
+        self.convKernelSize = convKernelSize
+        self.eosTokenID = eosTokenID
+    }
+
+    public static let none = NgramEmbeddingConfig(
+        layer: -1, ngramSize: 0, heads: 0, headsPerNgram: 0,
+        vocabSizeBase: 0, shardCount: 0, embedDim: 0, convKernelSize: 0,
+        eosTokenID: 0)
+
+    public var isEnabled: Bool { shardCount > 0 }
+    /// Dimensions each head contributes to the concatenated embedding.
+    public var headDim: Int { heads > 0 ? embedDim / heads : 0 }
+}
+
+/// Sparse attention selection. Full-attention layers score keys through a
+/// narrow side projection and attend to only `budget` of them.
+///
+/// A context no longer than `budget` selects every position, so the indexer is
+/// an identity there and only changes results above it. Zeroed for
+/// architectures that attend densely.
+public struct AttentionIndexerConfig: Sendable, Equatable {
+    public let budget: Int
+    public let compressRatio: Int
+    public let headDim: Int
+    public let numHeads: Int
+    public let numKVHeads: Int
+
+    public init(budget: Int, compressRatio: Int, headDim: Int,
+                numHeads: Int, numKVHeads: Int) {
+        self.budget = budget
+        self.compressRatio = compressRatio
+        self.headDim = headDim
+        self.numHeads = numHeads
+        self.numKVHeads = numKVHeads
+    }
+
+    public static let none = AttentionIndexerConfig(
+        budget: 0, compressRatio: 0, headDim: 0, numHeads: 0, numKVHeads: 0)
+
+    public var isEnabled: Bool { budget > 0 }
+    /// Rows the fused index projection emits: query heads plus key heads.
+    public var projectionRows: Int { (numHeads + numKVHeads) * headDim }
 }
 
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
@@ -163,6 +309,19 @@ public struct ArchConfig: Sendable, Equatable {
     public let swigluLimit: Double
     /// Gated-DeltaNet dimensions for layers with mask value 2.
     public let linearAttention: LinearAttentionConfig
+    /// Multi-stream residual topology. `.none` means one residual stream and
+    /// the usual pre-norms.
+    public let hyperConnection: HyperConnectionConfig
+    /// n-gram per-layer embedding table. `.none` means no such table.
+    public let ngramEmbedding: NgramEmbeddingConfig
+    /// Sparse key selection on full-attention layers. `.none` means dense.
+    public let attentionIndexer: AttentionIndexerConfig
+    /// Affine group size of the INT4 weights: one scale and bias per this many
+    /// quantized values. 64 for every checkpoint until Qwen3.8 Flash Next,
+    /// whose 4-bit tensors are grouped at 32 because its n-gram PLE rows are
+    /// 160 values wide. INT8 tensors — the router and the shared-expert gate —
+    /// stay at 64 in every architecture, so this describes the INT4 path only.
+    public let int4GroupSize: Int
 
     public init(
         hiddenSize: Int,
@@ -203,7 +362,11 @@ public struct ArchConfig: Sendable, Equatable {
         attentionSinks: Bool = false,
         yarnRope: YaRNRopeConfig? = nil,
         swigluLimit: Double = 0,
-        linearAttention: LinearAttentionConfig = .none
+        linearAttention: LinearAttentionConfig = .none,
+        hyperConnection: HyperConnectionConfig = .none,
+        ngramEmbedding: NgramEmbeddingConfig = .none,
+        attentionIndexer: AttentionIndexerConfig = .none,
+        int4GroupSize: Int = Quantization.groupSize
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -244,6 +407,10 @@ public struct ArchConfig: Sendable, Equatable {
         self.yarnRope = yarnRope
         self.swigluLimit = swigluLimit
         self.linearAttention = linearAttention
+        self.hyperConnection = hyperConnection
+        self.ngramEmbedding = ngramEmbedding
+        self.attentionIndexer = attentionIndexer
+        self.int4GroupSize = int4GroupSize
     }
 
     /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
@@ -475,6 +642,84 @@ public struct ArchConfig: Sendable, Equatable {
         sharedExpertGated: false,
         ropeNeoxSubdim: true)
 
+    /// Qwen3.8 Flash Next, the `qwen4_exp` architecture, from the pinned MLX
+    /// 4-bit checkpoint.
+    ///
+    /// Its gated-DeltaNet, full-attention and mixture-of-experts blocks use the
+    /// same tensor contract as Qwen3.6 35B-A3B — `linear_attn.in_proj_{qkv,z,
+    /// a,b}`, per-head `q_norm`/`k_norm`, a gated `q_proj`, `mlp.gate`,
+    /// `mlp.shared_expert.*` and `mlp.switch_mlp.*` — at wider dimensions: 48
+    /// layers instead of 40, 48 linear value heads instead of 32, and 512
+    /// routed experts with 10 active instead of 256 with 8.
+    ///
+    /// Three mechanisms have no Qwen3.6 counterpart and no runtime support
+    /// yet, which is why the catalogue entry is gated on real-model
+    /// validation: `hyperConnection` replaces the single residual stream and
+    /// both pre-norms, `ngramEmbedding` adds a 29.80 GiB hashed table on layer
+    /// 1, and `attentionIndexer` makes full attention sparse above 2K context.
+    public static let qwen38FlashNext = ArchConfig(
+        hiddenSize: 2_560,
+        intermediateSize: 640,
+        moeIntermediateSize: 640,
+        numHeads: 24,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 256,
+        fullHeadDim: 256,
+        vocabSize: 248_320,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 48,
+        numExperts: 512,
+        topKExperts: 10,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.qwen4ExpLayerMask(count: 48, interval: 4),
+        hiddenActivation: "silu",
+        family: .qwen4Exp,
+        variant: .qwen38FlashNext,
+        attnOutputGate: true,
+        attentionScale: 0.0625,   // 256^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: true,
+        ropeNeoxSubdim: true,
+        linearAttention: LinearAttentionConfig(
+            numKHeads: 16, numVHeads: 48,
+            keyHeadDim: 128, valueHeadDim: 128,
+            convKernelSize: 4,
+            outputGate: .sigmoid),
+        hyperConnection: HyperConnectionConfig(streamCount: 4, lowRank: 320),
+        ngramEmbedding: NgramEmbeddingConfig(
+            layer: 1,
+            ngramSize: 3,
+            heads: 16,
+            headsPerNgram: 8,
+            vocabSizeBase: 20_000_000,
+            shardCount: 128,
+            embedDim: 2_560,
+            convKernelSize: 4,
+            eosTokenID: 248_044),
+        attentionIndexer: AttentionIndexerConfig(
+            budget: 2_048,
+            compressRatio: 4,
+            headDim: 128,
+            numHeads: 4,
+            numKVHeads: 1),
+        int4GroupSize: 32)
+
+    /// Linear-attention layers with full attention every `interval`-th layer,
+    /// counting from the end of the first group.
+    private static func qwen4ExpLayerMask(count: Int, interval: Int) -> [UInt8] {
+        var mask = [UInt8](repeating: 2, count: count)
+        for i in stride(from: interval - 1, to: count, by: interval) { mask[i] = 1 }
+        return mask
+    }
+
     private static func qwen36LayerMask() -> [UInt8] {
         // Layer kinds: 2 = gated-DeltaNet linear, 1 = full attention on every
         // 4th layer ((i + 1) % 4 == 0).
@@ -581,6 +826,7 @@ public struct ArchConfig: Sendable, Equatable {
         .gptOss_20B: .gptOss_20B,
         .gptOss_120B: .gptOss_120B,
         .minimaxM27: .minimaxM27,
+        .qwen38FlashNext: .qwen38FlashNext,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for
@@ -620,6 +866,22 @@ public struct ArchConfig: Sendable, Equatable {
             shapes.append((m: hiddenSizePerLayerInput, n: hiddenSize))
             shapes.append((m: hiddenSize, n: hiddenSizePerLayerInput))
         }
+        if hyperConnection.isEnabled {
+            let stacked = hiddenSize * hyperConnection.streamCount
+            shapes.append((m: hyperConnection.lowRank, n: stacked))
+            shapes.append((m: stacked, n: hyperConnection.lowRank))
+            shapes.append((m: hyperConnection.streamCount, n: stacked))
+            // This architecture's final mixer cannot use the fused RMSNorm
+            // head, so its separate vocabulary projection needs a variant too.
+            shapes.append((m: vocabSize, n: hiddenSize))
+            if ngramEmbedding.isEnabled {
+                shapes.append((m: stacked, n: ngramEmbedding.embedDim))
+                shapes.append((m: hiddenSize, n: ngramEmbedding.embedDim))
+            }
+        }
+        if attentionIndexer.isEnabled {
+            shapes.append((m: attentionIndexer.projectionRows, n: hiddenSize))
+        }
         return shapes
     }
 
@@ -641,7 +903,18 @@ public struct ArchConfig: Sendable, Equatable {
     public var hasPerLayerInputs: Bool { hiddenSizePerLayerInput > 0 }
     public var hasSharedExpert: Bool {
         feedForwardKind == .dense || family == .gemma4 || family == .qwen36
+            || family == .qwen4Exp
     }
+    /// Whether norm weights are stored centered at zero and applied as
+    /// `1 + w`, rather than centered at one and applied as `w`.
+    ///
+    /// True for Qwen4-Exp and nothing else. Every norm in that architecture
+    /// takes this form except the gated DeltaNet output norm, which is
+    /// centered at one like everyone's — so the flag says how a *weight* is
+    /// stored, and each call site still has to know which of the two it is
+    /// looking at.
+    public var normWeightsCenteredAtZero: Bool { family == .qwen4Exp }
+
     public var usesProjectionWideQKNorm: Bool { family == .minimaxM2 }
     public var usesSigmoidCorrectionRouter: Bool { family == .minimaxM2 }
 

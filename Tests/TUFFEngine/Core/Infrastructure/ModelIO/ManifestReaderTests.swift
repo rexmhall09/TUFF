@@ -93,15 +93,69 @@ import Darwin
         return (dir, toy)
     }
 
+    /// Arch dictionary for a `qwen4_exp` manifest, including the three nested
+    /// blocks that only this family emits.
+    static func qwen4ExpArchOverrides(
+        config: ArchConfig = .qwen38FlashNext
+    ) -> [String: Any] {
+        let la = config.linearAttention
+        let hc = config.hyperConnection
+        let ng = config.ngramEmbedding
+        let ix = config.attentionIndexer
+        return [
+            "family": config.family.rawValue,
+            "variant": config.variant.rawValue,
+            "attnOutputGate": config.attnOutputGate,
+            "attentionScale": config.attentionScale,
+            "embeddingScaledBySqrtHidden": config.embeddingScaledBySqrtHidden,
+            "routerScaled": config.routerScaled,
+            "ffnSandwichNorms": config.ffnSandwichNorms,
+            "sharedExpertGated": config.sharedExpertGated,
+            "ropeNeoxSubdim": config.ropeNeoxSubdim,
+            "linearNumKHeads": la.numKHeads,
+            "linearNumVHeads": la.numVHeads,
+            "linearKeyHeadDim": la.keyHeadDim,
+            "linearValueHeadDim": la.valueHeadDim,
+            "linearConvKernelSize": la.convKernelSize,
+            "hyperConnection": [
+                "streamCount": hc.streamCount,
+                "lowRank": hc.lowRank,
+            ],
+            "ngramEmbedding": [
+                "layer": ng.layer,
+                "ngramSize": ng.ngramSize,
+                "heads": ng.heads,
+                "headsPerNgram": ng.headsPerNgram,
+                "vocabSizeBase": ng.vocabSizeBase,
+                "shardCount": ng.shardCount,
+                "embedDim": ng.embedDim,
+                "convKernelSize": ng.convKernelSize,
+                "eosTokenID": Int(ng.eosTokenID),
+            ],
+            "attentionIndexer": [
+                "budget": ix.budget,
+                "compressRatio": ix.compressRatio,
+                "headDim": ix.headDim,
+                "numHeads": ix.numHeads,
+                "numKVHeads": ix.numKVHeads,
+            ],
+        ]
+    }
+
+    /// `int4GroupSize` is separate because the group size follows the bit
+    /// width: Qwen3.8 Flash Next groups its 4-bit tensors at 32 while its
+    /// 8-bit router stays at 64, and a fixture that used one number for both
+    /// would describe a checkpoint that cannot exist.
     static func quant(sharedExpertBits: Int = 4,
-                      routerBits: Int = 8) -> [String: Any] {
+                      routerBits: Int = 8,
+                      int4GroupSize: Int = Quantization.groupSize) -> [String: Any] {
         func slot(_ bits: Int) -> [String: Any] {
             [
                 "weightBits": bits,
                 "scheme": "affine",
                 "scaleType": "bf16",
                 "biasType": "bf16",
-                "groupSize": Quantization.groupSize,
+                "groupSize": bits == 4 ? int4GroupSize : Quantization.groupSize,
             ]
         }
         return [
@@ -134,6 +188,47 @@ import Darwin
                 "groupSize": Quantization.mxfp4GroupSize,
             ],
         ]
+    }
+
+    @Test func qwen4ExpManifestRoundTripsItsThreeNewBlocks() throws {
+        let (dir, config) = try Self.writeToyManifest(
+            ["quant": Self.quant(sharedExpertBits: 8, int4GroupSize: 32)],
+            archOverrides: Self.qwen4ExpArchOverrides(),
+            config: .qwen38FlashNext)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
+        #expect(manifest.arch.hyperConnection?.streamCount == 4)
+        #expect(manifest.arch.ngramEmbedding?.shardCount == 128)
+        #expect(manifest.arch.attentionIndexer?.budget == 2_048)
+    }
+
+    /// The blocks are validated field by field, not merely carried.
+    @Test func qwen4ExpManifestRejectsADisagreeingBlock() throws {
+        var overrides = Self.qwen4ExpArchOverrides()
+        overrides["hyperConnection"] = ["streamCount": 2, "lowRank": 320]
+        let (dir, config) = try Self.writeToyManifest(
+            ["quant": Self.quant(sharedExpertBits: 8, int4GroupSize: 32)],
+            archOverrides: overrides,
+            config: .qwen38FlashNext)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(throws: ModelError.self) {
+            try ManifestReader.load(directoryURL: dir, expecting: config)
+        }
+    }
+
+    /// A manifest that drops the blocks entirely is describing a model with an
+    /// ordinary residual, which this architecture is not.
+    @Test func qwen4ExpManifestRejectsMissingBlocks() throws {
+        var overrides = Self.qwen4ExpArchOverrides()
+        overrides.removeValue(forKey: "ngramEmbedding")
+        let (dir, config) = try Self.writeToyManifest(
+            ["quant": Self.quant(sharedExpertBits: 8, int4GroupSize: 32)],
+            archOverrides: overrides,
+            config: .qwen38FlashNext)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(throws: ModelError.self) {
+            try ManifestReader.load(directoryURL: dir, expecting: config)
+        }
     }
 
     @Test func loadsValidManifest() throws {

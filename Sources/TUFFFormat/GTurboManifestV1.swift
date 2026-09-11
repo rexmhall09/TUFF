@@ -10,6 +10,63 @@ package struct GTurboManifestFileV1: Codable, Equatable, Sendable {
     }
 }
 
+package struct GTurboManifestHyperConnectionV1: Codable, Equatable, Sendable {
+    package let streamCount: Int
+    package let lowRank: Int
+
+    package init(streamCount: Int, lowRank: Int) {
+        self.streamCount = streamCount
+        self.lowRank = lowRank
+    }
+}
+
+package struct GTurboManifestNgramEmbeddingV1: Codable, Equatable, Sendable {
+    package let layer: Int
+    package let ngramSize: Int
+    package let heads: Int
+    package let headsPerNgram: Int
+    package let vocabSizeBase: Int
+    package let shardCount: Int
+    package let embedDim: Int
+    package let convKernelSize: Int
+    /// Optional: manifests written before this field existed omit it, and the
+    /// reader falls back to the architecture's own value. It describes
+    /// tokenizer semantics rather than the table's layout, and cannot vary for
+    /// a given variant.
+    package let eosTokenID: Int?
+
+    package init(layer: Int, ngramSize: Int, heads: Int, headsPerNgram: Int,
+                 vocabSizeBase: Int, shardCount: Int, embedDim: Int,
+                 convKernelSize: Int, eosTokenID: Int? = nil) {
+        self.layer = layer
+        self.ngramSize = ngramSize
+        self.heads = heads
+        self.headsPerNgram = headsPerNgram
+        self.vocabSizeBase = vocabSizeBase
+        self.shardCount = shardCount
+        self.embedDim = embedDim
+        self.convKernelSize = convKernelSize
+        self.eosTokenID = eosTokenID
+    }
+}
+
+package struct GTurboManifestAttentionIndexerV1: Codable, Equatable, Sendable {
+    package let budget: Int
+    package let compressRatio: Int
+    package let headDim: Int
+    package let numHeads: Int
+    package let numKVHeads: Int
+
+    package init(budget: Int, compressRatio: Int, headDim: Int,
+                 numHeads: Int, numKVHeads: Int) {
+        self.budget = budget
+        self.compressRatio = compressRatio
+        self.headDim = headDim
+        self.numHeads = numHeads
+        self.numKVHeads = numKVHeads
+    }
+}
+
 package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let hiddenSize: Int
     package let ffnIntermediate: Int
@@ -56,6 +113,11 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let linearKeyHeadDim: Int?
     package let linearValueHeadDim: Int?
     package let linearConvKernelSize: Int?
+    /// Absent for every architecture with one residual stream, no n-gram
+    /// table, or dense attention — which is all of them but `qwen4_exp`.
+    package let hyperConnection: GTurboManifestHyperConnectionV1?
+    package let ngramEmbedding: GTurboManifestNgramEmbeddingV1?
+    package let attentionIndexer: GTurboManifestAttentionIndexerV1?
 
     package init(hiddenSize: Int, ffnIntermediate: Int, moeIntermediateSize: Int,
                  numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
@@ -83,7 +145,10 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  linearNumVHeads: Int? = nil,
                  linearKeyHeadDim: Int? = nil,
                  linearValueHeadDim: Int? = nil,
-                 linearConvKernelSize: Int? = nil) {
+                 linearConvKernelSize: Int? = nil,
+                 hyperConnection: GTurboManifestHyperConnectionV1? = nil,
+                 ngramEmbedding: GTurboManifestNgramEmbeddingV1? = nil,
+                 attentionIndexer: GTurboManifestAttentionIndexerV1? = nil) {
         self.hiddenSize = hiddenSize
         self.ffnIntermediate = ffnIntermediate
         self.moeIntermediateSize = moeIntermediateSize
@@ -124,6 +189,9 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.linearKeyHeadDim = linearKeyHeadDim
         self.linearValueHeadDim = linearValueHeadDim
         self.linearConvKernelSize = linearConvKernelSize
+        self.hyperConnection = hyperConnection
+        self.ngramEmbedding = ngramEmbedding
+        self.attentionIndexer = attentionIndexer
     }
 }
 
@@ -164,6 +232,46 @@ package struct GTurboManifestQuantV1: Codable, Equatable, Sendable {
     }
 }
 
+/// Where one n-gram shard's three regions sit inside the table file, and the
+/// span of global row ids it holds.
+package struct GTurboManifestNgramShardV1: Codable, Equatable, Sendable {
+    package let rowStart: UInt64
+    package let rowCount: UInt64
+    package let weightOffset: UInt64
+    package let scaleOffset: UInt64
+    package let biasOffset: UInt64
+
+    package init(rowStart: UInt64, rowCount: UInt64, weightOffset: UInt64,
+                 scaleOffset: UInt64, biasOffset: UInt64) {
+        self.rowStart = rowStart
+        self.rowCount = rowCount
+        self.weightOffset = weightOffset
+        self.scaleOffset = scaleOffset
+        self.biasOffset = biasOffset
+    }
+}
+
+/// Layout of the n-gram PLE table file. Absent for every architecture without
+/// one, which keeps existing manifests byte-identical.
+package struct GTurboManifestNgramTableV1: Codable, Equatable, Sendable {
+    package let file: String
+    package let layerIndex: Int
+    package let rowWidth: Int
+    package let groupSize: Int
+    package let rowCount: UInt64
+    package let shards: [GTurboManifestNgramShardV1]
+
+    package init(file: String, layerIndex: Int, rowWidth: Int, groupSize: Int,
+                 rowCount: UInt64, shards: [GTurboManifestNgramShardV1]) {
+        self.file = file
+        self.layerIndex = layerIndex
+        self.rowWidth = rowWidth
+        self.groupSize = groupSize
+        self.rowCount = rowCount
+        self.shards = shards
+    }
+}
+
 package struct GTurboManifestV1: Codable, Equatable, Sendable {
     package let magic: String
     package let versionMajor: Int
@@ -178,6 +286,7 @@ package struct GTurboManifestV1: Codable, Equatable, Sendable {
     package let numLayers: Int
     package let expertStride: UInt64
     package let bitWidthOverridesHonored: Int?
+    package let ngramTable: GTurboManifestNgramTableV1?
 
     package init(magic: String = GTurboFormatV1.magic,
                  versionMajor: Int = GTurboFormatV1.versionMajor,
@@ -187,7 +296,8 @@ package struct GTurboManifestV1: Codable, Equatable, Sendable {
                  quant: GTurboManifestQuantV1?,
                  files: [String: GTurboManifestFileV1],
                  expertsPerLayer: Int, numLayers: Int, expertStride: UInt64,
-                 bitWidthOverridesHonored: Int?) {
+                 bitWidthOverridesHonored: Int?,
+                 ngramTable: GTurboManifestNgramTableV1? = nil) {
         self.magic = magic
         self.versionMajor = versionMajor
         self.versionMinor = versionMinor
@@ -201,6 +311,7 @@ package struct GTurboManifestV1: Codable, Equatable, Sendable {
         self.numLayers = numLayers
         self.expertStride = expertStride
         self.bitWidthOverridesHonored = bitWidthOverridesHonored
+        self.ngramTable = ngramTable
     }
 }
 

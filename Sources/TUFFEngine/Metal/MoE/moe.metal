@@ -1,8 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-constant constexpr uint kMoEGroupSize = 64;
-constant constexpr uint kMaxStreamedExperts = 8;
+// Group size and streamed-expert count live in quant_group.metal.
 constant constexpr float kGeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kGeluCubicCoeff = 0.044715f;
 
@@ -231,7 +230,8 @@ static inline void router_gemv_gemma4_body(
     const uint e = tg_idx * rows_per_tg + sg_idx;
     if (e >= NE) return;
 
-    const uint n_groups = DD / kMoEGroupSize;
+    const uint G = quant_group_size();
+    const uint n_groups = DD / G;
     device const uint8_t* W_row = W + uint(e) * DD;
     device const bfloat* s_row = scales + uint(e) * n_groups;
     device const bfloat* b_row = biases + uint(e) * n_groups;
@@ -240,7 +240,8 @@ static inline void router_gemv_gemma4_body(
     for (uint g = 0; g < n_groups; ++g) {
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
-        const uint idx = g * kMoEGroupSize + lane * 2u;
+        if (lane >= G / 2u) continue;
+        const uint idx = g * G + lane * 2u;
         const float q0 = float(uint(W_row[idx]));
         const float q1 = float(uint(W_row[idx + 1u]));
         const float x0 = float(hidden[idx]) * float(effective_scale[idx]);
@@ -279,25 +280,28 @@ kernel void router_topk_select_k8(
 ) {
     if (tid != 0) return;
     const uint NE = router_fc_num_experts(num_experts);
-    uint top_idx[8];
-    float top_score[8];
-    for (uint i = 0; i < 8; ++i) {
+    // K is specialized, so the eight-expert path keeps the constant-folded
+    // bounds it had when eight was the only possibility.
+    const uint K = streamed_expert_count();
+    uint top_idx[kMaxStreamedExperts];
+    float top_score[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
         top_idx[i] = 0u;
         top_score[i] = -INFINITY;
     }
 
     for (uint e = 0; e < NE; ++e) {
         const float s = logits[e];
-        if (s <= top_score[7]) continue;
-        uint pos = 8u;
-        for (uint i = 0; i < 8; ++i) {
+        if (s <= top_score[K - 1u]) continue;
+        uint pos = K;
+        for (uint i = 0; i < K; ++i) {
             if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {
                 pos = i;
                 break;
             }
         }
-        if (pos >= 8u) continue;
-        for (uint i = 7; i > pos; --i) {
+        if (pos >= K) continue;
+        for (uint i = K - 1u; i > pos; --i) {
             top_idx[i] = top_idx[i - 1];
             top_score[i] = top_score[i - 1];
         }
@@ -307,13 +311,13 @@ kernel void router_topk_select_k8(
 
     const float max_s = top_score[0];
     float sum_exp = 0.0f;
-    float exps[8];
-    for (uint i = 0; i < 8; ++i) {
+    float exps[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
         const float ex = fast::exp(top_score[i] - max_s);
         exps[i] = ex;
         sum_exp += ex;
     }
-    for (uint i = 0; i < 8; ++i) {
+    for (uint i = 0; i < K; ++i) {
         const uint expert_idx = top_idx[i];
         const float weight = exps[i] / sum_exp;
         out_indices[i] = expert_idx;
@@ -382,18 +386,23 @@ static inline float moe_int4_gemv_row_simd_dev_vec(
     uint N,
     uint lane
 ) {
-    const uint n_groups = N / kMoEGroupSize;
+    const uint G = quant_group_size();
+    const uint n_groups = N / G;
     const uint row_bytes = N / 2;
     device const uint8_t* W_row = W + uint(row) * row_bytes;
     device const bfloat* s_row = S + uint(row) * n_groups;
     device const bfloat* b_row = B + uint(row) * n_groups;
 
     float acc = 0.0f;
-    const uint full_blocks = n_groups / 4;
+    // A 128-byte block spans 256/G affine groups and G/8 lanes cover one of
+    // them; see dequant_int4.metal. At G = 64 this is the original 4 and 8.
+    const uint groups_per_block = 256u / G;
+    const uint lane_shift = (G == 64u) ? 3u : ((G == 32u) ? 2u : 1u);
+    const uint full_blocks = n_groups / groups_per_block;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
         const uint w4 = *((device const uint*)(W_row + byte_base));
-        const uint g = blk * 4u + (lane >> 3);
+        const uint g = blk * groups_per_block + (lane >> lane_shift);
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
@@ -416,12 +425,13 @@ static inline float moe_int4_gemv_row_simd_dev_vec(
         acc = fma(s, dot, acc);
         acc = fma(b, sum, acc);
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    for (uint g = full_blocks * groups_per_block; g < n_groups; ++g) {
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kMoEGroupSize / 2) + lane];
-        const float x0 = float(x[g * kMoEGroupSize + lane * 2u]);
-        const float x1 = float(x[g * kMoEGroupSize + lane * 2u + 1u]);
+        if (lane >= G / 2u) continue;
+        const uint8_t byte = W_row[g * (G / 2u) + lane];
+        const float x0 = float(x[g * G + lane * 2u]);
+        const float x1 = float(x[g * G + lane * 2u + 1u]);
         float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
         dot = fma(float(uint(byte >> 4)), x1, dot);
         acc = fma(s, dot, acc);
@@ -444,7 +454,8 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
     uint N,
     uint lane
 ) {
-    const uint n_groups = N / kMoEGroupSize;
+    const uint G = quant_group_size();
+    const uint n_groups = N / G;
     const uint row_bytes = N / 2;
     device const uint8_t* gW_row = gateW + uint(row) * row_bytes;
     device const uint8_t* uW_row = upW + uint(row) * row_bytes;
@@ -455,14 +466,18 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
 
     float g_acc = 0.0f;
     float u_acc = 0.0f;
-    const uint full_blocks = n_groups / 4;
+    // A 128-byte block spans 256/G affine groups and G/8 lanes cover one of
+    // them; see dequant_int4.metal. At G = 64 this is the original 4 and 8.
+    const uint groups_per_block = 256u / G;
+    const uint lane_shift = (G == 64u) ? 3u : ((G == 32u) ? 2u : 1u);
+    const uint full_blocks = n_groups / groups_per_block;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
         device const ushort* gp = (device const ushort*)(gW_row + byte_base);
         device const ushort* up = (device const ushort*)(uW_row + byte_base);
         const uint gw4 = uint(gp[0]) | (uint(gp[1]) << 16);
         const uint uw4 = uint(up[0]) | (uint(up[1]) << 16);
-        const uint g = blk * 4u + (lane >> 3);
+        const uint g = blk * groups_per_block + (lane >> lane_shift);
         const float gs = float(gS_row[g]);
         const float gb = float(gB_row[g]);
         const float us = float(uS_row[g]);
@@ -501,15 +516,16 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
         u_acc = fma(us, u_dot, u_acc);
         u_acc = fma(ub, sum, u_acc);
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    for (uint g = full_blocks * groups_per_block; g < n_groups; ++g) {
         const float gs = float(gS_row[g]);
         const float gb = float(gB_row[g]);
         const float us = float(uS_row[g]);
         const float ub = float(uB_row[g]);
-        const uint8_t gbv = gW_row[g * (kMoEGroupSize / 2) + lane];
-        const uint8_t ubv = uW_row[g * (kMoEGroupSize / 2) + lane];
-        const float x0 = float(x[g * kMoEGroupSize + lane * 2u]);
-        const float x1 = float(x[g * kMoEGroupSize + lane * 2u + 1u]);
+        if (lane >= G / 2u) continue;
+        const uint8_t gbv = gW_row[g * (G / 2u) + lane];
+        const uint8_t ubv = uW_row[g * (G / 2u) + lane];
+        const float x0 = float(x[g * G + lane * 2u]);
+        const float x1 = float(x[g * G + lane * 2u + 1u]);
         const float sum = x0 + x1;
         float g_dot = fma(float(uint(gbv & 0x0Fu)), x0, 0.0f);
         g_dot = fma(float(uint(gbv >> 4)), x1, g_dot);
@@ -643,7 +659,7 @@ kernel void moe_phase2_down_reduce_k8(
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    threadgroup float partial[8];
+    threadgroup float partial[kMaxStreamedExperts];
     const uint DD = moe_fc_d(D);
     const uint FF = moe_fc_f(F);
     if (d >= DD) return;
@@ -661,9 +677,12 @@ kernel void moe_phase2_down_reduce_k8(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (sg_idx == 0 && lane == 0) {
+        // One partial per routed expert. Unrolled to eight while eight was the
+        // only count; Qwen3.8 Flash Next routes ten, and the missing two would
+        // have been dropped silently rather than caught.
         float acc = float(residual[d]);
-        acc += partial[0]; acc += partial[1]; acc += partial[2]; acc += partial[3];
-        acc += partial[4]; acc += partial[5]; acc += partial[6]; acc += partial[7];
+        const uint experts = streamed_expert_count();
+        for (uint e = 0; e < experts; ++e) { acc += partial[e]; }
         y[d] = half(acc);
     }
 }

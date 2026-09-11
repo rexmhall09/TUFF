@@ -12,7 +12,7 @@ using namespace metal;
 //   conv_out  = silu(causal_depthwise_conv(mixed))    gdn_conv_mix_*
 //   q, k      = per-head no-weight RMS norm + scale   gdn_qk_norm_*
 //   y, S      = gated delta rule recurrence           gdn_delta_*
-//   out       = rmsnorm(y) * silu(z)                  gdn_gated_norm_*
+//   out       = rmsnorm(y) * gate(z)                  gdn_gated_norm_*
 //   out_proj(out)                                     (existing INT4 GEMV)
 //
 // The recurrence follows the mlx-vlm reference (gated_delta.py): per value
@@ -460,9 +460,11 @@ kernel void gdn_delta_step_prefill(
 }
 
 // ----------------------------------------------------------------------------
-// Gated output norm: out = rmsnorm(y; weight, eps) * silu(z), per value head.
+// Gated output norm: out = rmsnorm(y; weight, eps) * gate(z), per value head,
+// where `gate` is silu or sigmoid according to `gateKind`. Qwen 3.6 gates with
+// silu; Qwen4-Exp's `output_gate_type` is sigmoid.
 // One threadgroup per (head, row), 128 threads. Norm statistics span one
-// head's Dv elements; silu/product in FP32 (matches the reference's
+// head's Dv elements; gate/product in FP32 (matches the reference's
 // _precise_swiglu).
 // ----------------------------------------------------------------------------
 kernel void gdn_gated_norm(
@@ -472,6 +474,7 @@ kernel void gdn_gated_norm(
     device half*         out      [[buffer(3)]],   // [T, Hv * Dv]
     constant uint&       vHeads   [[buffer(4)]],
     constant uint&       valueDim [[buffer(5)]],
+    constant uint&       gateKind [[buffer(6)]],   // 0 = silu, 1 = sigmoid
     uint2 tg  [[threadgroup_position_in_grid]],
     uint2 tpos [[thread_position_in_threadgroup]],
     uint  simd_lane [[thread_index_in_simdgroup]],
@@ -506,7 +509,9 @@ kernel void gdn_gated_norm(
 
     for (uint i = tid; i < Dv; i += 128u) {
         const float normed = float(y[base + i]) * invRms * float(weight[i]);
-        const float gate = gdn_silu(float(z[base + i]));
+        const float zv = float(z[base + i]);
+        const float gate = (gateKind == 1u) ? (1.0f / (1.0f + exp(-zv)))
+                                            : gdn_silu(zv);
         out[base + i] = half(normed * gate);
     }
 }

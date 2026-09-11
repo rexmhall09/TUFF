@@ -147,6 +147,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
 
     public static let minimaxM27 = AppModelInstallDescriptor(
         catalog: TUFFModelCatalog.minimaxM27)
+    public static let qwen38FlashNext = AppModelInstallDescriptor(
+        catalog: TUFFModelCatalog.qwen38FlashNext)
 
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
@@ -192,7 +194,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public var chatDialect: ChatDialect {
         switch family {
         case .gemma4: .gemma
-        case .qwen36: .chatml
+        case .qwen36, .qwen4Exp: .chatml
         case .gptOss: .harmony
         case .minimaxM2: .minimax
         }
@@ -363,6 +365,9 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     public static let qwen36VisionCompanion = AppModelInstallDescriptor(
         addon: TUFFModelCatalog.qwen36_35B_A3B.addons[0])
 
+    public static let qwen38FlashNextVisionCompanion = AppModelInstallDescriptor(
+        addon: TUFFModelCatalog.qwen38FlashNext.addons[0])
+
     /// Family-only routing, for descriptors that match no catalog row. `nil`
     /// for a family that ships no image pack at all.
     ///
@@ -377,6 +382,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case .qwen36: return .qwen36VisionCompanion
         case .gptOss: return nil
         case .minimaxM2: return nil
+        // Flash Next's tower is Qwen3.6's, but its merger projects into a
+        // wider residual, so the two packs are not interchangeable and each
+        // family routes to its own.
+        case .qwen4Exp: return .qwen38FlashNextVisionCompanion
         }
     }
 

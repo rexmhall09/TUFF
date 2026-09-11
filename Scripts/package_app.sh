@@ -74,6 +74,25 @@ mkdir -p "$signed_binaries"
 for name in "${required_binaries[@]}"; do
   install -m 0755 "$binary_directory/$name" "$signed_binaries/$name"
 done
+
+# Drop local symbols before signing. Six executables each link the whole
+# engine statically, and their symbol tables were more than half the bundle:
+# 80 MB of binaries became 42 MB. `-x` keeps external symbols, so dynamic
+# lookup and Sparkle's framework linkage are untouched; what is lost is
+# function names in a crash report, which an ad-hoc-signed build has no
+# symbol server for anyway. Stripping must happen before codesign — doing it
+# after invalidates the signature.
+# Keep the unstripped copies next to the archive. Symbolicating a crash from
+# a shipped build needs a binary whose UUID matches, and `.build` is rebuilt
+# constantly — the first crash report after stripping was unreadable until the
+# matching binary turned out to still be lying around by luck.
+symbols_directory="$output_directory/TUFF-v${version}-symbols"
+rm -rf "$symbols_directory"
+mkdir -p "$symbols_directory"
+for name in "${required_binaries[@]}"; do
+  install -m 0644 "$signed_binaries/$name" "$symbols_directory/$name"
+  strip -x "$signed_binaries/$name"
+done
 if ! otool -l "$signed_binaries/TUFF" \
   | grep -Fq '@executable_path/../Frameworks'; then
   install_name_tool -add_rpath '@executable_path/../Frameworks' \
@@ -100,6 +119,28 @@ done
 for name in "${required_bundles[@]}"; do
   ditto "$binary_directory/$name" "$app/Contents/Resources/$name"
 done
+
+# SwiftMath ships twelve math fonts at ~7 MB; the renderer never sets
+# `MathImage.font`, so it only ever registers the default. Registration is by
+# name and on demand — BundleManager never enumerates the directory — so the
+# rest are dead weight. Guarded rather than assumed: if the font the renderer
+# actually uses is missing, packaging stops instead of shipping an app that
+# renders no math at all.
+math_fonts="$app/Contents/Resources/SwiftMath_SwiftMath.bundle/mathFonts.bundle"
+math_font_kept="latinmodern-math"
+if [[ -d "$math_fonts" ]]; then
+  if [[ ! -s "$math_fonts/$math_font_kept.otf" \
+     || ! -s "$math_fonts/$math_font_kept.plist" ]]; then
+    echo "SwiftMath is missing $math_font_kept; refusing to trim" >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' font; do
+    base="$(basename "$font")"
+    base="${base%.*}"
+    [[ "$base" == "$math_font_kept" ]] && continue
+    rm -f "$math_fonts/$base.otf" "$math_fonts/$base.plist"
+  done < <(find "$math_fonts" -name '*.otf' -print0)
+fi
 for name in "${required_frameworks[@]}"; do
   ditto "$binary_directory/$name" "$app/Contents/Frameworks/$name"
 done

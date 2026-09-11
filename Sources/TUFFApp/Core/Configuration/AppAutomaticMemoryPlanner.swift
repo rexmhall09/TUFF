@@ -85,24 +85,17 @@ public enum AppAutomaticMemoryPlanner {
             slots = catalog.runtimeDefaults.expertCacheSlots
         }
 
-        // Context ceiling for this profile, expressed in tokens.
-        let contextCeiling = profile.contextGrowthLimit.map {
-            qualifiedContext * $0
-        } ?? Int.max
-        let contextOptions = AppContextLengthOption.allCases
-            .map(\.tokens)
-            .filter { $0 <= contextCeiling }
-            .sorted()
+        let contextOptions = AppContextLengthOption.options(for: descriptor)
+            .map(\.tokens).sorted()
 
-        // Longest context this profile allows that still fits. Never drop below
-        // the qualified default: that is the length the checkpoint was
-        // validated at, and hardware eligibility — not Auto — is the gate on a
-        // model this Mac cannot host at all.
-        var context = qualifiedContext
-        for candidate in contextOptions where candidate > context {
-            guard fits(context: candidate, slots: slots) else { break }
-            context = candidate
-        }
+        // Find what this checkpoint can afford on this Mac, then space the
+        // profiles across that capacity. A 2K qualification must not trap
+        // Speed/Balanced at 2K/4K on machines with gigabytes left for KV.
+        let affordable = contextOptions.last {
+            fits(context: $0, slots: slots)
+        } ?? qualifiedContext
+        let target = max(qualifiedContext, affordable / profile.contextCapacityDivisor)
+        let context = contextOptions.last { $0 <= target } ?? qualifiedContext
 
         return AppAutomaticMemoryPlan(
             profile: profile,

@@ -50,6 +50,34 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let linearKeyHeadDim: Int?
     public let linearValueHeadDim: Int?
     public let linearConvKernelSize: Int?
+    public let hyperConnection: ManifestHyperConnection?
+    public let ngramEmbedding: ManifestNgramEmbedding?
+    public let attentionIndexer: ManifestAttentionIndexer?
+}
+
+public struct ManifestHyperConnection: Decodable, Equatable, Sendable {
+    public let streamCount: Int
+    public let lowRank: Int
+}
+
+public struct ManifestNgramEmbedding: Decodable, Equatable, Sendable {
+    public let layer: Int
+    public let ngramSize: Int
+    public let heads: Int
+    public let headsPerNgram: Int
+    public let vocabSizeBase: Int
+    public let shardCount: Int
+    public let embedDim: Int
+    public let convKernelSize: Int
+    public let eosTokenID: Int?
+}
+
+public struct ManifestAttentionIndexer: Decodable, Equatable, Sendable {
+    public let budget: Int
+    public let compressRatio: Int
+    public let headDim: Int
+    public let numHeads: Int
+    public let numKVHeads: Int
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -60,12 +88,47 @@ public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
     public let groupSize: Int
 }
 
+public extension ManifestQuantSlot {
+    /// The group size the runtime actually decodes this slot at.
+    ///
+    /// The INT8 kernels take no group-size parameter — they are compiled at
+    /// 64 — so an 8-bit slot is decoded at 64 whatever the manifest records.
+    /// This matters because a checkpoint can mix the two: Qwen3.8 Flash Next
+    /// groups its 4-bit tensors at 32 while its 8-bit router stays at 64, and
+    /// a manifest that recorded one base group size for both would otherwise
+    /// have the loader expecting scale regions of the wrong size.
+    var effectiveGroupSize: Int {
+        weightBits == 8 ? Quantization.groupSize : groupSize
+    }
+}
+
 public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let embedding: ManifestQuantSlot
     public let attention: ManifestQuantSlot
     public let router: ManifestQuantSlot
     public let sharedExpert: ManifestQuantSlot
     public let routedExpert: ManifestQuantSlot
+}
+
+/// Where one n-gram shard's three regions sit in the table file, and the span
+/// of global rows it holds.
+public struct ManifestNgramShard: Decodable, Equatable, Sendable {
+    public let rowStart: UInt64
+    public let rowCount: UInt64
+    public let weightOffset: UInt64
+    public let scaleOffset: UInt64
+    public let biasOffset: UInt64
+}
+
+/// Layout of the n-gram PLE table file. Absent for every architecture without
+/// one, which is all of them but `qwen4_exp`.
+public struct ManifestNgramTable: Decodable, Equatable, Sendable {
+    public let file: String
+    public let layerIndex: Int
+    public let rowWidth: Int
+    public let groupSize: Int
+    public let rowCount: UInt64
+    public let shards: [ManifestNgramShard]
 }
 
 public struct Manifest: Decodable, Equatable, Sendable {
@@ -81,6 +144,7 @@ public struct Manifest: Decodable, Equatable, Sendable {
     public let expertsPerLayer: Int
     public let numLayers: Int
     public let expertStride: UInt64
+    public let ngramTable: ManifestNgramTable?
 }
 
 public enum ManifestReader {
@@ -151,7 +215,9 @@ public enum ManifestReader {
         try validateArch(m.arch, expected: expected)
         if let quant = m.quant {
             try validateQuant(
-                quant, mxfp4Weights: m.flags["mxfp4Weights"] == true)
+                quant,
+                mxfp4Weights: m.flags["mxfp4Weights"] == true,
+                int4GroupSize: expected.int4GroupSize)
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
         }
@@ -174,9 +240,14 @@ public enum ManifestReader {
         return false
     }
 
+    /// `int4GroupSize` is the architecture's, not a constant: Qwen3.8 Flash
+    /// Next's 4-bit tensors are grouped at 32. Its 8-bit router and
+    /// shared-expert gate stay at 64, as every architecture's do, so the two
+    /// widths are checked against different expectations.
     private static func validateQuant(
         _ quant: ManifestQuant,
-        mxfp4Weights: Bool
+        mxfp4Weights: Bool,
+        int4GroupSize: Int
     ) throws {
         if mxfp4Weights {
             for (name, slot) in [
@@ -212,11 +283,20 @@ public enum ManifestReader {
             ("sharedExpert", quant.sharedExpert, [4, 8]),
         ]
         for (name, slot, allowedBits) in slots {
+            // The group size is only checked for 4-bit slots. The INT8 kernels
+            // take no group-size parameter — they are compiled at 64 — so for
+            // an 8-bit slot the manifest's value describes nothing the runtime
+            // reads, and enforcing it would reject a correct install over a
+            // field with no effect. (A checkpoint whose 8-bit tensors were
+            // genuinely grouped differently would be mis-decoded either way;
+            // that is a kernel limitation, not something this check catches.)
+            let groupMatches = slot.weightBits != 4
+                || slot.groupSize == int4GroupSize
             guard allowedBits.contains(slot.weightBits),
                   slot.scheme.lowercased() == "affine",
                   slot.scaleType.lowercased() == "bf16",
                   slot.biasType.lowercased() == "bf16",
-                  slot.groupSize == Quantization.groupSize else {
+                  groupMatches else {
                 throw ModelError.indexCorrupt(detail: "unsupported quantization for \(name)")
             }
         }
@@ -225,7 +305,7 @@ public enum ManifestReader {
               routed.scheme.lowercased() == "affine",
               routed.scaleType.lowercased() == "bf16",
               routed.biasType.lowercased() == "bf16",
-              routed.groupSize == Quantization.groupSize else {
+              routed.groupSize == int4GroupSize else {
             throw ModelError.indexCorrupt(
                 detail: "unsupported quantization for routedExpert")
         }
@@ -328,6 +408,52 @@ public enum ManifestReader {
                   a.linearValueHeadDim ?? 0, e.linearAttention.valueHeadDim)
         try check("linearConvKernelSize",
                   a.linearConvKernelSize ?? 0, e.linearAttention.convKernelSize)
+
+        // The three `qwen4_exp` mechanisms. Absent means the ordinary
+        // single-stream residual, no n-gram table and dense attention, which
+        // is what `.none` describes, so every other family checks unchanged.
+        let hyper = a.hyperConnection
+        try check("hyperConnection.streamCount",
+                  hyper?.streamCount ?? 0, e.hyperConnection.streamCount)
+        try check("hyperConnection.lowRank",
+                  hyper?.lowRank ?? 0, e.hyperConnection.lowRank)
+        let ngram = a.ngramEmbedding
+        try check("ngramEmbedding.layer",
+                  ngram?.layer ?? -1, e.ngramEmbedding.layer)
+        try check("ngramEmbedding.ngramSize",
+                  ngram?.ngramSize ?? 0, e.ngramEmbedding.ngramSize)
+        try check("ngramEmbedding.heads",
+                  ngram?.heads ?? 0, e.ngramEmbedding.heads)
+        try check("ngramEmbedding.headsPerNgram",
+                  ngram?.headsPerNgram ?? 0, e.ngramEmbedding.headsPerNgram)
+        try check("ngramEmbedding.vocabSizeBase",
+                  ngram?.vocabSizeBase ?? 0, e.ngramEmbedding.vocabSizeBase)
+        try check("ngramEmbedding.shardCount",
+                  ngram?.shardCount ?? 0, e.ngramEmbedding.shardCount)
+        try check("ngramEmbedding.embedDim",
+                  ngram?.embedDim ?? 0, e.ngramEmbedding.embedDim)
+        try check("ngramEmbedding.convKernelSize",
+                  ngram?.convKernelSize ?? 0, e.ngramEmbedding.convKernelSize)
+        // Unlike the fields around it, this one describes tokenizer semantics
+        // rather than the table's layout, and it cannot vary for a given
+        // variant. Absent means "the architecture's own", the way every other
+        // family-extension field defaults — so a manifest written before the
+        // field existed still validates.
+        try check("ngramEmbedding.eosTokenID",
+                  (ngram?.eosTokenID as Int??) .flatMap { $0 }
+                      ?? Int(e.ngramEmbedding.eosTokenID),
+                  Int(e.ngramEmbedding.eosTokenID))
+        let indexer = a.attentionIndexer
+        try check("attentionIndexer.budget",
+                  indexer?.budget ?? 0, e.attentionIndexer.budget)
+        try check("attentionIndexer.compressRatio",
+                  indexer?.compressRatio ?? 0, e.attentionIndexer.compressRatio)
+        try check("attentionIndexer.headDim",
+                  indexer?.headDim ?? 0, e.attentionIndexer.headDim)
+        try check("attentionIndexer.numHeads",
+                  indexer?.numHeads ?? 0, e.attentionIndexer.numHeads)
+        try check("attentionIndexer.numKVHeads",
+                  indexer?.numKVHeads ?? 0, e.attentionIndexer.numKVHeads)
     }
 
     /// Decode just enough of `manifest.json` to identify the model family,
@@ -430,7 +556,35 @@ private extension ManifestArch {
                   linearNumVHeads: wire.linearNumVHeads,
                   linearKeyHeadDim: wire.linearKeyHeadDim,
                   linearValueHeadDim: wire.linearValueHeadDim,
-                  linearConvKernelSize: wire.linearConvKernelSize)
+                  linearConvKernelSize: wire.linearConvKernelSize,
+                  hyperConnection: wire.hyperConnection.map(ManifestHyperConnection.init(wire:)),
+                  ngramEmbedding: wire.ngramEmbedding.map(ManifestNgramEmbedding.init(wire:)),
+                  attentionIndexer:
+                    wire.attentionIndexer.map(ManifestAttentionIndexer.init(wire:)))
+    }
+}
+
+private extension ManifestHyperConnection {
+    init(wire: GTurboManifestHyperConnectionV1) {
+        self.init(streamCount: wire.streamCount, lowRank: wire.lowRank)
+    }
+}
+
+private extension ManifestNgramEmbedding {
+    init(wire: GTurboManifestNgramEmbeddingV1) {
+        self.init(layer: wire.layer, ngramSize: wire.ngramSize,
+                  heads: wire.heads, headsPerNgram: wire.headsPerNgram,
+                  vocabSizeBase: wire.vocabSizeBase, shardCount: wire.shardCount,
+                  embedDim: wire.embedDim, convKernelSize: wire.convKernelSize,
+                  eosTokenID: wire.eosTokenID)
+    }
+}
+
+private extension ManifestAttentionIndexer {
+    init(wire: GTurboManifestAttentionIndexerV1) {
+        self.init(budget: wire.budget, compressRatio: wire.compressRatio,
+                  headDim: wire.headDim, numHeads: wire.numHeads,
+                  numKVHeads: wire.numKVHeads)
     }
 }
 
@@ -465,6 +619,28 @@ private extension Manifest {
                   files: wire.files.mapValues(ManifestFileEntry.init(wire:)),
                   expertsPerLayer: wire.expertsPerLayer,
                   numLayers: wire.numLayers,
-                  expertStride: wire.expertStride)
+                  expertStride: wire.expertStride,
+                  ngramTable: wire.ngramTable.map(ManifestNgramTable.init(wire:)))
+    }
+}
+
+private extension ManifestNgramTable {
+    init(wire: GTurboManifestNgramTableV1) {
+        self.init(file: wire.file,
+                  layerIndex: wire.layerIndex,
+                  rowWidth: wire.rowWidth,
+                  groupSize: wire.groupSize,
+                  rowCount: wire.rowCount,
+                  shards: wire.shards.map(ManifestNgramShard.init(wire:)))
+    }
+}
+
+private extension ManifestNgramShard {
+    init(wire: GTurboManifestNgramShardV1) {
+        self.init(rowStart: wire.rowStart,
+                  rowCount: wire.rowCount,
+                  weightOffset: wire.weightOffset,
+                  scaleOffset: wire.scaleOffset,
+                  biasOffset: wire.biasOffset)
     }
 }

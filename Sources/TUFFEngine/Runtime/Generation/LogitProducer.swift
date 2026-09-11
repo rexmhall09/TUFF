@@ -53,6 +53,11 @@ public struct PrefillResult: Sendable, Equatable {
 }
 
 protocol ChunkedPrefillRunner: LogitProducer {
+    /// Whether this runtime can actually run the chunked path. False sends a
+    /// prompt through the ordinary decode loop instead, which is slower but
+    /// goes through the same kernels a generated token does.
+    var supportsChunkedPrefill: Bool { get }
+
     /// Prefill a prompt slice using the chunked production runtime.
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
@@ -60,6 +65,10 @@ protocol ChunkedPrefillRunner: LogitProducer {
                         config: PrefillRuntimeConfig,
                         into logits: MTLBuffer,
                         onProgress: (Int) -> Void) async throws -> PrefillResult
+}
+
+extension ChunkedPrefillRunner {
+    var supportsChunkedPrefill: Bool { true }
 }
 
 protocol MultimodalPrefillRunner: LogitProducer {

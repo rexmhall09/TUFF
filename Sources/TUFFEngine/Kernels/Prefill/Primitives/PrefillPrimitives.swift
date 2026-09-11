@@ -3,9 +3,25 @@ import Metal
 
 final class PrefillEmbedLookupInt4 {
     private let pso: MTLComputePipelineState
+    let groupSize: Int
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_embed_lookup_int4_block")
+    /// `groupSize` reaches the INT4 dequantization inside this kernel.
+    /// Function constants are per-pipeline: a pipeline built without it
+    /// decodes at the default 64, which on a group-32 checkpoint yields
+    /// plausible values and no error.
+    init(context: MetalContext,
+         groupSize: Int = Quantization.groupSize) throws {
+        precondition(Quantization.supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
+        self.groupSize = groupSize
+        let groupConstants: [MetalFunctionConstant] =
+            groupSize == Quantization.groupSize
+                ? []
+                : [MetalFunctionConstant(
+                    index: Quantization.groupSizeFunctionConstantIndex,
+                    value: .uint32(UInt32(groupSize)))]
+        self.pso = try context.pipeline("prefill_embed_lookup_int4_block",
+                                        constants: groupConstants)
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
@@ -16,9 +32,10 @@ final class PrefillEmbedLookupInt4 {
                        out: MTLBuffer, outOffset: Int = 0,
                        t: UInt32,
                        d: UInt32,
-                       outScale: Float) {
-        precondition(d % UInt32(Quantization.groupSize) == 0,
-                     "D must be a multiple of \(Quantization.groupSize)")
+                       outScale: Float,
+                       outStrideElements: UInt32? = nil) {
+        precondition(d % UInt32(groupSize) == 0,
+                     "D must be a multiple of \(groupSize)")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
         enc.setBuffer(table, offset: tableOffset, index: 0)
@@ -32,6 +49,8 @@ final class PrefillEmbedLookupInt4 {
         enc.setBytes(&tVar, length: MemoryLayout<UInt32>.size, index: 5)
         enc.setBytes(&dVar, length: MemoryLayout<UInt32>.size, index: 6)
         enc.setBytes(&scaleVar, length: MemoryLayout<Float>.size, index: 7)
+        var strideVar = outStrideElements ?? d
+        enc.setBytes(&strideVar, length: MemoryLayout<UInt32>.size, index: 8)
         enc.dispatchThreads(MTLSize(width: Int(d), height: Int(t), depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
         enc.endEncoding()
@@ -73,8 +92,22 @@ final class PrefillRMSNorm {
 final class PrefillInt4QMM {
     private let pso: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_dequant_int4_qmm_f16_block")
+    /// `groupSize` reaches the INT4 dequantization inside this kernel.
+    /// Function constants are per-pipeline: a pipeline built without it
+    /// decodes at the default 64, which on a group-32 checkpoint yields
+    /// plausible values and no error.
+    init(context: MetalContext,
+         groupSize: Int = Quantization.groupSize) throws {
+        precondition(Quantization.supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
+        let groupConstants: [MetalFunctionConstant] =
+            groupSize == Quantization.groupSize
+                ? []
+                : [MetalFunctionConstant(
+                    index: Quantization.groupSizeFunctionConstantIndex,
+                    value: .uint32(UInt32(groupSize)))]
+        self.pso = try context.pipeline("prefill_dequant_int4_qmm_f16_block",
+                                        constants: groupConstants)
     }
 
     func encode(commandBuffer: MTLCommandBuffer,

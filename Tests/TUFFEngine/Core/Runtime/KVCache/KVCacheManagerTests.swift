@@ -24,6 +24,46 @@ import Metal
     }
 
 
+    @Test func growingFullAttentionPreservesPendingWritesAndMaximum() throws {
+        let ctx = try MetalContext()
+        let cfg = ArchConfig.qwen38FlashNext
+        let kv = try KVCacheManager(device: ctx.device, config: cfg, maxContext: 9,
+                                    initialFullAttentionCapacityTokens: 2)
+        let full = cfg.fullAttentionLayerMask.indices.filter { cfg.fullAttentionLayerMask[$0] == 1 }
+        let cb = try #require(ctx.queue.makeCommandBuffer())
+        let blit = try #require(cb.makeBlitCommandEncoder())
+        for layer in full {
+            #expect(kv.capacity(layer: layer) == 2)
+            for (buffer, value) in [(kv.keyBuffer(layer: layer, validTokenCount: 0), UInt8(17)),
+                                    (kv.valueBuffer(layer: layer, validTokenCount: 0), UInt8(29))] {
+                blit.fill(buffer: buffer, range: 0..<buffer.length, value: value)
+            }
+        }
+        blit.endEncoding()
+        cb.commit() // ensureCapacity must order its copy after these GPU writes.
+        kv.advance(by: 2)
+        try kv.ensureCapacity(through: 5, on: ctx.queue)
+        #expect(kv.position == 2)
+        for layer in full {
+            #expect(kv.capacity(layer: layer) == 8)
+            let size = 2 * kv.stride(layer: layer)
+            for (buffer, value) in [(kv.keyBuffer(layer: layer, validTokenCount: 2), UInt8(17)),
+                                    (kv.valueBuffer(layer: layer, validTokenCount: 2), UInt8(29))] {
+                let bytes = UnsafeBufferPointer(start: buffer.contents().assumingMemoryBound(to: UInt8.self), count: size)
+                #expect(bytes.allSatisfy { $0 == value })
+            }
+            #expect(kv.kSlot(layer: layer, position: 4).offset == 4 * kv.stride(layer: layer))
+        }
+        try kv.ensureCapacity(through: 9, on: ctx.queue)
+        for layer in full { #expect(kv.capacity(layer: layer) == 9) }
+        let last = try #require(full.last)
+        let stable = kv.keyBuffer(layer: last, validTokenCount: 2)
+        try kv.ensureCapacity(through: 9, on: ctx.queue)
+        #expect(kv.keyBuffer(layer: last, validTokenCount: 2) === stable)
+        kv.reset()
+        #expect(kv.position == 0)
+    }
+
     @Test func strideAndBufferSizes_matchConfig() throws {
         let (_, kv) = try makeManager(maxContext: 128)
 

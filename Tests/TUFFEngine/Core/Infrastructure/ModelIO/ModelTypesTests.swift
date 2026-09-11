@@ -81,6 +81,59 @@ import Foundation
         #expect(config.decodeInt4GEMVShapes.isEmpty)
     }
 
+    @Test func qwen38FlashNextProfileMatchesPinnedCheckpoint() {
+        let config = ArchConfig.qwen38FlashNext
+        #expect(config.family == .qwen4Exp)
+        #expect(config.variant == .qwen38FlashNext)
+        #expect(ArchConfig.registeredArchitectures[.qwen38FlashNext] == config)
+        #expect(config.hiddenSize == 2_560)
+        #expect(config.numLayers == 48)
+        #expect(config.numExperts == 512)
+        #expect(config.topKExperts == 10)
+        #expect(config.vocabSize == 248_320)
+        #expect(!config.tieWordEmbeddings)
+
+        // 12 full-attention layers, every fourth; the rest gated DeltaNet.
+        #expect(config.fullAttentionLayerMask.count == 48)
+        #expect((0..<48).filter { config.layerIsFull($0) } == Array(stride(
+            from: 3, to: 48, by: 4)))
+        #expect((0..<48).filter { config.layerIsLinear($0) }.count == 36)
+        #expect(config.hasLinearAttentionLayers)
+        #expect(config.hasSharedExpert)
+
+        // The gated-DeltaNet bundle is Qwen3.6's contract at wider dimensions.
+        #expect(config.linearAttention.qkvDim == 10_240)
+        #expect(config.linearAttention.valueDim == 6_144)
+
+        // A token costs 24 KiB of KV cache: 12 full-attention layers, two KV
+        // heads, a 256 head dim, key and value, at two bytes each.
+        #expect(config.numFullKVHeads * config.fullHeadDim * 2 * 2 * 12 == 24_576)
+
+        #expect(config.hyperConnection.streamCount == 4)
+        #expect(config.hyperConnection.lowRank == 320)
+        #expect(config.hyperConnection.stackedWidth(
+            hiddenSize: config.hiddenSize) == 10_240)
+        #expect(config.ngramEmbedding.isEnabled)
+        #expect(config.ngramEmbedding.layer == 1)
+        #expect(config.ngramEmbedding.shardCount == 128)
+        #expect(config.ngramEmbedding.headDim == 160)
+        #expect(config.attentionIndexer.isEnabled)
+        #expect(config.attentionIndexer.budget == 2_048)
+        // Four query heads and one key head through one fused projection.
+        #expect(config.attentionIndexer.projectionRows == 640)
+    }
+
+    /// Every other architecture keeps one residual stream, no n-gram table and
+    /// dense attention, which is what the manifest's absent fields mean.
+    @Test func onlyQwen4ExpCarriesTheNewMechanisms() {
+        for (variant, config) in ArchConfig.registeredArchitectures
+        where variant != .qwen38FlashNext {
+            #expect(config.hyperConnection == .none, "\(variant)")
+            #expect(config.ngramEmbedding == .none, "\(variant)")
+            #expect(config.attentionIndexer == .none, "\(variant)")
+        }
+    }
+
     @Test func minimaxM27ProfileMatchesPinnedCheckpoint() {
         let config = ArchConfig.minimaxM27
         #expect(config.family == .minimaxM2)

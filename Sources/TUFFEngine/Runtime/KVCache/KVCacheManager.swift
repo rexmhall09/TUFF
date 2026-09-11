@@ -73,10 +73,10 @@ public struct KVView: @unchecked Sendable {
 
 /// Per-layer FP16 K/V storage for the decode loop.
 ///
-/// One K buffer and one V buffer per layer, allocated once in `init` — the
-/// decode hot path never allocates. Linear storage sizes every layer for
-/// `maxContext`; FP16 ring storage caps SWA layers to their physical capacity
-/// while full-attention layers remain linear.
+/// One K buffer and one V buffer per layer. Full-attention storage can start
+/// small and grow geometrically through `ensureCapacity`; callers must ensure
+/// capacity before encoding writes. The default reserves the full window.
+/// FP16 ring storage caps SWA layers to their physical capacity.
 ///
 /// Gemma 4 full-attention layers carry the `attention_k_eq_v` quirk: K and V
 /// share the `k_proj` weight, so a single 4-bit dequant + GEMV produces the
@@ -92,19 +92,20 @@ public struct KVView: @unchecked Sendable {
 /// optionally RoPE's each slot in place. `advance()` bumps the cursor once
 /// both are written.
 ///
-/// 8 GB rule: storage is bounded by per-layer physical capacity, allocated
-/// once. `reset()` returns physical pages to the OS via `MADV_DONTNEED` so a
+/// Storage is bounded by per-layer physical capacity. `reset()` returns
+/// physical pages to the OS via `MADV_DONTNEED` so a
 /// finished generation does not keep its KV resident into the next turn.
 public final class KVCacheManager {
     public let config: ArchConfig
     public let maxContext: Int
     public let fp16RingEnabled: Bool
 
-    private let kBuffers: [MTLBuffer]
-    private let vBuffers: [MTLBuffer]
+    private var kBuffers: [MTLBuffer]
+    private var vBuffers: [MTLBuffer]
     private let strides:  [Int]         // bytes per token, per layer
     private let kinds:    [LayerKind]
-    private let capacityTokens: [Int]
+    private var capacityTokens: [Int]
+    private let growsFullAttention: Bool
 
     public private(set) var position: Int = 0
 
@@ -114,11 +115,14 @@ public final class KVCacheManager {
                 fp16RingEnabled: Bool = false,
                 slidingWindow: Int? = nil,
                 maxPrefillChunkTokens: Int = 128,
-                fp16RingCapacityOverride: Int? = nil) throws {
+                fp16RingCapacityOverride: Int? = nil,
+                initialFullAttentionCapacityTokens: Int? = nil) throws {
         precondition(maxContext > 0, "maxContext must be positive")
         precondition(maxPrefillChunkTokens > 0, "maxPrefillChunkTokens must be positive")
         self.config = config
         self.maxContext = maxContext
+        self.growsFullAttention = initialFullAttentionCapacityTokens != nil
+        precondition(initialFullAttentionCapacityTokens.map { $0 > 0 } ?? true)
         let ringEnabled = fp16RingEnabled
         self.fp16RingEnabled = ringEnabled
 
@@ -169,7 +173,9 @@ public final class KVCacheManager {
             }
             let isFull = maskValue != 0
             let stride = memoryPlan.strides[layer]
-            let capacity = memoryPlan.capacities[layer]
+            let capacity = isFull
+                ? min(memoryPlan.capacities[layer], initialFullAttentionCapacityTokens ?? maxContext)
+                : memoryPlan.capacities[layer]
             let length = capacity * stride
 
             guard let kBuf = device.makeBuffer(length: length, options: .storageModeShared) else {
@@ -194,6 +200,48 @@ public final class KVCacheManager {
         self.strides  = st
         self.kinds    = kd
         self.capacityTokens = caps
+    }
+
+    /// Grow full-attention storage before encoding a new range. Queue ordering
+    /// preserves pending writes, and old buffers remain alive through the copy.
+    /// Growth is geometric; a large configured window does not require full-sized
+    /// buffers for a short conversation's Metal submissions.
+    public func ensureCapacity(through tokenCount: Int, on queue: MTLCommandQueue) throws {
+        validateValidTokenCount(tokenCount)
+        guard growsFullAttention else { return }
+        let layers = (0..<config.numLayers).filter {
+            kinds[$0] == .full && capacityTokens[$0] < tokenCount
+        }
+        guard !layers.isEmpty else { return }
+        guard let cb = queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else { throw MetalError.noQueue }
+        var replacements: [(layer: Int, capacity: Int, k: MTLBuffer, v: MTLBuffer)] = []
+        for layer in layers {
+            var capacity = capacityTokens[layer]
+            while capacity < tokenCount { capacity = min(maxContext, capacity * 2) }
+            let bytes = capacity * strides[layer]
+            guard let k = queue.device.makeBuffer(length: bytes, options: .storageModeShared),
+                  let v = queue.device.makeBuffer(length: bytes, options: .storageModeShared) else {
+                blit.endEncoding()
+                throw ModelError.residentBufferWrapFailed
+            }
+            k.label = kBuffers[layer].label
+            v.label = vBuffers[layer].label
+            for (old, new) in [(kBuffers[layer], k), (vBuffers[layer], v)] {
+                blit.copy(from: old, sourceOffset: 0, to: new, destinationOffset: 0,
+                          size: old.length)
+            }
+            replacements.append((layer, capacity, k, v))
+        }
+        blit.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        try checkCommandBufferError(cb.error)
+        for replacement in replacements {
+            kBuffers[replacement.layer] = replacement.k
+            vBuffers[replacement.layer] = replacement.v
+            capacityTokens[replacement.layer] = replacement.capacity
+        }
     }
 
     public func layerKind(_ layer: Int) -> LayerKind { kinds[layer] }
@@ -234,12 +282,18 @@ public final class KVCacheManager {
     public func kRange(layer: Int, start: Int, count: Int) -> (buffer: MTLBuffer, offset: Int, stride: Int) {
         validateRange(start: start, count: count)
         validateContiguousPhysicalRange(layer: layer, start: start, count: count)
+        if kinds[layer] == .full {
+            precondition(start + count <= capacityTokens[layer], "grow full KV before writing")
+        }
         return (kBuffers[layer], physicalSlot(layer: layer, position: start) * strides[layer], strides[layer])
     }
 
     public func vRange(layer: Int, start: Int, count: Int) -> (buffer: MTLBuffer, offset: Int, stride: Int) {
         validateRange(start: start, count: count)
         validateContiguousPhysicalRange(layer: layer, start: start, count: count)
+        if kinds[layer] == .full {
+            precondition(start + count <= capacityTokens[layer], "grow full KV before writing")
+        }
         return (vBuffers[layer], physicalSlot(layer: layer, position: start) * strides[layer], strides[layer])
     }
 
@@ -323,6 +377,10 @@ public final class KVCacheManager {
 
     private func physicalSlot(layer: Int, position: Int) -> Int {
         precondition(capacityTokens[layer] > 0, "layer has no KV storage")
+        if kinds[layer] == .full {
+            precondition(position < capacityTokens[layer], "grow full KV before writing")
+            return position
+        }
         return position % capacityTokens[layer]
     }
 

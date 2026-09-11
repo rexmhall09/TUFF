@@ -167,6 +167,26 @@ public enum RangeCopyPlanner {
             }
         }
 
+        // The n-gram table: three verbatim regions per shard, in shard order.
+        // 384 ranges for the pinned checkpoint, against the 960 million a
+        // row-interleaved layout would need.
+        if let table = repackPlan.ngramTable {
+            for shard in table.shards {
+                for (source, destination) in [
+                    (shard.sourceWeight, shard.weightOffset),
+                    (shard.sourceScales, shard.scaleOffset),
+                    (shard.sourceBiases, shard.biasOffset),
+                ] {
+                    copies.append(RangeCopy(
+                        shardID: source.shardPath,
+                        sourceOffset: source.absoluteOffset,
+                        size: source.sizeBytes,
+                        destinationPath: table.path,
+                        destinationOffset: destination))
+                }
+            }
+        }
+
         try validateDestinationIntervals(copies, outputRoot: outputRoot(for: repackPlan))
         let coalesced = try coalesce(copies: copies, rangeChunkBytes: rangeChunkBytes)
         let indexData = try ResidentWriter.encodeIndex(plan: repackPlan.resident)
@@ -302,6 +322,11 @@ public enum RangeCopyPlanner {
                     relativePath: "packed_experts/" + ($0.path as NSString).lastPathComponent,
                     size: $0.fileSize)
             })
+        if let table = plan.ngramTable {
+            outputs.append(RemoteExpectedOutput(
+                relativePath: (table.path as NSString).lastPathComponent,
+                size: table.fileSize))
+        }
         return outputs.sorted { $0.relativePath < $1.relativePath }
     }
 

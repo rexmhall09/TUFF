@@ -76,12 +76,17 @@ enum IndexLoader {
                 guard let entry = v as? [String: Any] else { continue }
                 let bits = (entry["bits"] as? Int) ?? baseBits
                 let g    = (entry["group_size"] as? Int) ?? baseGroup
-                guard g == baseGroup else {
+                // An override may carry its own group size — the 8-bit router
+                // and shared-expert gate of a 4-bit checkpoint are grouped at
+                // 64 while everything around them is grouped at 32. What is
+                // still refused is a group the kernels cannot decode.
+                guard RepackQuantGroup.supported.contains(g) else {
                     throw RepackError.configJsonInvalid(
                         path: configPath,
-                        detail: "quantization override \(k) group_size \(g) != base \(baseGroup)")
+                        detail: "quantization override \(k) group_size \(g) is "
+                            + "not one the runtime decodes")
                 }
-                overrides[k] = QuantSpec(bits: bits)
+                overrides[k] = QuantSpec(bits: bits, groupSize: g)
             }
         } catch let e as RepackError {
             throw e
@@ -119,6 +124,6 @@ enum IndexLoader {
             ? String(name.dropLast(".weight".count))
             : name
         if let o = meta.bitsOverrides[stripped] { return o }
-        return QuantSpec(bits: meta.baseBits)
+        return QuantSpec(bits: meta.baseBits, groupSize: meta.baseGroupSize)
     }
 }

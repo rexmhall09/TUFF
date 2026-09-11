@@ -78,7 +78,8 @@ final class PrefillQKVEpilogue {
                                  kvTokenStrideElements: UInt32,
                                  theta: Float,
                                  rotaryDim: UInt32,
-                                 eps: Float) {
+                                 eps: Float,
+                                 centered: Bool = false) {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(headDim > 0 && headDim % 2 == 0, "headDim must be positive and even")
         precondition(numQHeads > 0, "numQHeads must be positive")
@@ -101,7 +102,8 @@ final class PrefillQKVEpilogue {
                                 headDim: headDim,
                                 numHeads: numQHeads,
                                 tokenStrideElements: qTokenStrideElements,
-                                eps: eps)
+                                eps: eps,
+                                centered: centered)
         perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
                                 x: k,
                                 xOffset: kOffset,
@@ -113,7 +115,8 @@ final class PrefillQKVEpilogue {
                                 headDim: headDim,
                                 numHeads: numKVHeads,
                                 tokenStrideElements: kvTokenStrideElements,
-                                eps: eps)
+                                eps: eps,
+                                centered: centered)
         rope.encodeNeoxSubdim(commandBuffer: commandBuffer,
                               data: q,
                               dataOffset: qOffset,
@@ -178,20 +181,21 @@ final class PrefillQKVEpilogue {
         theta: Float, rotaryDim: UInt32, eps: Float,
         temporalPositions: MTLBuffer,
         heightPositions: MTLBuffer,
-        widthPositions: MTLBuffer
+        widthPositions: MTLBuffer,
+        centered: Bool = false
     ) {
         perHeadNorm.encodeBF16W(
             commandBuffer: commandBuffer, x: q,
             weight: qWeight, weightOffset: qWeightOffset,
             out: q, queryCount: queryCount, headDim: headDim,
             numHeads: numQHeads, tokenStrideElements: qTokenStrideElements,
-            eps: eps)
+            eps: eps, centered: centered)
         perHeadNorm.encodeBF16W(
             commandBuffer: commandBuffer, x: k,
             weight: kWeight, weightOffset: kWeightOffset,
             out: k, queryCount: queryCount, headDim: headDim,
             numHeads: numKVHeads, tokenStrideElements: kvTokenStrideElements,
-            eps: eps)
+            eps: eps, centered: centered)
         for (data, heads, stride) in [
             (q, numQHeads, qTokenStrideElements),
             (k, numKVHeads, kvTokenStrideElements),

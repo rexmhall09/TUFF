@@ -27,6 +27,9 @@ package enum GTurboFormatV1 {
         case bf16 = 1
         case fp16 = 2
         case fp32 = 3
+        /// Small integer sidecars, currently only the n-gram PLE's hash
+        /// multipliers and per-head offsets and vocabulary sizes.
+        case i64 = 5
     }
 }
 

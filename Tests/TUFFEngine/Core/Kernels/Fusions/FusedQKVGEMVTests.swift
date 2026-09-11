@@ -14,21 +14,26 @@ import TUFFValidationSupport
                                weightOffset: 2)
     }
 
+    @Test func specializedGroup32MatchesSeparateProjections() throws {
+        try Self.expectMatches(qRows: 512, kvRows: 128, n: 2560,
+            seed: 0x5156_4732, groupSize: 32, specialize: true)
+    }
+
     private static func expectMatches(qRows: Int,
                                       kvRows: Int,
                                       n: Int,
                                       seed: UInt64,
-                                      weightOffset: Int = 0) throws {
-        precondition(n % Quantization.groupSize == 0)
+                                      weightOffset: Int = 0, groupSize: Int = 64, specialize: Bool = false) throws {
+        precondition(n % groupSize == 0)
         var rng = SplitMix64(seed: seed)
-        let q = Self.makeProjection(rows: qRows, n: n, rng: &rng, weightOffset: weightOffset)
-        let k = Self.makeProjection(rows: kvRows, n: n, rng: &rng, weightOffset: weightOffset)
-        let v = Self.makeProjection(rows: kvRows, n: n, rng: &rng, weightOffset: weightOffset)
+        let q = Self.makeProjection(rows: qRows, n: n, rng: &rng, weightOffset: weightOffset, groupSize: groupSize)
+        let k = Self.makeProjection(rows: kvRows, n: n, rng: &rng, weightOffset: weightOffset, groupSize: groupSize)
+        let v = Self.makeProjection(rows: kvRows, n: n, rng: &rng, weightOffset: weightOffset, groupSize: groupSize)
         let x = (0..<n).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
 
         let ctx = try MetalContext()
-        let gemv = try DequantInt4GEMV(context: ctx)
-        let fused = try FusedQKVGEMV(context: ctx)
+        let gemv = try DequantInt4GEMV(context: ctx, groupSize: groupSize)
+        let fused = try FusedQKVGEMV(context: ctx, additionalShapes: specialize ? [(qRows, kvRows, n)] : [], groupSize: groupSize)
         guard
             let qW = ctx.device.makeBuffer(bytes: q.weights, length: q.weights.count,
                                            options: .storageModeShared),
@@ -114,15 +119,15 @@ import TUFFValidationSupport
     private static func makeProjection(rows: Int,
                                        n: Int,
                                        rng: inout SplitMix64,
-                                       weightOffset: Int) -> (weights: [UInt8], scales: [UInt16], biases: [UInt16]) {
+                                       weightOffset: Int, groupSize: Int) -> (weights: [UInt8], scales: [UInt16], biases: [UInt16]) {
         let packedPerRow = n / 2
-        let groups = n / Quantization.groupSize
+        let groups = n / groupSize
         var weights = [UInt8](repeating: 0, count: rows * packedPerRow + weightOffset)
         var scales = [UInt16](repeating: 0, count: rows * groups)
         var biases = [UInt16](repeating: 0, count: rows * groups)
         for row in 0..<rows {
             let values = (0..<n).map { _ in rng.uniform(-0.5, 0.5) }
-            let q = Quantization.quantizeInt4Affine(values)
+            let q = Quantization.quantizeInt4Affine(values, groupSize: groupSize)
             for i in 0..<packedPerRow { weights[weightOffset + row * packedPerRow + i] = q.packed[i] }
             for i in 0..<groups {
                 scales[row * groups + i] = q.scales[i]

@@ -17,7 +17,14 @@ using namespace metal;
 // element; the per-element inner loop keeps the scalar path's FMA count.
 // ============================================================================
 
-constant constexpr uint kGroupSize = 64;
+// Affine group size. 64 everywhere in the lineup until Qwen3.8 Flash Next,
+// whose checkpoint is quantized at 32 — not a preference but a requirement,
+// since its n-gram PLE rows are 160 values wide and 160 is not divisible by 64.
+//
+// Specialized rather than passed at runtime: the group size sets the block
+// geometry below, and constant-folding it keeps the existing 64 path compiling
+// to exactly what it did before.
+// The group size itself lives in quant_group.metal.
 constant uint FC_INT4_M [[function_constant(20)]];
 constant uint FC_INT4_N [[function_constant(21)]];
 constant bool FC_INT4_USE_FC [[function_constant(22)]];
@@ -71,14 +78,14 @@ kernel void embed_lookup_int4(
     uint                  gid       [[thread_position_in_grid]]
 ) {
     if (gid >= D) return;
-    const uint groups_per_row = D / kGroupSize;
+    const uint groups_per_row = D / quant_group_size();
     device const uint8_t* row_q = table  + uint(token_id) * (D / 2u);
     device const bfloat*  row_s = scales + uint(token_id) * groups_per_row;
     device const bfloat*  row_b = biases + uint(token_id) * groups_per_row;
     uint8_t byte = row_q[gid >> 1];
     uint    q    = (gid & 1u) ? uint(byte >> 4) : uint(byte & 0xFu);
-    float   s    = float(row_s[gid / kGroupSize]);
-    float   b    = float(row_b[gid / kGroupSize]);
+    float   s    = float(row_s[gid / quant_group_size()]);
+    float   b    = float(row_b[gid / quant_group_size()]);
     out[gid] = half((float(q) * s + b) * out_scale);
 }
 
@@ -105,7 +112,7 @@ static inline void dequant_int4_gemv_simd_body(
 ) {
     const uint row = tg_idx * rows_per_tg + sg_idx;
     if (row >= M) return;
-    const uint n_groups  = N / kGroupSize;
+    const uint n_groups  = N / quant_group_size();
     const uint row_bytes = N / 2;
     device const uint8_t* W_row = W      + uint(row) * row_bytes;
     device const bfloat*  s_row = scales + uint(row) * n_groups;
@@ -121,7 +128,15 @@ static inline void dequant_int4_gemv_simd_body(
     // stride N/2 and weightsOffset are multiples of 4; x is
     // half4-aligned (lane*8 elements). N=2816/4096/8192 → 44/64/128 groups, all
     // exact 4-blocks; the remainder covers any non-multiple-of-4 group count.
-    const uint full_blocks = n_groups / 4;
+    // A block is the 128 bytes a SIMD reads at four bytes per lane. How many
+    // affine groups that spans, and how many lanes share one group, both fall
+    // out of the group size: a group of G values occupies G/2 bytes, so a
+    // block covers 256/G groups and G/8 lanes cover one group. G=64 gives the
+    // original 4 groups per block and 8 lanes per group.
+    const uint G = quant_group_size();
+    const uint groups_per_block = 256u / G;
+    const uint lane_shift = (G == 64u) ? 3u : ((G == 32u) ? 2u : 1u);
+    const uint full_blocks = n_groups / groups_per_block;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
         // Read the 4-byte weight chunk as two ushorts. The resident weight
@@ -132,7 +147,7 @@ static inline void dequant_int4_gemv_simd_body(
         // vs byte-by-byte.
         device const ushort* wp = (device const ushort*)(W_row + byte_base);
         const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
-        const uint g  = blk * 4u + (lane >> 3);
+        const uint g  = blk * groups_per_block + (lane >> lane_shift);
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
@@ -153,12 +168,16 @@ static inline void dequant_int4_gemv_simd_body(
         acc = fma(s, dot, acc);
         acc = fma(b, sum, acc);
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    // Remainder groups, one byte per lane. A group of G values is G/2 bytes,
+    // so only the first G/2 lanes have work; at G=64 that is all 32 of them,
+    // which is why this used to need no guard.
+    for (uint g = full_blocks * groups_per_block; g < n_groups; ++g) {
+        if (lane >= G / 2u) continue;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kGroupSize / 2) + lane];
-        const float x0 = float(x[g * kGroupSize + lane * 2u]);
-        const float x1 = float(x[g * kGroupSize + lane * 2u + 1u]);
+        const uint8_t byte = W_row[g * (G / 2u) + lane];
+        const float x0 = float(x[g * G + lane * 2u]);
+        const float x1 = float(x[g * G + lane * 2u + 1u]);
         float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
         dot = fma(float(uint(byte >> 4)), x1, dot);
         const float sum = x0 + x1;

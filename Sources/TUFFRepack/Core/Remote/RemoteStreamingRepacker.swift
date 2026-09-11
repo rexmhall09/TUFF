@@ -419,6 +419,16 @@ public final class RemoteStreamingRepacker {
             try Posix.fsync(descriptor, path: layer.path)
             close(descriptor)
         }
+        // The n-gram PLE table, for the one architecture that has one. It is
+        // written by ordinary range copies like everything else, so it only
+        // needs to exist at its final size before they start.
+        if let table = plan.ngramTable {
+            try Task.checkCancellation()
+            let descriptor = try Posix.openCreateRW(table.path)
+            try Posix.ftruncate(descriptor, path: table.path, size: table.fileSize)
+            try Posix.fsync(descriptor, path: table.path)
+            close(descriptor)
+        }
         try Posix.fsyncDirectory(paths.partialDirectory)
     }
 

@@ -149,6 +149,30 @@ public struct VisionConfig: Sendable, Equatable {
             attentionScale = 1 / sqrt(Float(headDimension))
             minimumPixels = 65_536
             maximumPixels = 16_777_216
+        case .qwen4Exp:
+            // Qwen3.8 Flash Next carries the same vision tower as Qwen 3.6:
+            // 27 blocks at hidden 1152, 16 heads, patch 16, spatial merge 2,
+            // 2,304 learned position embeddings, and the same 333 tensors.
+            // Only the merger's output width differs, because it has to land
+            // in a 2,560-wide residual rather than a 2,048-wide one.
+            architecture = .qwen36
+            hiddenSize = 1_152
+            intermediateSize = 4_304
+            numLayers = 27
+            numHeads = 16
+            headDimension = 72
+            patchSize = 16
+            temporalPatchSize = 2
+            patchDimension = 1_536
+            maximumPatches = 65_536
+            poolingKernel = 2
+            textHiddenSize = 2_560
+            positionEmbeddingSize = 2_304
+            positionGridSide = 48
+            ropeTheta = 10_000
+            attentionScale = 1 / sqrt(Float(headDimension))
+            minimumPixels = 65_536
+            maximumPixels = 16_777_216
         case .gptOss, .minimaxM2:
             architecture = .gemma4Legacy
             hiddenSize = 0

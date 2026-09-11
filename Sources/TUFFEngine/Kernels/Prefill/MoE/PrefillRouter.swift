@@ -31,9 +31,28 @@ final class PrefillRouter {
     private let pso: MTLComputePipelineState
     private let minimaxPSO: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_router_gemma4_block")
-        self.minimaxPSO = try context.pipeline("prefill_router_minimax_block")
+    /// `groupSize` is the *router's* own quantization group, which is not
+    /// necessarily the checkpoint's base. Qwen3.8 Flash Next stores its router
+    /// as INT8 at group 64 while everything around it is INT4 at 32; handing
+    /// this the base group size silently mis-decodes the router and sends
+    /// every token to the wrong experts.
+    let groupSize: Int
+
+    init(context: MetalContext,
+         groupSize: Int = Quantization.groupSize) throws {
+        self.groupSize = groupSize
+        precondition(Quantization.supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
+        let groupConstants: [MetalFunctionConstant] =
+            groupSize == Quantization.groupSize
+                ? []
+                : [MetalFunctionConstant(
+                    index: Quantization.groupSizeFunctionConstantIndex,
+                    value: .uint32(UInt32(groupSize)))]
+        self.pso = try context.pipeline("prefill_router_gemma4_block",
+                                        constants: groupConstants)
+        self.minimaxPSO = try context.pipeline("prefill_router_minimax_block",
+                                               constants: groupConstants)
     }
 
     func encodeMiniMaxBlock(commandBuffer: MTLCommandBuffer,
@@ -103,10 +122,10 @@ final class PrefillRouter {
                                   topK: UInt32,
                                   hiddenStrideElements: UInt32) {
         precondition(queryCount > 0, "queryCount must be positive")
-        precondition(numExperts <= 256, "numExperts > 256 is not supported")
+        precondition(numExperts <= 512, "numExperts > 512 is not supported")
         precondition(topK > 0 && topK <= 64, "topK must be in 1...64")
-        precondition(d % UInt32(Quantization.groupSize) == 0,
-                     "D must be a multiple of \(Quantization.groupSize)")
+        precondition(d % UInt32(groupSize) == 0,
+                     "D must be a multiple of \(groupSize)")
         precondition(hiddenStrideElements >= d, "hidden stride is too small")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)

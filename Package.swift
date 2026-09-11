@@ -184,6 +184,7 @@ let package = Package(
             resources: [
                 .copy("Tokenization/Fixtures"),
                 .copy("Runtime/Vision/Fixtures/images"),
+                .copy("Kernels/Fixtures/qwen4exp"),
             ]
         ),
         .testTarget(

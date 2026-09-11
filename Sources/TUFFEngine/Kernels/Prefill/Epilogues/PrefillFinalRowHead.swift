@@ -7,10 +7,11 @@ final class PrefillFinalRowHeadInt4 {
     private let normed: MTLBuffer
     private let maxD: Int
 
-    init(context: MetalContext, maxD: Int = 2816) throws {
+    init(context: MetalContext, maxD: Int = 2816,
+         groupSize: Int = Quantization.groupSize) throws {
         precondition(maxD > 0, "maxD must be positive")
         self.rms = try RMSNorm(context: context)
-        self.int4 = try DequantInt4GEMV(context: context)
+        self.int4 = try DequantInt4GEMV(context: context, groupSize: groupSize)
         self.maxD = maxD
         guard let normed = context.device.makeBuffer(length: maxD * MemoryLayout<Float16>.size,
                                                      options: .storageModePrivate) else {

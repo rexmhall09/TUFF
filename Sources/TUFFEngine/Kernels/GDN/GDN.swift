@@ -22,13 +22,20 @@ final class GDN {
     private let inProjSpecializedPSO: MTLComputePipelineState?
 
     let config: LinearAttentionConfig
+    let groupSize: Int
 
     /// `specializedHiddenSize` compiles a constant-folded variant of the fused
     /// input projection for the decode shape. Measured elsewhere in this
     /// package: an unspecialized INT4 GEMV runs ~102 GB/s against ~141 GB/s
     /// specialized, so the runtime path must not be the only one available.
+    ///
+    /// `groupSize` reaches the input projection, which dequantizes INT4 through
+    /// `dequant_int4_gemv_simd_body`. Function constants are per-pipeline, so a
+    /// pipeline that omits it silently dequantizes at the default 64 — the
+    /// weights still decode, into plausible nonsense.
     init(context: MetalContext, config: LinearAttentionConfig,
-         specializedHiddenSize: Int? = nil) throws {
+         specializedHiddenSize: Int? = nil,
+         groupSize: Int = Quantization.groupSize) throws {
         precondition(config.keyHeadDim > 0 && config.keyHeadDim % 32 == 0,
                      "keyHeadDim must be a positive multiple of 32")
         precondition(config.keyHeadDim / 32 <= 8,
@@ -38,6 +45,7 @@ final class GDN {
         precondition(config.numVHeads % config.numKHeads == 0,
                      "numVHeads must be a multiple of numKHeads")
         self.config = config
+        self.groupSize = groupSize
         self.convDecodePSO = try context.pipeline("gdn_conv_mix_decode")
         self.convPrefillPSO = try context.pipeline("gdn_conv_mix_prefill")
         self.convTailUpdatePSO = try context.pipeline("gdn_conv_tail_update")
@@ -45,13 +53,21 @@ final class GDN {
         self.deltaDecodePSO = try context.pipeline("gdn_delta_step_decode")
         self.deltaPrefillPSO = try context.pipeline("gdn_delta_step_prefill")
         self.gatedNormPSO = try context.pipeline("gdn_gated_norm")
+        precondition(Quantization.supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
+        let groupConstants: [MetalFunctionConstant] =
+            groupSize == Quantization.groupSize
+                ? []
+                : [MetalFunctionConstant(
+                    index: Quantization.groupSizeFunctionConstantIndex,
+                    value: .uint32(UInt32(groupSize)))]
         self.inProjPSO = try context.pipeline("gdn_in_proj_gemv_simd",
-                                              constants: [],
+                                              constants: groupConstants,
                                               maxTotalThreadsPerThreadgroup: 512)
         if let n = specializedHiddenSize {
             self.inProjSpecializedPSO = try context.pipeline(
                 "gdn_in_proj_gemv_simd",
-                constants: [
+                constants: groupConstants + [
                     MetalFunctionConstant(index: 90, value: .uint32(UInt32(config.qkvDim))),
                     MetalFunctionConstant(index: 91, value: .uint32(UInt32(config.valueDim))),
                     MetalFunctionConstant(index: 92, value: .uint32(UInt32(config.numVHeads))),
@@ -76,8 +92,8 @@ final class GDN {
                                 a: TensorView, aOut: MTLBuffer,
                                 b: TensorView, bOut: MTLBuffer,
                                 hiddenSize: Int) {
-        precondition(hiddenSize % Quantization.groupSize == 0,
-                     "hiddenSize must be a multiple of \(Quantization.groupSize)")
+        precondition(hiddenSize % groupSize == 0,
+                     "hiddenSize must be a multiple of \(groupSize)")
         // The row body reads packed weights through a `ushort*`; the repacker
         // guarantees two-byte sub-tensor alignment but not four-byte.
         precondition(Int(qkv.offset) % 2 == 0 && Int(z.offset) % 2 == 0 &&
@@ -256,7 +272,8 @@ final class GDN {
         encoder.endEncoding()
     }
 
-    /// out = rmsnorm(y; weight) * silu(z), per value head, `rows` rows.
+    /// out = rmsnorm(y; weight) * gate(z), per value head, `rows` rows, with
+    /// `gate` chosen by `config.outputGate`.
     func encodeGatedNorm(commandBuffer: MTLCommandBuffer,
                          y: MTLBuffer, yOffset: Int = 0,
                          z: MTLBuffer, zOffset: Int = 0,
@@ -271,8 +288,10 @@ final class GDN {
         encoder.setBuffer(out, offset: outOffset, index: 3)
         var vHeads = UInt32(config.numVHeads)
         var valueDim = UInt32(config.valueHeadDim)
+        var gateKind: UInt32 = config.outputGate == .sigmoid ? 1 : 0
         encoder.setBytes(&vHeads, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&valueDim, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&gateKind, length: MemoryLayout<UInt32>.size, index: 6)
         encoder.dispatchThreadgroups(
             MTLSize(width: config.numVHeads, height: rows, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))

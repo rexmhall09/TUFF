@@ -5,6 +5,10 @@ using namespace metal;
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
 
+// Fixed at 64, unlike the decode kernels. This module is compiled as its own
+// private library, where a function constant would force every pipeline
+// through the specialized-function API, and it is only reached from chunked
+// prefill — which Qwen4-Exp does not use yet. It follows when prefill does.
 constant constexpr uint kW4A8GroupSize = 64;
 
 constant constexpr int kMPPAffineTileM = 64;
@@ -350,7 +354,7 @@ kernel void mpp_prefill_affine_threadgroup_f16_apple10_v1(
                 const uint q = (globalK & 1u) == 0u
                     ? uint(packed & 0x0fu)
                     : uint(packed >> 4);
-                const uint affineGroup = globalK / uint(kW4A8GroupSize);
+                const uint affineGroup = globalK / kW4A8GroupSize;
                 const float scale = float(scales[
                     globalN * groupsPerRow + affineGroup]);
                 const float bias = float(biases[
@@ -452,7 +456,7 @@ kernel void mpp_prefill_affine_threadgroup_bf16_apple10_v1(
                 const uint q = (globalK & 1u) == 0u
                     ? uint(packed & 0x0fu)
                     : uint(packed >> 4);
-                const uint affineGroup = globalK / uint(kW4A8GroupSize);
+                const uint affineGroup = globalK / kW4A8GroupSize;
                 const float scale = float(scales[
                     globalN * groupsPerRow + affineGroup]);
                 const float bias = float(biases[
@@ -558,7 +562,7 @@ kernel void mpp_prefill_affine_threadgroup_bf16_output_apple10_v1(
                 const uint q = (globalK & 1u) == 0u
                     ? uint(packed & 0x0fu)
                     : uint(packed >> 4);
-                const uint affineGroup = globalK / uint(kW4A8GroupSize);
+                const uint affineGroup = globalK / kW4A8GroupSize;
                 const float scale = float(scales[
                     globalN * groupsPerRow + affineGroup]);
                 const float bias = float(biases[

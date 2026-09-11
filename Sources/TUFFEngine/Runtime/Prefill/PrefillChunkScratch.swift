@@ -25,6 +25,18 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     /// Gemma 4 dense PLE dimensions (zero on architectures without PLE).
     let plePackedWidth: Int
     let pleWidth: Int
+    /// Residual streams. One on an ordinary architecture; four on Qwen4-Exp,
+    /// where `hidden` and `normed` carry every stream stacked per token and
+    /// the block reads a mixture of them instead of the residual itself.
+    let streamCount: Int
+    /// Hyper-connection low-rank width (zero when there are no streams).
+    let hcLowRank: Int
+    /// Width of one n-gram embedding row, zero without an n-gram layer. The
+    /// chunk path stages a row per token here, so this has to be sized from
+    /// the layout rather than a constant: an image span is emitted as a single
+    /// chunk of its own pooled length, which is larger than `maxChunkTokens`
+    /// for any ordinary photo.
+    let ngramEmbedDim: Int
 
     init(config: ArchConfig,
                 chunkTokens: Int,
@@ -52,11 +64,24 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
         self.plePackedWidth = config.hasPerLayerInputs
             ? config.numLayers * config.hiddenSizePerLayerInput : 0
         self.pleWidth = config.hiddenSizePerLayerInput
+        self.streamCount = config.hyperConnection.isEnabled
+            ? config.hyperConnection.streamCount : 1
+        self.hcLowRank = config.hyperConnection.isEnabled
+            ? config.hyperConnection.lowRank : 0
+        self.ngramEmbedDim = config.ngramEmbedding.isEnabled
+            ? config.ngramEmbedding.embedDim : 0
     }
 
 
-    var hiddenElements: Int { chunkTokens * hiddenSize }
+    /// The residual and its norm carry every stream, so both are
+    /// `streamCount` times wider than the block's own working width.
+    var hiddenElements: Int { chunkTokens * hiddenSize * streamCount }
     var normedElements: Int { hiddenElements }
+    var hcMixedElements: Int { streamCount > 1 ? chunkTokens * hiddenSize : 0 }
+    var hcLowRankElements: Int { chunkTokens * hcLowRank }
+    var hcMixUpElements: Int { streamCount > 1 ? chunkTokens * hiddenSize * streamCount : 0 }
+    var hcInjectElements: Int { streamCount > 1 ? chunkTokens * streamCount : 0 }
+    var ngramEmbeddingElements: Int { chunkTokens * ngramEmbedDim }
     var qElements: Int { chunkTokens * qProjElementsPerToken }
     var attnElements: Int { chunkTokens * maxQElementsPerToken }
     var attnQElements: Int { chunkTokens * attnGateElementsPerToken }
@@ -114,12 +139,19 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
             + pleContextElements
             + pleLayerElements
             + pleGateElements
+            + hcMixedElements
+            + hcLowRankElements
+            + hcMixUpElements
+            + hcInjectElements
         return fp16Elements * MemoryLayout<Float16>.stride
     }
 
     var sharedMetadataBytes: Int {
         routeIDElements * MemoryLayout<UInt32>.stride
             + routeWeightElements * MemoryLayout<Float16>.stride
+            // Written by the CPU as the chunk is encoded, so shared rather
+            // than private.
+            + ngramEmbeddingElements * MemoryLayout<Float16>.stride
     }
 
     var totalPersistentBytes: Int {
@@ -162,6 +194,12 @@ struct PrefillChunkScratchBuffers {
     let pleContext: MTLBuffer
     let pleLayer: MTLBuffer
     let pleGate: MTLBuffer
+    // Qwen4-Exp hyper-connections. Placeholder-sized when streamCount == 1.
+    let hcMixed: MTLBuffer
+    let hcLowRank: MTLBuffer
+    let hcMixUp: MTLBuffer
+    let hcInject: MTLBuffer
+    let ngramEmbedding: MTLBuffer
 
     static func allocate(device: MTLDevice,
                          layout: PrefillChunkScratchLayout) throws -> PrefillChunkScratchBuffers {
@@ -229,6 +267,17 @@ struct PrefillChunkScratchBuffers {
             pleLayer: try privateBuffer(layout.pleLayerElements,
                                         label: "prefill.pleLayer"),
             pleGate: try privateBuffer(layout.pleGateElements,
-                                       label: "prefill.pleGate"))
+                                       label: "prefill.pleGate"),
+            hcMixed: try privateBuffer(layout.hcMixedElements,
+                                       label: "prefill.hcMixed"),
+            hcLowRank: try privateBuffer(layout.hcLowRankElements,
+                                         label: "prefill.hcLowRank"),
+            hcMixUp: try privateBuffer(layout.hcMixUpElements,
+                                       label: "prefill.hcMixUp"),
+            hcInject: try privateBuffer(layout.hcInjectElements,
+                                        label: "prefill.hcInject"),
+            ngramEmbedding: try sharedBuffer(
+                max(layout.ngramEmbeddingElements, 1) * MemoryLayout<Float16>.stride,
+                label: "prefill.ngramEmbedding"))
     }
 }

@@ -283,8 +283,8 @@ struct InspectorView: View {
         Section("Memory") {
             LabeledContent("Context") {
                 Picker("Context", selection: $model.maxContextTokens) {
-                    ForEach(AppContextLengthOption.allCases) { option in
-                        Text(option.menuLabel).tag(option.tokens)
+                    ForEach(AppContextLengthOption.options(for: model.installDescriptor)) { option in
+                        Text(option.shortLabel).tag(option.tokens)
                     }
                 }
                 .pickerStyle(.menu)
@@ -301,7 +301,7 @@ struct InspectorView: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            Text("More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 8K context and 16 slots and apply after reloading the model.")
+            Text("Longer context and more expert slots use additional memory. The cost depends on the model. Changes apply after reloading the model.")
                 .appFont(.caption)
                 .foregroundStyle(.secondary)
         }

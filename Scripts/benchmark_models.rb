@@ -53,6 +53,13 @@ BENCHMARK_MODELS = {
     chat: [],
     sampling: %w[--temperature 1.0 --top-k 40 --top-p 0.95],
     runtime: %w[--expert-cache-slots 16 --prefill on --prefill-chunk-tokens auto --rdadvise bounded]
+  },
+  # 32 slots is this checkpoint's measured optimum; see the catalogue note.
+  "qwen38-flash-next" => {
+    path: "scratch/qwen38-flash-next.gturbo",
+    chat: [],
+    sampling: %w[--temperature 1.0 --top-k 20 --top-p 0.95],
+    runtime: %w[--expert-cache-slots 32 --prefill on --prefill-chunk-tokens auto --rdadvise bounded]
   }
 }.freeze
 
@@ -64,5 +71,6 @@ BENCHMARK_MODEL_LABELS = {
   "qwen36" => "Qwen3.6 35B-A3B",
   "gpt-oss-20b" => "GPT-OSS 20B",
   "gpt-oss-120b" => "GPT-OSS 120B",
-  "minimax-m2.7" => "MiniMax M2.7 4-bit"
+  "minimax-m2.7" => "MiniMax M2.7 4-bit",
+  "qwen38-flash-next" => "Qwen3.8 Flash Next 4-bit"
 }.freeze

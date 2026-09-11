@@ -123,6 +123,13 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         }
     }
 
+    var supportsChunkedPrefill: Bool {
+        switch backend {
+        case .affine(let runner): runner.supportsChunkedPrefill
+        case .gptOss: true
+        }
+    }
+
     func prefillChunked(tokens: ArraySlice<Int32>,
                         startPosition: Int,
                         outputMode: PrefillOutputMode,

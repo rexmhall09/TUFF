@@ -120,10 +120,10 @@
            61 GiB checkpoint runs on a 16 GB machine without swap.</p>
       </div>
       <div class="card">
-        <h3>Eight models</h3>
+        <h3>Nine models</h3>
         <p>Gemma 4 E2B, E4B, 12B QAT and 26B-A4B, Qwen3.6 35B-A3B, GPT-OSS 20B and
-           120B, and MiniMax M2.7, each downloaded and repacked from a pinned
-           revision.</p>
+           120B, MiniMax M2.7, and Qwen3.8 Flash Next, each downloaded and
+           repacked from a pinned revision.</p>
       </div>
       <div class="card">
         <h3>Nothing leaves the Mac</h3>
@@ -136,6 +136,17 @@
       </div>
     </div>
   </section>
+
+<!-- release-benchmarks:start -->
+<section class="benchmarks">
+<h2>Version 5.0.0</h2>
+<p>Qwen3.8 Flash Next with image support, faster first-use weight verification, conversation reuse for text follow-ups, RAM-aware automatic settings, and context options up to each model’s supported limit.</p>
+<h3>Local model check</h3><p>TUFF 5.0.0, measured 2026-09-10 on a 16 GB M2 MacBook Air. One fresh process per model, answering What is the capital of France? with a 4,096-token context, seed 20260721, and a 128-token output cap (256 for MiniMax). Decode speed excludes model loading and prefill; prefill includes the first-use weight checks. 9/9 runs named Paris. These short responses are smoke tests, not a sustained-throughput or model-quality comparison. Host load and filesystem caching can affect the timings.</p>
+<div style="overflow-x:auto"><table style="width:100%;text-align:left;border-spacing:0 10px"><thead><tr><th>Model</th><th>Decode</th><th>Prefill</th></tr></thead><tbody><tr><td>Gemma 4 E2B IT</td><td>46.96 tok/s</td><td>0.47 s</td></tr><tr><td>Gemma 4 E4B IT</td><td>27.71 tok/s</td><td>0.80 s</td></tr><tr><td>Gemma 4 12B IT QAT</td><td>5.41 tok/s</td><td>29.42 s</td></tr><tr><td>Gemma 4 26B-A4B IT</td><td>8.16 tok/s</td><td>4.61 s</td></tr><tr><td>Qwen3.6 35B-A3B</td><td>6.76 tok/s</td><td>6.39 s</td></tr><tr><td>GPT-OSS 20B</td><td>2.19 tok/s</td><td>10.44 s</td></tr><tr><td>GPT-OSS 120B</td><td>0.16 tok/s</td><td>31.34 s</td></tr><tr><td>MiniMax M2.7 4-bit</td><td>0.26 tok/s</td><td>49.79 s</td></tr><tr><td>Qwen3.8 Flash Next 4-bit</td><td>0.54 tok/s</td><td>31.87 s</td></tr></tbody></table></div>
+<p>The same packaged runner was tested with one local photo on all 6 image-compatible models. 6/6 responses passed the glasses-and-towel keyword smoke check, with responses also reviewed manually. E2B needed a 512-token rerun after the initial 128-token cap; the other photo runs used 128 tokens. This is a single-image check, not a general vision accuracy score. The photo and raw responses are kept out of the repository.</p>
+<p><a href="https://github.com/rexmhall09/TUFF/blob/main/docs/V5_MODEL_VALIDATION.md">Validation details and reproduction script</a></p>
+</section>
+<!-- release-benchmarks:end -->
 
   <footer>
     <p>

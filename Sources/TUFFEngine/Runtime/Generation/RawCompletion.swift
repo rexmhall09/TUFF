@@ -152,6 +152,17 @@ public func runRawCompletion(producer: any LogitProducer,
     guard !promptIds.isEmpty else {
         throw GeneratorError.emptyPrompt
     }
+    #if os(macOS)
+    // Generation is user-requested work even when the decode helper has no
+    // visible window. Keep App Nap from deferring it while a request is active;
+    // still allow the user's normal system sleep policy. End on every exit,
+    // including cancellation and errors, so idle runners remain idle.
+    let activity = ProcessInfo.processInfo.beginActivity(
+        options: .userInitiatedAllowingIdleSystemSleep,
+        reason: "Generating a local model response")
+    defer { ProcessInfo.processInfo.endActivity(activity) }
+    #endif
+
     let fusedRunner = producer as? any GreedyHeadReporting
     let fusedGreedy = fusedRunner?.usesFusedGreedyHead == true
     guard !fusedGreedy || config.isPureGreedy else {
@@ -248,7 +259,8 @@ public func runRawCompletion(producer: any LogitProducer,
         // way here is a producer that cannot run image spans at all.
         throw PrefillError.chunkedUnsupported(
             "multimodal prefill requires a MultimodalPrefillRunner-backed runtime")
-    case (.none, .chunked) where producer is any ChunkedPrefillRunner:
+    case (.none, .chunked) where (producer as? any ChunkedPrefillRunner)?
+        .supportsChunkedPrefill == true:
         let chunked = producer as! any ChunkedPrefillRunner
         let mode: PrefillOutputMode = fusedGreedy ? .greedyIfAvailable : .logits
         let result = try await chunked.prefillChunked(tokens: prefillTokens,
@@ -269,10 +281,12 @@ public func runRawCompletion(producer: any LogitProducer,
         position = result.newPosition
         prefillSeed = result.seed
         history.append(contentsOf: prefillTokens)
-    case (.none, .chunked):
-        throw PrefillError.chunkedUnsupported(
-            PrefillError.chunkedRequiresChunkedRunnerReason)
-    case (.none, .off):
+    case (.none, .chunked), (.none, .off):
+        // A text prompt whose producer has no chunked path runs a token at a
+        // time instead of refusing. Prefill mode is a performance choice — the
+        // same reasoning `coercedForImagePrompt` applies in the other
+        // direction — and a hyper-connection architecture has no chunked
+        // kernels at all, so throwing here would mean the model cannot answer.
         for t in prefillTokens {
             try Task.checkCancellation()
             try await producer.produce(token: t, position: position, into: scratch.logits)

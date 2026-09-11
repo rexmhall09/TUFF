@@ -28,27 +28,42 @@ final class LMHeadChainInt4 {
     private let maxVocab: Int
     private let maxRows: Int
 
+    /// Affine group size of the LM head weights. Qwen3.8 Flash Next's are
+    /// grouped at 32; every other checkpoint's at 64.
+    let groupSize: Int
+
     init(context: MetalContext,
          maxD: Int = 2816,
          maxVocab: Int = 262144,
-         maxRows: Int = 8) throws {
+         maxRows: Int = 8,
+         groupSize: Int = Quantization.groupSize) throws {
+        precondition(Quantization.supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
+        self.groupSize = groupSize
+        // Unset at the default, so the shipping models keep their pipelines.
+        let groupConstants: [MetalFunctionConstant] =
+            groupSize == Quantization.groupSize
+                ? []
+                : [MetalFunctionConstant(
+                    index: Quantization.groupSizeFunctionConstantIndex,
+                    value: .uint32(UInt32(groupSize)))]
         self.rms = try RMSNorm(context: context)
-        self.rowGreedy = try context.pipeline("lm_head_greedy_int4_rows_chunk_raw")
+        self.rowGreedy = try context.pipeline("lm_head_greedy_int4_rows_chunk_raw", constants: groupConstants)
         self.specializedD = UInt32(maxD)
         self.specializedVocab = UInt32(maxVocab)
         self.rowGreedySpecialized = try context.pipeline(
             "lm_head_greedy_int4_rows_chunk_raw",
-            constants: [
+            constants: groupConstants + [
                 MetalFunctionConstant(index: 10, value: .uint32(UInt32(maxD))),
                 MetalFunctionConstant(index: 11, value: .uint32(UInt32(maxVocab))),
                 MetalFunctionConstant(index: 13, value: .bool(true)),
             ])
         self.rowReducer = try context.pipeline("lm_head_greedy_int4_rows_reduce")
         self.blockRowGreedy = try context.pipeline(
-            "lm_head_greedy_int4_block_rows_raw")
+            "lm_head_greedy_int4_block_rows_raw", constants: groupConstants)
         self.blockRowGreedySpecialized = try context.pipeline(
             "lm_head_greedy_int4_block_rows_raw",
-            constants: [
+            constants: groupConstants + [
                 MetalFunctionConstant(index: 10, value: .uint32(UInt32(maxD))),
                 MetalFunctionConstant(index: 11, value: .uint32(UInt32(maxVocab))),
                 MetalFunctionConstant(index: 13, value: .bool(true)),
@@ -102,8 +117,8 @@ final class LMHeadChainInt4 {
         precondition(Int(d) <= maxD, "d=\(d) exceeds wrapper maxD=\(maxD)")
         precondition(Int(vocab) <= maxVocab,
                      "vocab=\(vocab) exceeds wrapper maxVocab=\(maxVocab)")
-        precondition(Int(d) % Quantization.groupSize == 0,
-                     "d must be a multiple of \(Quantization.groupSize)")
+        precondition(Int(d) % groupSize == 0,
+                     "d must be a multiple of \(groupSize)")
         precondition(hiddenOffset >= 0, "hiddenOffset must be non-negative")
         precondition(weightsOffset % 2 == 0,
                      "lm_head_greedy_int4_rows_chunk_raw needs a 2-aligned weightsOffset")
@@ -181,7 +196,7 @@ final class LMHeadChainInt4 {
         precondition(Int(d) <= maxD, "d exceeds wrapper maxD")
         precondition(Int(vocab) <= maxVocab, "vocab exceeds wrapper maxVocab")
         precondition(hiddenOffset >= 0 && hiddenStride >= Int(d))
-        precondition(Int(d) % Quantization.groupSize == 0)
+        precondition(Int(d) % groupSize == 0)
         precondition(weightsOffset % 2 == 0)
 
         for row in 0..<rowCount {

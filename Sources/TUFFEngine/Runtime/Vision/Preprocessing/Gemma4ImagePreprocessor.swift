@@ -224,7 +224,7 @@ public final class VisionImagePreprocessor {
         patches: MTLBuffer,
         positions: MTLBuffer
     ) {
-        if config.family == .qwen36 {
+        if config.family.usesQwenVisionTower {
             patchifyQwen36(
                 rgba: rgba, rowBytes: rowBytes, geometry: geometry,
                 patches: patches, positions: positions)

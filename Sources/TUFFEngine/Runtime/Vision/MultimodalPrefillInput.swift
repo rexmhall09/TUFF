@@ -215,7 +215,7 @@ public struct MultimodalPrefillInput: Sendable {
         self.embeddingTokenIDs = embeddingTokenIDs
         self.imageSpans = imageSpans
         self.family = family
-        let positions = try explicitPositionIDs ?? (family == .qwen36
+        let positions = try explicitPositionIDs ?? (family.usesQwenVisionTower
             ? MultimodalPositionIDs.qwen36(
                 tokenCount: effectiveTokenIDs.count, imageSpans: imageSpans)
             : nil)

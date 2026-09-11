@@ -25,14 +25,33 @@ final class DequantInt4GEMV {
     private let pipeline: MTLComputePipelineState
     private let specializedPipelines: [Shape: MTLComputePipelineState]
 
+    /// Affine group size this instance decodes. Every checkpoint in the
+    /// lineup uses 64; Qwen3.8 Flash Next is quantized at 32, which its n-gram
+    /// PLE rows require — they are 160 values wide, and 160 is not divisible
+    /// by 64.
+    let groupSize: Int
+
     /// `additionalShapes` compiles extra constant-folded variants for a
     /// non-Gemma model's decode shapes. Measured: an unspecialized
     /// 4096x2048 GEMV runs at 102 GB/s, the specialized one at 141 GB/s.
+    ///
+    /// At the default group size no function constant is set at all, so the
+    /// 64 path compiles to exactly what it did before this became variable.
     init(context: MetalContext,
-         additionalShapes: [(m: Int, n: Int)] = []) throws {
+         additionalShapes: [(m: Int, n: Int)] = [],
+         groupSize: Int = Quantization.groupSize) throws {
+        precondition(Quantization.supportedGroupSizes.contains(groupSize),
+                     "unsupported affine group size \(groupSize)")
+        self.groupSize = groupSize
+        let groupConstants: [MetalFunctionConstant] =
+            groupSize == Quantization.groupSize
+                ? []
+                : [MetalFunctionConstant(index: Quantization.groupSizeFunctionConstantIndex,
+                                       value: .uint32(UInt32(groupSize)))]
+
         self.pipeline = try context.pipeline(
             "dequant_int4_gemv_simd",
-            constants: [],
+            constants: groupConstants,
             maxTotalThreadsPerThreadgroup: 512)
 
         let shapes = Self.realDecodeShapes
@@ -41,7 +60,7 @@ final class DequantInt4GEMV {
         for shape in shapes {
             specializedPipelines[shape] = try context.pipeline(
                 "dequant_int4_gemv_simd",
-                constants: [
+                constants: groupConstants + [
                     MetalFunctionConstant(index: 20, value: .uint32(shape.m)),
                     MetalFunctionConstant(index: 21, value: .uint32(shape.n)),
                     MetalFunctionConstant(index: 22, value: .bool(true)),
@@ -89,8 +108,8 @@ final class DequantInt4GEMV {
                 yOffset: Int = 0,
                 m: UInt32,
                 n: UInt32) {
-        precondition(n % UInt32(Quantization.groupSize) == 0,
-                     "N must be a multiple of \(Quantization.groupSize)")
+        precondition(n % UInt32(groupSize) == 0,
+                     "N must be a multiple of \(groupSize)")
         // The kernel reads packed weights through a `ushort*`; the repacker
         // guarantees two-byte sub-tensor alignment but not four-byte alignment.
         precondition(weightsOffset % 2 == 0,

@@ -31,7 +31,7 @@ resident, reads the experts it needs from SSD, and reuses them through a bounded
 cache. That is how I can run the 61 GiB GPT-OSS 120B checkpoint on my 16 GB M2
 MacBook Air without swap.
 
-Version 3 is a much bigger project than the original app. It has seven models,
+Version 5 is a much bigger project than the original app. It has nine models,
 persistent and continuous chats, Markdown and native LaTeX rendering on both
 sides of the conversation, image and file attachments, per-model settings, a
 shared local server, hardware eligibility checks, and signed binary updates.
@@ -62,7 +62,7 @@ TUFF is aimed at the case where the model does not fit at all.
 
 ✅ yes · ◐ partly · ❌ no
 
-TUFF ships seven models rather than a library, but each one is pinned to a
+TUFF ships nine models rather than a library, but each one is pinned to a
 revision, checksum-verified on install, and qualified on real hardware before it
 appears. LM Studio and Ollama reach Apple Silicon through MLX and Metal backends;
 TUFF and turbo-fieldfare are written for it and run nowhere else. LM Studio's
@@ -167,6 +167,7 @@ copy of a checkpoint first.
 | GPT-OSS 20B | Reasoning and local tool workflows | 13.79 GB | 16 GB | None |
 | GPT-OSS 120B | The largest and highest-quality option | 65.4 GB | 16 GB | None |
 | MiniMax M2.7 4-bit | Always-thinking, file-backed 229B MoE | 128.71 GB | 16 GB | None |
+| Qwen3.8 Flash Next 4-bit | Hybrid-attention 512-expert MoE, images | 110.85 GB | 16 GB | Image input |
 
 Gemma and Qwen expose thinking on or off. GPT-OSS exposes low, medium, and high
 reasoning. Qwen can also preserve thinking between turns from its advanced
@@ -181,15 +182,21 @@ budget. Models a Mac does not meet the requirements for stay visible but gray,
 with Download and Load disabled and an explanation. Disk space is checked
 separately.
 
-Auto has three profiles, because the two things spare memory can buy are not
-worth the same. Resident expert slots cut SSD reads during generation; context
-tokens buy a longer conversation and make nothing faster.
+Auto sizes context from the selected checkpoint's memory cost and the Mac's
+unified RAM, within the checkpoint's native limit. Expert-cache slots retain
+their measured defaults.
 
-| Profile | Context | Rest of the budget |
-| --- | --- | --- |
-| Speed | The checkpoint's qualified length | Resident experts |
-| Balanced | Up to twice that length | Resident experts |
-| Context | The longest that fits | Resident experts |
+| Profile | Context target |
+| --- | --- |
+| Speed | About a quarter of the longest window that fits |
+| Balanced | About half of the longest window that fits |
+| Context | The longest supported window that fits |
+
+Targets round down to a selectable length and never fall below the qualified
+default. Manual context choices reach each model's native limit: 128K for
+Gemma E2B/E4B and GPT-OSS, 200K for MiniMax M2.7, and 256K for Gemma 12B/26B
+and Qwen 3.6/3.8. Memory eligibility still applies. Qwen 3.8 uses its learned
+compressed-block sparse-attention indexer above the 2K dense-attention range.
 
 Balanced is the default for every model, including profiles saved by an
 earlier build. The profiles differ in context and nothing else,
@@ -234,47 +241,35 @@ every workload.
 
 ### Benchmarks
 
-Every number below was measured on my own M2 MacBook Air (`Mac14,2`, 16 GB,
-macOS 26.5.2, Swift 6.3.1) on AC power, using a fresh release CLI process per
-run and `/usr/bin/time -l`. Prompt length, generated length, cache state, and
-hardware all move these numbers, so a range across workloads is not run-to-run
-variance.
-
-One short question, `What is the capital of France?`, one process per model.
-Decode rate excludes install, load, and prefill. Every model answered correctly:
-
-Every rate is the **best of three runs**, because this fanless Mac shares its
-GPU with the window server and the sweep ran while the machine was also driving
-a desktop session. Repeated runs of one binary on one model spanned 19.1 to
-37.9 tokens per second; the slow runs measured that interference, and the first
-run of any model also faults its memory-mapped weights in from SSD. Every
-individual run is recorded alongside the summary.
+TUFF 5.0.0, measured 2026-09-10 on a 16 GB M2 MacBook Air. One fresh process per model, answering `What is the capital of France?` with a 4,096-token context, seed 20260721, and a 128-token output cap (256 for MiniMax). Decode speed excludes model loading and prefill; prefill includes the first-use weight checks. 9/9 runs named Paris. These short responses are smoke tests, not a sustained-throughput or model-quality comparison. Host load and filesystem caching can affect the timings.
 
 | Model | Decode | Prefill | Peak RSS |
 | --- | ---: | ---: | ---: |
-| Gemma 4 E2B IT | 43.96 tok/s | 0.56 s | 324 MiB |
-| Gemma 4 E4B IT | 28.96 tok/s | 1.08 s | 324 MiB |
-| Gemma 4 12B IT QAT | 6.88 tok/s | 14.55 s | 381 MiB |
-| Gemma 4 26B-A4B IT | 7.69 tok/s | 11.03 s | 1,394 MiB |
-| Qwen3.6 35B-A3B | 6.11 tok/s | 15.61 s | 1,417 MiB |
-| GPT-OSS 20B | 2.36 tok/s | 19.03 s | 2,616 MiB |
-| GPT-OSS 120B | 0.19 tok/s | 66.47 s | 2,430 MiB |
-| MiniMax M2.7 4-bit | 0.33 tok/s | 71.37 s | 2,103 MiB |
+| Gemma 4 E2B IT | 46.96 tok/s | 0.47 s | 324 MiB |
+| Gemma 4 E4B IT | 27.71 tok/s | 0.80 s | 324 MiB |
+| Gemma 4 12B IT QAT | 5.41 tok/s | 29.42 s | 385 MiB |
+| Gemma 4 26B-A4B IT | 8.16 tok/s | 4.61 s | 1840 MiB |
+| Qwen3.6 35B-A3B | 6.76 tok/s | 6.39 s | 1418 MiB |
+| GPT-OSS 20B | 2.19 tok/s | 10.44 s | 2217 MiB |
+| GPT-OSS 120B | 0.16 tok/s | 31.34 s | 1870 MiB |
+| MiniMax M2.7 4-bit | 0.26 tok/s | 49.79 s | 2689 MiB |
+| Qwen3.8 Flash Next 4-bit | 0.54 tok/s | 31.87 s | 1295 MiB |
 
-These are conservative for that reason: the same build measured 40.30 tokens
-per second on Gemma 4 E2B on an otherwise idle machine. Treat the ordering
-across models as the signal and each absolute figure as a floor. Reproduce any
-row with `Scripts/benchmark_simple.rb --repeat 3`.
+Peak RSS is the process resident set reported by macOS, not total model or Metal memory. MiniMax needed a longer completion rerun; its completed rerun is shown. Preliminary capped results are retained locally.
 
-MiniMax M2.7 needed 132 tokens to finish this answer, four past the 128-token
-cap the sweep uses, because it always reasons and its thinking is not part of
-the visible answer. Run to completion it answers correctly and stops at end of
-turn, at 0.303 tok/s. Its row above is the capped run, measured the same way as
-every other row.
+The same packaged runner was tested with one local photo on all 6 image-compatible models. 6/6 responses passed the glasses-and-towel keyword smoke check, with responses also reviewed manually. E2B needed a 512-token rerun after the initial 128-token cap; the other photo runs used 128 tokens. This is a single-image check, not a general vision accuracy score. The photo and raw responses are kept out of the repository.
 
-The Gemma 4 12B QAT row was 0.04 tok/s in v4.0.1 and is 6.88 here. That was a
-bug in v4.0.0 and v4.0.1, not a property of the model; v4.0.2 fixes it. See
-below.
+Reproduce the sweep with:
+
+```sh
+python3 Scripts/validate_release_models.py \
+  --app dist/v5.0.0-release-public/TUFF.app \
+  --model-root "$HOME/Library/Application Support/TUFF/Models" \
+  --image /path/to/photo.jpeg \
+  --output benchmark-results/release-validation
+```
+
+The harness saves each command, response, timing, model manifest hash, and runner identity; `--resume` refuses changed inputs. See [the release validation report](docs/V5_MODEL_VALIDATION.md) for per-model status and [the runner report](docs/QWEN38_RUNNER_PERFORMANCE.md) for the separate preprocessing comparison.
 
 #### What v4.0.0 changed about decode
 
@@ -398,7 +393,7 @@ swift build -c release
 To build the complete app bundle, embedded updater, ZIP, and checksum:
 
 ```bash
-Scripts/package_app.sh 4.1.1
+Scripts/package_app.sh 5.0.0
 open dist/TUFF.app
 ```
 

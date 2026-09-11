@@ -346,10 +346,8 @@ public final class VisionRuntime {
             attentionEnvironment["TUFF_VISION_ATTENTION_Q8"] = "1"
             attentionEnvironment.removeValue(forKey: "TUFF_VISION_ATTENTION_MPP")
         }
-        self.attention = try VisionAttention(
-            context: context, environment: attentionEnvironment,
-            scoreScale: max(shape.attentionScale, 1),
-            headDimension: max(shape.headDimension, 64),
+        self.attention = try Self.makeAttention(
+            context: context, config: shape, environment: attentionEnvironment,
             allowFusedPaddedLayout: linear.supportsPaddedHeadStore(
                 n: shape.hiddenSize, k: shape.hiddenSize)
                 && shape.headDimension == VisionAttention.headDimension)
@@ -377,6 +375,19 @@ public final class VisionRuntime {
                 : context.device.supportsFamily(.apple10) ? .apple10V1 : .control)
         self.unifiedPatchProjectorKernel = MPPPrefillInt4QMM(
             context: context, variant: .apple10BF16Output)
+    }
+
+    /// Shared with numerical tests so they exercise the runtime's parameter
+    /// wiring, including family-specific scales, rather than just the kernel.
+    static func makeAttention(context: MetalContext, config: VisionConfig,
+                              environment: [String: String],
+                              allowFusedPaddedLayout: Bool) throws -> VisionAttention {
+        try VisionAttention(context: context, environment: environment,
+            // Qwen needs 1/sqrt(72), less than one. Clamping it to one
+            // distorts every layer while still producing finite features.
+            scoreScale: config.attentionScale > 0 ? config.attentionScale : 1,
+            headDimension: max(config.headDimension, 64),
+            allowFusedPaddedLayout: allowFusedPaddedLayout)
     }
 
     private let projectorKernel: MPPPrefillInt4QMM
@@ -563,7 +574,7 @@ public final class VisionRuntime {
         if !retainsWeightRegions { releaseCachedWeightRegions() }
         try checkCancellation()
         let rows = patchGridWidth * patchGridHeight
-        if config.family == .qwen36 {
+        if config.family.usesQwenVisionTower {
             return try encodeQwenPreparedPatches(
                 patchesBF16: patchesBF16,
                 positionsInt32x2: positionsInt32x2,
@@ -1399,7 +1410,9 @@ public final class VisionRuntime {
             buffer: features,
             tokenCount: outputRows,
             hiddenSize: config.textHiddenSize,
-            family: .qwen36,
+            // The tower is shared; the features belong to whichever text model
+            // asked for them, and the prompt renderer checks that.
+            family: config.family,
             patchGridWidth: patchGridWidth,
             patchGridHeight: patchGridHeight,
             gpuNanoseconds: gpuNanoseconds,

@@ -95,7 +95,7 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                 continuation.finish(throwing: AppInferenceError.generationInFlight)
                 return
             }
-            let task = Task { [self] in
+            let task = Task(priority: .userInitiated) { [self] in
                 await session.run(request: request,
                                   memorySampler: memorySampler,
                                   continuation: continuation)
@@ -162,6 +162,7 @@ actor RealInferenceSession {
     private var runner: ModelForwardRunner?
     private var scratch: RawCompletionScratch?
     private var model: Model?
+    private var promptReuse = AppPromptReuseState()
 
     /// Bytes of image tower held mapped right now, published outside the actor
     /// so a reader does not have to await it mid-decode.
@@ -182,6 +183,7 @@ actor RealInferenceSession {
                       onState: @Sendable (AppModelLoadState) -> Void) async throws {
         if loadedKey == key, runner != nil { return }
 
+        promptReuse.clear()
         runner = nil
         scratch = nil
         model = nil
@@ -563,6 +565,7 @@ actor RealInferenceSession {
     }
 
     func unload() {
+        promptReuse.clear()
         visionRuntime = nil
         visionRuntimeError = nil
         model = nil
@@ -608,9 +611,9 @@ actor RealInferenceSession {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
 
-            let promptIds: [Int32]
+            var promptIds: [Int32]
             let multimodalInput: MultimodalPrefillInput?
-            let conversationTrim: AppConversationTrim
+            var conversationTrim: AppConversationTrim
             // Images the conversation already contains are part of the context
             // just as much as the ones attached to this message: a follow-up
             // question about a picture used to be answered by a model that
@@ -666,6 +669,14 @@ actor RealInferenceSession {
                 multimodalInput = rendered.input
                 conversationTrim = rendered.trim
             }
+            if conversationTrim.droppedTurns == 0, multimodalInput == nil,
+               let continued = promptReuse.textContinuation(
+                    request: request, tokenizer: tokenizer, modelVariant: model.config.variant),
+               continued.count < runner.maxContext {
+                promptIds = continued
+                conversationTrim = AppConversationTrim(droppedTurns: 0,
+                                                        promptTokens: continued.count)
+            }
             progress.promptTokenCount = promptIds.count
             progress.conversationTrim = conversationTrim
             memorySampler.resetPeak()
@@ -676,7 +687,11 @@ actor RealInferenceSession {
                     requested: request.maxNewTokens,
                     promptTokenCount: promptIds.count,
                     maxContext: runner.maxContext))
-            runner.reset()
+            // Consume the cache entry before executing: cancellation or any
+            // failure must not leave a claim about partially advanced state.
+            let completionStart = promptReuse.takeStart(
+                promptIDs: promptIds, position: runner.continuationPosition,
+                hasImages: multimodalInput != nil)
             progress.prefillStart = Date()
 
             let assistantDecoder = StructuredAssistantDecoder(
@@ -685,6 +700,7 @@ actor RealInferenceSession {
                 promptOpensThinking: StructuredAssistantDecoder.promptOpensThinking(
                     tokenizer: tokenizer, reasoning: request.reasoning))
             var assistantDecodeError: Error?
+            var responseText = ""
             func publishAssistantEvents(
                 _ events: [StructuredAssistantEvent],
                 index: Int,
@@ -698,6 +714,7 @@ actor RealInferenceSession {
                     }
                     switch event {
                     case .content(let text):
+                        responseText += text
                         continuation.yield(.token(token(text)))
                     case .thinking(let text):
                         continuation.yield(.thinking(token(text)))
@@ -711,7 +728,7 @@ actor RealInferenceSession {
                 producer: runner, tokenizer: tokenizer, promptIds: promptIds,
                 multimodalInput: multimodalInput,
                 config: config, context: ctx, scratch: scratch,
-                prefillConfig: prefillConfig) { event in
+                prefillConfig: prefillConfig, start: completionStart) { event in
                 switch event {
                 case .prefill(let done, let total):
                     if done == total {
@@ -747,6 +764,13 @@ actor RealInferenceSession {
             }
             if let assistantDecodeError { throw assistantDecodeError }
             try assistantDecoder.finish()
+            // An awaited completion must not publish into a session that was
+            // unloaded or replaced while that completion was in flight.
+            if self.loadedKey == requestKey, self.runner === runner {
+                promptReuse.record(result, hasImages: multimodalInput != nil,
+                    request: conversationTrim.droppedTurns == 0 ? request : nil,
+                    response: responseText)
+            }
 
             let diagnostics = makeDiagnostics(request: request,
                                               memorySampler: memorySampler,

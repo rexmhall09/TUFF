@@ -8,6 +8,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
     case gptOss = "gpt-oss"
     case minimaxM2 = "minimax-m2"
+    case qwen4Exp = "qwen4-exp"
 }
 
 enum RepackModelVariant: String, Sendable, Equatable {
@@ -19,6 +20,7 @@ enum RepackModelVariant: String, Sendable, Equatable {
     case gptOss_20B = "gpt-oss-20b"
     case gptOss_120B = "gpt-oss-120b"
     case minimaxM27 = "minimax-m2.7"
+    case qwen38FlashNext = "qwen3.8-flash-next"
 }
 
 /// Which dense Gemma a checkpoint is, from its own shape.
@@ -105,6 +107,24 @@ struct ArchInfo: Sendable, Equatable {
     var linearKeyHeadDim: Int = 0
     var linearValueHeadDim: Int = 0
     var linearConvKernelSize: Int = 0
+    // `qwen4_exp` extensions. Zero everywhere else, and omitted from those
+    // manifests, so no other family's output changes.
+    var hyperConnectionStreamCount: Int = 0
+    var hyperConnectionLowRank: Int = 0
+    var ngramLayer: Int = -1
+    var ngramSize: Int = 0
+    var ngramHeads: Int = 0
+    var ngramHeadsPerNgram: Int = 0
+    var ngramVocabSizeBase: Int = 0
+    var ngramShardCount: Int = 0
+    var ngramEmbedDim: Int = 0
+    var ngramConvKernelSize: Int = 0
+    var ngramEosTokenID: Int = 0
+    var indexerBudget: Int = 0
+    var indexerCompressRatio: Int = 0
+    var indexerHeadDim: Int = 0
+    var indexerNumHeads: Int = 0
+    var indexerNumKVHeads: Int = 0
 
     static func load(configPath: String) throws -> ArchInfo {
         let data = try Data(contentsOf: URL(fileURLWithPath: configPath))
@@ -122,6 +142,9 @@ struct ArchInfo: Sendable, Equatable {
         }
         if (root["model_type"] as? String) == "qwen3_5_moe" {
             return try loadQwen36(configPath: configPath, tc: tc)
+        }
+        if (root["model_type"] as? String) == "qwen4_exp" {
+            return try loadQwen4Exp(configPath: configPath, tc: tc)
         }
         return try loadGemma4(configPath: configPath, tc: tc)
     }
@@ -583,6 +606,190 @@ struct ArchInfo: Sendable, Equatable {
             linearConvKernelSize: try i("linear_conv_kernel_dim"))
         try crossCheckProductionQwen36(arch, configPath: configPath)
         return arch
+    }
+
+    // MARK: - Qwen3.8 Flash Next (qwen4_exp)
+
+    /// Parse the `qwen4_exp` text config.
+    ///
+    /// The blocks it shares with Qwen3.6 are read the same way. What it adds:
+    /// four-stream hyper-connections, an n-gram per-layer-embedding table, and
+    /// a sparse attention indexer.
+    private static func loadQwen4Exp(configPath: String,
+                                     tc: [String: Any]) throws -> ArchInfo {
+        func i(_ key: String) throws -> Int {
+            guard let value = (tc[key] as? Int)
+                    ?? (tc[key] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "missing text_config.\(key)")
+            }
+            return value
+        }
+        guard let layerTypes = tc["layer_types"] as? [String] else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing text_config.layer_types")
+        }
+        var mask: [UInt8] = []
+        mask.reserveCapacity(layerTypes.count)
+        for t in layerTypes {
+            switch t {
+            case "linear_attention": mask.append(2)
+            case "full_attention":   mask.append(1)
+            default:
+                throw RepackError.configJsonInvalid(
+                    path: configPath, detail: "unknown layer_types entry \"\(t)\"")
+            }
+        }
+        let rope = (tc["rope_parameters"] as? [String: Any]) ?? [:]
+        guard let theta = (rope["rope_theta"] as? Double)
+            ?? (rope["rope_theta"] as? NSNumber)?.doubleValue else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing rope_parameters.rope_theta")
+        }
+        guard let prf = (rope["partial_rotary_factor"] as? Double)
+            ?? (rope["partial_rotary_factor"] as? NSNumber)?.doubleValue
+            ?? (tc["partial_rotary_factor"] as? NSNumber)?.doubleValue else {
+            throw RepackError.configJsonInvalid(
+                path: configPath, detail: "missing rope_parameters.partial_rotary_factor")
+        }
+        let headDim = try i("head_dim")
+
+        // The layer the n-gram module is attached to. `ple_layer_ids` names
+        // layer 2 while the checkpoint emits the tensors under `layers.1`, and
+        // the loader resolves tensor names, so take the smallest declared id
+        // minus one and let the planner reject a checkpoint that disagrees.
+        guard let pleLayerIDs = tc["ple_layer_ids"] as? [Int],
+              let declaredPLELayer = pleLayerIDs.min(), pleLayerIDs.count == 1 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "expected exactly one text_config.ple_layer_ids entry")
+        }
+        let shardCount = try i("split_ngram_parts")
+        let headsPerNgram = try i("heads_per_ngram")
+        let ngramSize = try i("ngram_size")
+        guard headsPerNgram > 0, ngramSize > 1 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "heads_per_ngram \(headsPerNgram) and ngram_size "
+                    + "\(ngramSize) must both be positive")
+        }
+        // One block of heads per n-gram order from 2 up to `ngram_size`, which
+        // is `ngram_size - 1` blocks of `heads_per_ngram`. The pinned
+        // checkpoint's `ngram_heads_offsets` carries exactly this many entries.
+        //
+        // Not derived from the shard count: 128 shards over 8 heads per n-gram
+        // also lands on 16 for this checkpoint, and would be wrong for any
+        // other split.
+        let ngramHeads = (ngramSize - 1) * headsPerNgram
+
+        let arch = ArchInfo(
+            hiddenSize: try i("hidden_size"),
+            intermediateSize: try i("shared_expert_intermediate_size"),
+            moeIntermediateSize: try i("moe_intermediate_size"),
+            numHeads: try i("num_attention_heads"),
+            numKVHeads: try i("num_key_value_heads"),
+            numFullKVHeads: try i("num_key_value_heads"),
+            headDim: headDim,
+            fullHeadDim: headDim,
+            vocabSize: try i("vocab_size"),
+            slidingWindow: 0,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: theta,
+            fullRopeTheta: theta,
+            partialRotaryFactor: prf,
+            numLayers: try i("num_hidden_layers"),
+            numExperts: try i("num_experts"),
+            topKExperts: try i("num_experts_per_tok"),
+            tieWordEmbeddings: (tc["tie_word_embeddings"] as? Bool) ?? false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: mask,
+            hiddenActivation: (tc["hidden_act"] as? String) ?? "silu",
+            family: .qwen4Exp,
+            variant: .qwen38FlashNext,
+            // Not declared in this config the way Qwen3.6 declares
+            // `attn_output_gate`, but the checkpoint's q_proj emits
+            // `2 * num_attention_heads * head_dim` rows — the per-head
+            // [query ; gate] pair — so the gate is present.
+            attnOutputGate: true,
+            attentionScale: 1.0 / Double(headDim).squareRoot(),
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: true,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: try i("linear_num_key_heads"),
+            linearNumVHeads: try i("linear_num_value_heads"),
+            linearKeyHeadDim: try i("linear_key_head_dim"),
+            linearValueHeadDim: try i("linear_value_head_dim"),
+            linearConvKernelSize: try i("linear_conv_kernel_dim"),
+            hyperConnectionStreamCount: try i("hc_count"),
+            hyperConnectionLowRank: try i("hc_lowrank"),
+            ngramLayer: declaredPLELayer - 1,
+            ngramSize: ngramSize,
+            ngramHeads: ngramHeads,
+            ngramHeadsPerNgram: headsPerNgram,
+            ngramVocabSizeBase: try i("ngram_vocab_size_base"),
+            ngramShardCount: shardCount,
+            ngramEmbedDim: try i("ple_embed_dim"),
+            ngramConvKernelSize: try i("ple_conv_kernel_size"),
+            ngramEosTokenID: try i("eos_token_id"),
+            indexerBudget: try i("indexer_budget"),
+            indexerCompressRatio: try i("indexer_compress_ratio"),
+            indexerHeadDim: try i("indexer_head_dim"),
+            indexerNumHeads: try i("indexer_n_heads"),
+            indexerNumKVHeads: try i("indexer_kv_heads"))
+        try crossCheckProductionQwen4Exp(arch, configPath: configPath)
+        return arch
+    }
+
+    /// Production Qwen3.8 Flash Next baseline, mirroring the runtime's
+    /// `ArchConfig.qwen38FlashNext`. A config that matches the production
+    /// shape must agree on every field a repack depends on; synthetic configs
+    /// with other dimensions are exempt.
+    private static func crossCheckProductionQwen4Exp(_ a: ArchInfo,
+                                                     configPath: String) throws {
+        guard a.hiddenSize == 2_560, a.numLayers == 48 else { return }
+        var expectedMask = [UInt8](repeating: 2, count: 48)
+        for i in stride(from: 3, to: 48, by: 4) { expectedMask[i] = 1 }
+        guard a.intermediateSize == 640,
+              a.moeIntermediateSize == 640,
+              a.numHeads == 24,
+              a.numKVHeads == 2,
+              a.headDim == 256,
+              a.vocabSize == 248_320,
+              a.ropeTheta == 10_000_000,
+              a.partialRotaryFactor == 0.25,
+              a.numExperts == 512,
+              a.topKExperts == 10,
+              !a.tieWordEmbeddings,
+              a.hiddenActivation == "silu",
+              a.fullAttentionLayerMask == expectedMask,
+              a.linearNumKHeads == 16,
+              a.linearNumVHeads == 48,
+              a.linearKeyHeadDim == 128,
+              a.linearValueHeadDim == 128,
+              a.linearConvKernelSize == 4,
+              a.hyperConnectionStreamCount == 4,
+              a.hyperConnectionLowRank == 320,
+              a.ngramLayer == 1,
+              a.ngramSize == 3,
+              a.ngramHeads == 16,
+              a.ngramHeadsPerNgram == 8,
+              a.ngramVocabSizeBase == 20_000_000,
+              a.ngramShardCount == 128,
+              a.ngramEmbedDim == 2_560,
+              a.ngramConvKernelSize == 4,
+              a.ngramEosTokenID == 248_044,
+              a.indexerBudget == 2_048,
+              a.indexerCompressRatio == 4,
+              a.indexerHeadDim == 128,
+              a.indexerNumHeads == 4,
+              a.indexerNumKVHeads == 1 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "config.json does not match the pinned Qwen3.8 Flash "
+                    + "Next architecture")
+        }
     }
 
     /// Production Qwen3.6-35B-A3B baseline (mirrors the runtime's

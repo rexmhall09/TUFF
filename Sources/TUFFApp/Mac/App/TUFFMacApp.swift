@@ -23,7 +23,11 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        if let icon = MacAppIcon.load() {
+        // A packaged app owns a system-rendered, correctly inset Icon Composer
+        // icon. Replacing it with the full-canvas PNG enlarges the Dock tile.
+        if Bundle.main.object(forInfoDictionaryKey: "CFBundleIconName") == nil,
+           Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") == nil,
+           let icon = MacAppIcon.dockFallback() {
             NSApp.applicationIconImage = icon
             NSApp.dockTile.display()
         }

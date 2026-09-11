@@ -3,10 +3,13 @@ import Metal
 
 final class PrefillPerHeadNorm {
     private let psoBF16W: MTLComputePipelineState
+    private let psoBF16WCentered: MTLComputePipelineState
     private let psoNoScale: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoBF16W = try context.pipeline("prefill_rmsnorm_bf16w_perhead_block")
+        self.psoBF16WCentered = try context.pipeline(
+            "prefill_rmsnorm_bf16w_perhead_centered_block")
         self.psoNoScale = try context.pipeline("prefill_rmsnorm_no_scale_perhead_block")
     }
 
@@ -21,14 +24,15 @@ final class PrefillPerHeadNorm {
                             headDim: UInt32,
                             numHeads: UInt32,
                             tokenStrideElements: UInt32,
-                            eps: Float) {
+                            eps: Float,
+                            centered: Bool = false) {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(headDim > 0, "headDim must be positive")
         precondition(numHeads > 0, "numHeads must be positive")
         precondition(tokenStrideElements >= headDim * numHeads,
                      "token stride is too small")
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
-        enc.setComputePipelineState(psoBF16W)
+        enc.setComputePipelineState(centered ? psoBF16WCentered : psoBF16W)
         enc.setBuffer(x, offset: xOffset, index: 0)
         enc.setBuffer(weight, offset: weightOffset, index: 1)
         enc.setBuffer(out, offset: outOffset, index: 2)

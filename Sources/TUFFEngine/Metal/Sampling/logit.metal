@@ -666,7 +666,8 @@ void sample_topk64_final(
 // Fused greedy lm-head path. Eight SIMD groups each evaluate one INT4 row;
 // a second dispatch reduces the per-threadgroup argmax summaries.
 constant constexpr uint kLMHeadRowsPerTG = 8;
-constant constexpr uint kLMHeadGroupSize = 64;
+// The LM head decodes INT4 like the resident GEMV does, so it reads the same
+// shared group size from quant_group.metal.
 constant constexpr uint kLMHeadRowSummaryStride = 2;
 constant uint FC_HEAD_D [[function_constant(10)]];
 constant uint FC_HEAD_V [[function_constant(11)]];
@@ -691,19 +692,24 @@ inline float lmhead_int4_gemv_row_simd_dev(device const uint8_t*    W,
                                            uint row,
                                            uint D,
                                            uint lane) {
-    const uint n_groups  = D / kLMHeadGroupSize;
+    const uint G = quant_group_size();
+    const uint n_groups  = D / G;
     const uint row_bytes = D / 2u;
     device const uint8_t* W_row = W      + uint(row) * row_bytes;
     device const bfloat*  s_row = scales + uint(row) * n_groups;
     device const bfloat*  b_row = biases + uint(row) * n_groups;
 
     float acc = 0.0f;
-    const uint full_blocks = n_groups / 4u;
+    // See dequant_int4.metal: a 128-byte block spans 256/G groups, and G/8
+    // lanes cover one group.
+    const uint groups_per_block = 256u / G;
+    const uint lane_shift = (G == 64u) ? 3u : ((G == 32u) ? 2u : 1u);
+    const uint full_blocks = n_groups / groups_per_block;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
         device const ushort* wp = (device const ushort*)(W_row + byte_base);
         const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
-        const uint g  = blk * 4u + (lane >> 3);
+        const uint g  = blk * groups_per_block + (lane >> lane_shift);
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
@@ -724,12 +730,13 @@ inline float lmhead_int4_gemv_row_simd_dev(device const uint8_t*    W,
         acc = fma(s, dot, acc);
         acc = fma(b, sum, acc);
     }
-    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+    for (uint g = full_blocks * groups_per_block; g < n_groups; ++g) {
+        if (lane >= G / 2u) continue;
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kLMHeadGroupSize / 2) + lane];
-        const float x0 = float(x[g * kLMHeadGroupSize + lane * 2u]);
-        const float x1 = float(x[g * kLMHeadGroupSize + lane * 2u + 1u]);
+        const uint8_t byte = W_row[g * (G / 2u) + lane];
+        const float x0 = float(x[g * G + lane * 2u]);
+        const float x1 = float(x[g * G + lane * 2u + 1u]);
         float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
         dot = fma(float(uint(byte >> 4)), x1, dot);
         const float sum = x0 + x1;

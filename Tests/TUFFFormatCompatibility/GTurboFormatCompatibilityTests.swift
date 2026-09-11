@@ -118,7 +118,7 @@ import Testing
             fileOffset: indexSize, sizeBytes: 16,
             scaleOffset: indexSize + 16, scaleSize: 8,
             biasOffset: indexSize + 24, biasSize: 8,
-            quantSpec: QuantSpec(bits: 4),
+            quantSpec: QuantSpec(bits: 4, groupSize: 64),
             sourceWeight: source, sourceScales: source, sourceBiases: source,
             companionTransform: .identity)
         let nameBytes = Array(residentEntry.name.utf8)
@@ -143,6 +143,7 @@ import Testing
         let plan = RepackPlan(
             arch: arch, baseMode: "affine", baseGroupSize: 64,
             bitsOverrideCount: 120, resident: resident, layers: [layer],
+            ngramTable: nil,
             matchedModelID: nil, excludedMultimodalTensorNames: [])
         let zeroSHA = String(repeating: "0", count: 64)
         let files: [(relativePath: String, info: GTurboJSON.FileEntry)] = [

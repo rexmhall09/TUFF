@@ -66,6 +66,7 @@ public struct Model {
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
+        var pendingVerification: [Int: VerifiedExpertFile] = [:]
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)
@@ -161,7 +162,7 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
-        case .qwen36:
+        case .qwen36, .qwen4Exp:
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
         case .gptOss:
             return try resident(name: "language_model.model.layers.\(L).mlp.router.weight")
@@ -188,7 +189,7 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
-        case .qwen36:
+        case .qwen36, .qwen4Exp:
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
         case .gptOss:
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
@@ -324,6 +325,164 @@ public struct Model {
         try resident(name: "language_model.model.layers.\(L).linear_attn.norm.weight")
     }
 
+    // MARK: - n-gram table (Qwen4-Exp)
+
+    /// Read an `[n]` int64 sidecar out of the resident image.
+    ///
+    /// The n-gram hash constants — the multipliers and each head's offset and
+    /// vocabulary size — are stored rather than derived. The reference builds
+    /// them from a seed and a prime search, but a stored table is what the
+    /// weights were trained against, so these are read, not recomputed.
+    func int64Sidecar(_ view: TensorView, count: Int) throws -> [Int64] {
+        let bytes = count * MemoryLayout<Int64>.size
+        guard Int(view.length) >= bytes else {
+            throw ModelError.indexCorrupt(detail:
+                "int64 sidecar holds \(view.length) bytes, expected \(bytes)")
+        }
+        let base = view.buffer.contents().advanced(by: Int(view.offset))
+        return (0..<count).map { index in
+            base.advanced(by: index * MemoryLayout<Int64>.size)
+                .loadUnaligned(as: Int64.self)
+        }
+    }
+
+    /// Row selection for the n-gram table, built from the checkpoint's own
+    /// constants. Nil for every architecture without one.
+    func makeNgramRowIndex(eosTokenID: Int32) throws -> NgramRowIndex? {
+        let ngram = config.ngramEmbedding
+        guard ngram.isEnabled else { return nil }
+        let layer = ngram.layer
+        return NgramRowIndex(
+            multipliers: try int64Sidecar(
+                try ngramLayerMultipliers(layer: layer), count: ngram.ngramSize),
+            headOffsets: try int64Sidecar(
+                try ngramHeadOffsets(layer: layer), count: ngram.heads),
+            headVocabSizes: try int64Sidecar(
+                try ngramHeadVocabSizes(layer: layer), count: ngram.heads),
+            ngramSize: ngram.ngramSize,
+            headsPerNgram: ngram.headsPerNgram,
+            eosTokenID: eosTokenID)
+    }
+
+    /// Open the n-gram table beside the model. Nil when the architecture has
+    /// none; throws when it should have one and the manifest disagrees.
+    func makeNgramTableReader() throws -> NgramTableReader? {
+        guard config.ngramEmbedding.isEnabled else { return nil }
+        guard let table = manifest.ngramTable else {
+            throw ModelError.indexCorrupt(detail:
+                "the architecture has an n-gram table but the manifest has no layout")
+        }
+        guard table.rowWidth == config.ngramEmbedding.headDim else {
+            throw ModelError.indexCorrupt(detail:
+                "n-gram row width \(table.rowWidth) does not divide the "
+                    + "embedding across \(config.ngramEmbedding.heads) heads")
+        }
+        return try NgramTableReader(
+            fileURL: directoryURL.appendingPathComponent(table.file),
+            rowWidth: table.rowWidth,
+            groupSize: table.groupSize,
+            rowCount: table.rowCount,
+            shards: table.shards.map {
+                NgramTableReader.Shard(
+                    rowStart: $0.rowStart, rowCount: $0.rowCount,
+                    weightOffset: $0.weightOffset,
+                    scaleOffset: $0.scaleOffset,
+                    biasOffset: $0.biasOffset)
+            })
+    }
+
+    // MARK: - Hyper-connections (Qwen4-Exp)
+    //
+    // The multi-stream residual replaces both layer norms: a `qwen4_exp` layer
+    // has no `input_layernorm` and no `post_attention_layernorm`, only the
+    // `hc_norm` inside each of its two hyper-connection modules. A model-level
+    // mixer collapses the streams before the LM head, and there is no separate
+    // final norm either.
+
+    /// Which of a layer's two hyper-connections a tensor belongs to.
+    public enum HyperConnectionSlot: String, Sendable {
+        case attention = "attn_hyper_connection"
+        case feedForward = "mlp_hyper_connection"
+    }
+
+    private func hyperConnectionName(_ leaf: String,
+                                     slot: HyperConnectionSlot,
+                                     layer L: Int?) -> String {
+        guard let L else {
+            return "language_model.model.hyper_connection_mixer.\(leaf)"
+        }
+        return "language_model.model.layers.\(L).\(slot.rawValue).\(leaf)"
+    }
+
+    /// Grouped RMSNorm weight over the stacked streams, shape
+    /// `[streamCount * hiddenSize]`. Centered at zero: scale by `1 + w`.
+    public func hyperConnectionNorm(slot: HyperConnectionSlot,
+                                    layer L: Int? = nil) throws -> TensorView {
+        try resident(name: hyperConnectionName("hc_norm.weight", slot: slot, layer: L))
+    }
+
+    /// `[lowRank, streamCount * hiddenSize]` projection into the mix.
+    public func hyperConnectionMixDown(slot: HyperConnectionSlot,
+                                       layer L: Int? = nil) throws -> TensorView {
+        try resident(name: hyperConnectionName(
+            "input_mix_weight_down.weight", slot: slot, layer: L))
+    }
+
+    /// `[streamCount * hiddenSize, lowRank]` projection back out of the mix.
+    public func hyperConnectionMixUp(slot: HyperConnectionSlot,
+                                     layer L: Int? = nil) throws -> TensorView {
+        try resident(name: hyperConnectionName(
+            "input_mix_weight_up.weight", slot: slot, layer: L))
+    }
+
+    /// `[streamCount, streamCount * hiddenSize]` per-stream injection gate.
+    /// Absent on the model-level mixer, which only collapses.
+    public func hyperConnectionInject(slot: HyperConnectionSlot,
+                                      layer L: Int) throws -> TensorView {
+        try resident(name: hyperConnectionName(
+            "block_inject_weight.weight", slot: slot, layer: L))
+    }
+
+    // MARK: - n-gram per-layer embeddings (Qwen4-Exp)
+
+    private func pleName(_ leaf: String, layer L: Int) -> String {
+        "language_model.model.layers.\(L).ple.\(leaf)"
+    }
+
+    public func ngramConv1D(layer L: Int) throws -> TensorView {
+        try resident(name: pleName("conv1d.weight", layer: L))
+    }
+    public func ngramKeyProjection(layer L: Int) throws -> TensorView {
+        try resident(name: pleName("key_proj.weight", layer: L))
+    }
+    public func ngramValueProjection(layer L: Int) throws -> TensorView {
+        try resident(name: pleName("value_proj.weight", layer: L))
+    }
+    public func ngramConvNorm(layer L: Int) throws -> TensorView {
+        try resident(name: pleName("norm_conv.weight", layer: L))
+    }
+    public func ngramKeyNorm(layer L: Int) throws -> TensorView {
+        try resident(name: pleName("norm_key.weight", layer: L))
+    }
+    public func ngramQueryNorm(layer L: Int) throws -> TensorView {
+        try resident(name: pleName("norm_query.weight", layer: L))
+    }
+    /// The three rolling-hash multipliers, `[ngramSize]` int64.
+    public func ngramLayerMultipliers(layer L: Int) throws -> TensorView {
+        try resident(name: pleName(
+            "ple_embedding.layer_multipliers", layer: L))
+    }
+    /// First global row of each n-gram head, `[heads]` int64.
+    public func ngramHeadOffsets(layer L: Int) throws -> TensorView {
+        try resident(name: pleName(
+            "ple_embedding.ngram_heads_offsets", layer: L))
+    }
+    /// Each head's own vocabulary size, `[heads]` int64.
+    public func ngramHeadVocabSizes(layer L: Int) throws -> TensorView {
+        try resident(name: pleName(
+            "ple_embedding.ngram_heads_vocab_sizes", layer: L))
+    }
+
     /// Resolve a tensor name to a `TensorView` against its resident region.
     /// Absolute file offsets are converted to offsets relative to that
     /// region's `MTLBuffer`.
@@ -412,8 +571,49 @@ public struct Model {
             .appendingPathComponent("packed_experts")
             .appendingPathComponent(basename)
         let manifestRel = "packed_experts/\(basename)"
+        let file = try streamersBox.pendingVerification.removeValue(forKey: L)
+            ?? beginLayerVerificationLocked(L)
+        // A single lookahead overlaps two full SHA-256 checks. Keep the
+        // bound per model: arbitrary/out-of-order expert fetches must not
+        // launch an unbounded set of hash jobs or retain many descriptors.
+        let next = L + 1
+        if integrityPolicy == .fullSha256,
+           (manifest.files[manifestRel]?.size ?? 0) >= 64 * 1_024 * 1_024,
+           streamersBox.pendingVerification.isEmpty,
+           next < packedExpertsLayout.layers.count,
+           !streamersBox.layerVerified[next],
+           streamersBox.streamers[next] == nil {
+            // Report lookahead failures only if that layer is actually used.
+            streamersBox.pendingVerification[next] = try? beginLayerVerificationLocked(next)
+        }
+        try file.waitUntilVerified()
+        let layerFD = file.descriptor
+        let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
+            * packedExpertsLayout.expertStride
+        let layout = StreamLayout(
+            path: url.path,
+            streamOffset: 0,
+            streamSize: streamSize,
+            expertsPerLayer: packedExpertsLayout.expertsPerLayer,
+            expertStride: packedExpertsLayout.expertStride,
+            expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
+        streamersBox.streamers[L] = try withExtendedLifetime(file) {
+            try PreadExpertStreamer(
+                layout: layout,
+                device: device,
+                slotCount: effectiveExpertCacheSlotCount,
+                cachePolicy: expertCachePolicy,
+                fileDescriptor: layerFD)
+        }
+        streamersBox.layerVerified[L] = true
+    }
+
+    private func beginLayerVerificationLocked(_ L: Int) throws -> VerifiedExpertFile {
+        let manifestRel = "packed_experts/\(packedExpertsLayout.layers[L].file)"
         let layerFD = try modelDirectory.openFile(manifestRel)
-        defer { close(layerFD) }
+        var transferred = false
+        defer { if !transferred { close(layerFD) } }
+        var expectedSHA256: String?
         if !streamersBox.layerVerified[L] {
             guard let entry = manifest.files[manifestRel] else {
                 throw ModelError.missingFile(name: manifestRel)
@@ -426,29 +626,15 @@ public struct Model {
             }
             switch integrityPolicy {
             case .fullSha256:
-                try Sha256Verifier.verifyFile(fileDescriptor: layerFD,
-                                              named: manifestRel,
-                                              expectedHex: entry.sha256)
+                expectedSHA256 = entry.sha256
             case .sizeCheckTrustedReceipt:
                 break
             }
         }
-        let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
-            * packedExpertsLayout.expertStride
-        let layout = StreamLayout(
-            path: url.path,
-            streamOffset: 0,
-            streamSize: streamSize,
-            expertsPerLayer: packedExpertsLayout.expertsPerLayer,
-            expertStride: packedExpertsLayout.expertStride,
-            expertOffsets: packedExpertsLayout.layers[L].experts.map(\.offset))
-        streamersBox.streamers[L] = try PreadExpertStreamer(
-            layout: layout,
-            device: device,
-            slotCount: effectiveExpertCacheSlotCount,
-            cachePolicy: expertCachePolicy,
-            fileDescriptor: layerFD)
-        streamersBox.layerVerified[L] = true
+        let file = VerifiedExpertFile(descriptor: layerFD, name: manifestRel,
+                                     expectedSHA256: expectedSHA256)
+        transferred = true
+        return file
     }
 
     /// Test hook: how many layer files have been opened so far.
@@ -693,6 +879,27 @@ extension Model {
             return (r, c)
         }
 
+        /// The n-gram hash constants: small int64 sidecars read as values
+        /// rather than decoded as weights.
+        func requireInt64(_ name: String, _ count: Int) throws {
+            guard let entry = residentIndex.entries[name] else {
+                throw ModelError.indexCorrupt(
+                    detail: "missing required resident tensor \(name)")
+            }
+            guard let logicalCount = UInt32(exactly: count), logicalCount > 0 else {
+                throw ModelError.indexCorrupt(detail: "\(name) has invalid dimensions")
+            }
+            let expectedBytes = try checkedMultiply(
+                UInt64(logicalCount), UInt64(MemoryLayout<Int64>.size), field: name)
+            guard entry.dtype == GTurboFormatV1.DType.i64.rawValue,
+                  entry.shape.0 == logicalCount,
+                  entry.sizeBytes == expectedBytes,
+                  entry.scaleSize == 0, entry.biasSize == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "\(name) does not match the required int64 schema")
+            }
+        }
+
         func requireBF16(_ name: String, count: Int) throws {
             guard let entry = residentIndex.entries[name] else {
                 throw ModelError.indexCorrupt(detail: "missing required resident tensor \(name)")
@@ -739,8 +946,8 @@ extension Model {
                          field: String) throws -> (shape: (UInt32, UInt32), weight: UInt64, aux: UInt64) {
             let shape = try dimensions(rows, columns, field: field)
             guard slot.weightBits == 4 || slot.weightBits == 8,
-                  slot.groupSize > 0,
-                  columns % slot.groupSize == 0 else {
+                  slot.effectiveGroupSize > 0,
+                  columns % slot.effectiveGroupSize == 0 else {
                 throw ModelError.indexCorrupt(detail: "\(field) has unsupported affine quantization")
             }
             let elements = try checkedMultiply(UInt64(rows), UInt64(columns), field: field)
@@ -748,7 +955,7 @@ extension Model {
             guard bitCount % 8 == 0 else {
                 throw ModelError.indexCorrupt(detail: "\(field) packed byte count is fractional")
             }
-            let groups = UInt64(columns / slot.groupSize)
+            let groups = UInt64(columns / slot.effectiveGroupSize)
             let auxElements = try checkedMultiply(UInt64(shape.0), groups, field: field)
             let auxBytes = try checkedMultiply(
                 auxElements, UInt64(MemoryLayout<UInt16>.size), field: field)
@@ -815,7 +1022,26 @@ extension Model {
                 columns: config.hiddenSize,
                 slot: quant.embedding)
         }
-        try requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
+        if config.hyperConnection.isEnabled {
+            // No `model.norm`: the mixer that collapses the residual streams
+            // sits in that position and carries the last normalization. It has
+            // no injection gate, so only three of the four tensors.
+            let stacked = config.hyperConnection.stackedWidth(
+                hiddenSize: config.hiddenSize)
+            let mixer = "language_model.model.hyper_connection_mixer"
+            try requireBF16("\(mixer).hc_norm.weight", count: stacked)
+            try requireAffine("\(mixer).input_mix_weight_down.weight",
+                              rows: config.hyperConnection.lowRank,
+                              columns: stacked,
+                              slot: quant.attention)
+            try requireAffine("\(mixer).input_mix_weight_up.weight",
+                              rows: stacked,
+                              columns: config.hyperConnection.lowRank,
+                              slot: quant.attention)
+        } else {
+            try requireBF16("language_model.model.norm.weight",
+                            count: config.hiddenSize)
+        }
         // Gemma ties lm_head to the embedding; an untied family carries its own.
         if !config.tieWordEmbeddings {
             if config.family == .gptOss {
@@ -873,9 +1099,13 @@ extension Model {
                 try requireBF16("\(prefix).mlp.router.bias",
                                 count: config.numExperts)
             }
-        } else if config.family == .qwen36 {
+        } else if config.family == .qwen36 || config.family == .qwen4Exp {
+            // Qwen4-Exp shares Qwen3.6's per-layer tensor contract; what it
+            // replaces is the pair of layer norms, which the schema below
+            // swaps for the two hyper-connection modules.
             try validateQwen36LayerSchema(
                 config: config, quant: quant,
+                requireInt64: requireInt64,
                 requireBF16: requireBF16,
                 requireBF16Shaped: requireBF16Shaped,
                 requireAffine: requireAffine,
@@ -1154,16 +1384,62 @@ extension Model {
     private static func validateQwen36LayerSchema(
         config: ArchConfig,
         quant: ManifestQuant,
+        requireInt64: (String, Int) throws -> Void,
         requireBF16: (String, Int) throws -> Void,
         requireBF16Shaped: (String, [UInt32]) throws -> Void,
         requireAffine: (String, Int, Int, ManifestQuantSlot) throws -> Void,
         checkedIntMultiply: (Int, Int, String) throws -> Int
     ) throws {
         let linear = config.linearAttention
+        let hyper = config.hyperConnection
+        let stacked = hyper.stackedWidth(hiddenSize: config.hiddenSize)
         for layer in 0..<config.numLayers {
             let prefix = "language_model.model.layers.\(layer)"
-            try requireBF16("\(prefix).input_layernorm.weight", config.hiddenSize)
-            try requireBF16("\(prefix).post_attention_layernorm.weight", config.hiddenSize)
+            if hyper.isEnabled {
+                // Two hyper-connections stand where the two layer norms were,
+                // each with its own grouped norm, low-rank mix and per-stream
+                // injection gate.
+                for slot in ["attn_hyper_connection", "mlp_hyper_connection"] {
+                    let module = "\(prefix).\(slot)"
+                    try requireBF16("\(module).hc_norm.weight", stacked)
+                    try requireAffine("\(module).input_mix_weight_down.weight",
+                                      hyper.lowRank, stacked, quant.attention)
+                    try requireAffine("\(module).input_mix_weight_up.weight",
+                                      stacked, hyper.lowRank, quant.attention)
+                    try requireAffine("\(module).block_inject_weight.weight",
+                                      hyper.streamCount, stacked, quant.attention)
+                }
+            } else {
+                try requireBF16("\(prefix).input_layernorm.weight", config.hiddenSize)
+                try requireBF16("\(prefix).post_attention_layernorm.weight",
+                                config.hiddenSize)
+            }
+
+            // The n-gram module, on the one layer that carries it. Checked
+            // here so a checkpoint missing a piece of it fails at load rather
+            // than partway through the first token.
+            let ngram = config.ngramEmbedding
+            if ngram.isEnabled && layer == ngram.layer {
+                let ple = "\(prefix).ple"
+                try requireAffine("\(ple).key_proj.weight",
+                                  stacked, ngram.embedDim, quant.attention)
+                try requireAffine("\(ple).value_proj.weight",
+                                  config.hiddenSize, ngram.embedDim,
+                                  quant.attention)
+                for norm in ["norm_key", "norm_query", "norm_conv"] {
+                    try requireBF16("\(ple).\(norm).weight", stacked)
+                }
+                // Depthwise: one kernel per stacked channel, shaped
+                // [channels, taps, 1] in the checkpoint.
+                try requireBF16Shaped("\(ple).conv1d.weight",
+                                      [UInt32(stacked),
+                                       UInt32(ngram.convKernelSize), 1])
+                // The hash constants are stored, not derived.
+                let embedding = "\(ple).ple_embedding"
+                try requireInt64("\(embedding).layer_multipliers", ngram.ngramSize)
+                try requireInt64("\(embedding).ngram_heads_offsets", ngram.heads)
+                try requireInt64("\(embedding).ngram_heads_vocab_sizes", ngram.heads)
+            }
 
             try requireAffine("\(prefix).mlp.gate.weight",
                               config.numExperts, config.hiddenSize, quant.router)

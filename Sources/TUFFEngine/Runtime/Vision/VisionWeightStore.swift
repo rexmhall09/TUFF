@@ -3,6 +3,19 @@ import Foundation
 import Metal
 import TUFFFormat
 
+/// The text family a companion pack belongs to. Packs are shaped by the tower
+/// they carry, and the tower is chosen by the text model, so this is a
+/// one-to-one map rather than a lookup.
+extension GTurboVisionFamilyV1 {
+    var modelFamily: ModelFamily {
+        switch self {
+        case .gemma4: .gemma4
+        case .qwen36: .qwen36
+        case .qwen4Exp: .qwen4Exp
+        }
+    }
+}
+
 public enum VisionPackError: Error, Equatable, CustomStringConvertible, Sendable {
     case invalidTextModelPath(String)
     case packNotFound(String)
@@ -93,10 +106,8 @@ final class VisionWeightStore {
         } catch {
             throw VisionPackError.invalidMetadata("\(error)")
         }
-        let packFamily: ModelFamily = manifest.resolvedFamily == .qwen36
-            ? .qwen36 : .gemma4
-        let receiptFamily: ModelFamily = receipt.resolvedFamily == .qwen36
-            ? .qwen36 : .gemma4
+        let packFamily = manifest.resolvedFamily.modelFamily
+        let receiptFamily = receipt.resolvedFamily.modelFamily
         guard packFamily == expectedFamily, receiptFamily == expectedFamily,
               manifest.artifactKind == receipt.artifactKind else {
             throw VisionPackError.incompatibleTextArtifact

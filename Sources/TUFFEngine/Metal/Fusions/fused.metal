@@ -10,7 +10,6 @@ using namespace metal;
 
 constant constexpr uint kFusedThreads        = 256;
 constant constexpr uint kFusedMaxSimdGroups  = kFusedThreads / 32;  // 8
-constant constexpr uint kFusedGroupSize      = 64;
 // Threadgroup-memory cap for the normalized-hidden staging slot. Sized for
 // D=2816 (production hidden dim) with headroom; consumes 8 KB per threadgroup.
 constant constexpr uint kFusedMaxD           = 4096;

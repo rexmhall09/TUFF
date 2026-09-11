@@ -6,6 +6,7 @@ package enum GTurboVisionFormatV1 {
     /// continue to encode byte-for-byte identically.
     package static let artifactKind = "gemma4_vision_companion"
     package static let qwen36ArtifactKind = "qwen36_vision_companion"
+    package static let qwen4ExpArtifactKind = "qwen4_exp_vision_companion"
     package static let versionMajor = 1
     package static let versionMinor = 0
     package static let alignmentBytes: UInt64 = 16_384
@@ -51,11 +52,20 @@ package enum GTurboVisionFormatV1 {
 package enum GTurboVisionFamilyV1: String, Codable, Equatable, Sendable {
     case gemma4
     case qwen36
+    /// Qwen3.8 Flash Next's tower is Qwen 3.6's, tensor for tensor, but its
+    /// merger projects into a 2,560-wide residual rather than a 2,048-wide
+    /// one. That makes the two packs the same shape everywhere except the one
+    /// place a mismatch would be silent, so they get separate kinds and a
+    /// pack for the wrong model is refused rather than half-loaded.
+    /// The raw value is the text manifest's own family string: the writer
+    /// binds a pack to a text model by comparing the two directly.
+    case qwen4Exp = "qwen4-exp"
 
     package var artifactKind: String {
         switch self {
         case .gemma4: GTurboVisionFormatV1.artifactKind
         case .qwen36: GTurboVisionFormatV1.qwen36ArtifactKind
+        case .qwen4Exp: GTurboVisionFormatV1.qwen4ExpArtifactKind
         }
     }
 }
@@ -306,13 +316,24 @@ package enum GTurboVisionStructuralValidator {
             }
             previousEnd = end
         }
-        if manifest.resolvedFamily == .qwen36 {
-            try validateQwen36Architecture(manifest.tensors)
+        switch manifest.resolvedFamily {
+        case .qwen36:
+            try validateQwenTowerArchitecture(manifest.tensors,
+                                              mergerOutputWidth: 2_048)
+        case .qwen4Exp:
+            try validateQwenTowerArchitecture(manifest.tensors,
+                                              mergerOutputWidth: 2_560)
+        case .gemma4:
+            break
         }
     }
 
-    private static func validateQwen36Architecture(
-        _ tensors: [GTurboVisionTensorRegionV1]
+    /// Qwen 3.6 and Qwen3.8 Flash Next ship the identical tower; the merger's
+    /// output is the only shape that moves, because it has to land in the text
+    /// model's residual.
+    private static func validateQwenTowerArchitecture(
+        _ tensors: [GTurboVisionTensorRegionV1],
+        mergerOutputWidth: UInt64
     ) throws {
         var expected: [String: [UInt64]] = [
             // MLX stores Conv3D kernels channels-last. This is the physical
@@ -325,8 +346,8 @@ package enum GTurboVisionStructuralValidator {
             "vision_tower.merger.norm.bias": [1_152],
             "vision_tower.merger.linear_fc1.weight": [4_608, 4_608],
             "vision_tower.merger.linear_fc1.bias": [4_608],
-            "vision_tower.merger.linear_fc2.weight": [2_048, 4_608],
-            "vision_tower.merger.linear_fc2.bias": [2_048],
+            "vision_tower.merger.linear_fc2.weight": [mergerOutputWidth, 4_608],
+            "vision_tower.merger.linear_fc2.bias": [mergerOutputWidth],
         ]
         for layer in 0..<27 {
             let p = "vision_tower.blocks.\(layer)."
@@ -345,20 +366,20 @@ package enum GTurboVisionStructuralValidator {
         }
         guard tensors.count == expected.count else {
             throw GTurboFormatError.invalid(
-                field: "vision.qwen36.tensors",
+                field: "vision.qwenTower.tensors",
                 reason: "expected \(expected.count) tensors, found \(tensors.count)")
         }
         for tensor in tensors {
             guard tensor.dtype == .bf16, tensor.quantization == nil,
                   expected.removeValue(forKey: tensor.name) == tensor.shape else {
                 throw GTurboFormatError.invalid(
-                    field: "vision.qwen36.tensor.\(tensor.name)",
+                    field: "vision.qwenTower.tensor.\(tensor.name)",
                     reason: "unexpected name, shape, or storage type")
             }
         }
         guard expected.isEmpty else {
             throw GTurboFormatError.invalid(
-                field: "vision.qwen36.tensors", reason: "missing tensors")
+                field: "vision.qwenTower.tensors", reason: "missing tensors")
         }
     }
 

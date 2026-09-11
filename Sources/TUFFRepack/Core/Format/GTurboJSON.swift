@@ -80,7 +80,11 @@ enum GTurboJSON {
             // Gemma 4 omits every family extension field, so its manifests stay
             // byte-identical to the pre-family format.
             family: isGemma ? nil : arch.family.rawValue,
-            variant: (isDense || isGPTOSS) ? arch.variant.rawValue : nil,
+            // Named explicitly rather than left to the reader's
+            // family-to-variant fallback: `qwen4_exp` is a family that can
+            // hold more than one checkpoint shape.
+            variant: (isDense || isGPTOSS || arch.family == .qwen4Exp)
+                ? arch.variant.rawValue : nil,
             feedForwardKind: (isDense || isGPTOSS)
                 ? arch.feedForwardKind.rawValue : nil,
             attnOutputGate: isGemma ? nil : arch.attnOutputGate,
@@ -94,7 +98,31 @@ enum GTurboJSON {
             linearNumVHeads: isGemma ? nil : arch.linearNumVHeads,
             linearKeyHeadDim: isGemma ? nil : arch.linearKeyHeadDim,
             linearValueHeadDim: isGemma ? nil : arch.linearValueHeadDim,
-            linearConvKernelSize: isGemma ? nil : arch.linearConvKernelSize)
+            linearConvKernelSize: isGemma ? nil : arch.linearConvKernelSize,
+            // Absent for every family but `qwen4_exp`, whose loader is the
+            // only one that sets them.
+            hyperConnection: arch.hyperConnectionStreamCount == 0 ? nil
+                : GTurboManifestHyperConnectionV1(
+                    streamCount: arch.hyperConnectionStreamCount,
+                    lowRank: arch.hyperConnectionLowRank),
+            ngramEmbedding: arch.ngramShardCount == 0 ? nil
+                : GTurboManifestNgramEmbeddingV1(
+                    layer: arch.ngramLayer,
+                    ngramSize: arch.ngramSize,
+                    heads: arch.ngramHeads,
+                    headsPerNgram: arch.ngramHeadsPerNgram,
+                    vocabSizeBase: arch.ngramVocabSizeBase,
+                    shardCount: arch.ngramShardCount,
+                    embedDim: arch.ngramEmbedDim,
+                    convKernelSize: arch.ngramConvKernelSize,
+                    eosTokenID: arch.ngramEosTokenID),
+            attentionIndexer: arch.indexerBudget == 0 ? nil
+                : GTurboManifestAttentionIndexerV1(
+                    budget: arch.indexerBudget,
+                    compressRatio: arch.indexerCompressRatio,
+                    headDim: arch.indexerHeadDim,
+                    numHeads: arch.indexerNumHeads,
+                    numKVHeads: arch.indexerNumKVHeads))
         func slot(_ name: String) throws -> GTurboManifestQuantSlotV1 {
             guard let weightBits = bitWidthsByQuantSlot[name] else {
                 throw RepackError.configurationInvalid(
@@ -116,12 +144,16 @@ enum GTurboJSON {
                     biasType: "none",
                     groupSize: 1)
             }
+            // The group size follows the bit width, not the checkpoint: a
+            // 4-bit checkpoint can carry an 8-bit router grouped at 64 beside
+            // 4-bit tensors grouped at 32, and recording the base for both
+            // would describe scale regions of the wrong size.
             return GTurboManifestQuantSlotV1(
                 weightBits: weightBits,
                 scheme: plan.baseMode,
                 scaleType: "BF16",
                 biasType: "BF16",
-                groupSize: plan.baseGroupSize)
+                groupSize: weightBits == 8 ? 64 : plan.baseGroupSize)
         }
         let quant = GTurboManifestQuantV1(
             embedding: try slot("embedding"),
@@ -157,7 +189,25 @@ enum GTurboJSON {
             expertsPerLayer: expertsPerLayer,
             numLayers: numLayers,
             expertStride: expertStride,
-            bitWidthOverridesHonored: plan.bitsOverrideCount))
+            bitWidthOverridesHonored: plan.bitsOverrideCount,
+            // Row addressing for the n-gram table. Absent for every
+            // architecture without one, so no other manifest changes.
+            ngramTable: plan.ngramTable.map { table in
+                GTurboManifestNgramTableV1(
+                    file: (table.path as NSString).lastPathComponent,
+                    layerIndex: table.layerIndex,
+                    rowWidth: table.rowWidth,
+                    groupSize: table.groupSize,
+                    rowCount: table.rowCount,
+                    shards: table.shards.map {
+                        GTurboManifestNgramShardV1(
+                            rowStart: $0.rowStart,
+                            rowCount: $0.rowCount,
+                            weightOffset: $0.weightOffset,
+                            scaleOffset: $0.scaleOffset,
+                            biasOffset: $0.biasOffset)
+                    })
+            }))
     }
 
     static func encodeLayout(plan: RepackPlan,

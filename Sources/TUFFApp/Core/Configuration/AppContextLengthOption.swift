@@ -1,11 +1,23 @@
 import TUFFEngine
+import TUFFModelCatalog
 
 public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
+    case twoK = 2_048
     case fourK = 4_096
     case eightK = 8_192
     case sixteenK = 16_384
     case thirtyTwoK = 32_768
     case sixtyFourK = 65_536
+    case oneTwentyEightK = 131_072
+    case oneNinetyTwoK = 196_608
+    case twoHundredK = 204_800
+    case twoFiftySixK = 262_144
+
+    public static func options(for descriptor: AppModelInstallDescriptor) -> [Self] {
+        let limit = descriptor.catalogID.flatMap(TUFFModelCatalog.model(id:))?
+            .maximumContextTokens ?? 65_536
+        return allCases.filter { $0.tokens <= limit }
+    }
 
     public var id: Int { rawValue }
     public var tokens: Int { rawValue }
@@ -44,11 +56,13 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
         // Measured against the 8K default, not against 4K: moving the default
         // without moving the baseline would have left every delta describing a
         // size the user is no longer starting from.
+        case .twoK: "2K"
         case .fourK: "4K, -85 MB"
         case .eightK: "8K, Default"
         case .sixteenK: "16K, +170 MB"
         case .thirtyTwoK: "32K, +500 MB"
         case .sixtyFourK: "64K, +1.17 GB"
+        case .oneTwentyEightK, .oneNinetyTwoK, .twoHundredK, .twoFiftySixK: shortLabel
         }
     }
 }

@@ -22,8 +22,10 @@ public final class SharedExpertInt4 {
     private let int4: DequantInt4GEMV
     private let geluMulPSO: MTLComputePipelineState
 
-    public init(context: MetalContext, siluActivation: Bool = false) throws {
-        self.int4 = try DequantInt4GEMV(context: context)
+    public init(context: MetalContext,
+                siluActivation: Bool = false,
+                groupSize: Int = Quantization.groupSize) throws {
+        self.int4 = try DequantInt4GEMV(context: context, groupSize: groupSize)
         self.geluMulPSO = try context.pipeline(
             siluActivation ? "silu_mul_fp16" : "gelu_mul_fp16")
     }
@@ -104,12 +106,16 @@ public final class SharedExpertRuntime {
     private let implementation: Implementation
     public let weightBits: Int
 
+    /// `groupSize` applies to the INT4 implementation only: an 8-bit shared
+    /// expert is grouped at 64 in every architecture.
     public init(context: MetalContext, weightBits: Int,
-                siluActivation: Bool = false) throws {
+                siluActivation: Bool = false,
+                groupSize: Int = Quantization.groupSize) throws {
         self.weightBits = weightBits
         switch weightBits {
         case 4: self.implementation = .int4(try SharedExpertInt4(
-            context: context, siluActivation: siluActivation))
+            context: context, siluActivation: siluActivation,
+            groupSize: groupSize))
         case 8: self.implementation = .int8(try SharedExpertInt8(
             context: context, siluActivation: siluActivation))
         default: throw SharedExpertError.unsupportedWeightBits(weightBits)

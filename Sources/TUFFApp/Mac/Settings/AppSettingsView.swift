@@ -212,7 +212,7 @@ struct AppSettingsView: View {
             }
             Group {
                 Picker("Context", selection: profileBinding(\.contextTokens)) {
-                    ForEach(AppContextLengthOption.allCases) { option in
+                    ForEach(AppContextLengthOption.options(for: selectedProfileInstall.descriptor)) { option in
                         let eligibility = contextEligibility(
                             tokens: option.tokens,
                             slots: selectedProfile.expertCacheSlots)

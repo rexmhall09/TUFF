@@ -1,0 +1,210 @@
+{
+  "dtype": "float32",
+  "mode": "modules",
+  "model": "mlx-community/Qwen3.8-Flash-Next-4bit",
+  "positions": 2,
+  "recordedLayers": [
+    0
+  ],
+  "revision": "07b5dc6c54600a359b87f1e53e7adf6351c72a2c",
+  "tensors": [
+    {
+      "byteCount": 81920,
+      "name": "module.layer00.attn_hc.input",
+      "offset": 0,
+      "shape": [
+        1,
+        2,
+        10240
+      ]
+    },
+    {
+      "byteCount": 20480,
+      "name": "module.layer00.attn_hc.mixed",
+      "offset": 81920,
+      "shape": [
+        1,
+        2,
+        2560
+      ]
+    },
+    {
+      "byteCount": 32,
+      "name": "module.layer00.attn_hc.injection_weights",
+      "offset": 102400,
+      "shape": [
+        1,
+        2,
+        4
+      ]
+    },
+    {
+      "byteCount": 81920,
+      "name": "module.layer00.attn_hc.passthrough",
+      "offset": 102432,
+      "shape": [
+        1,
+        2,
+        10240
+      ]
+    },
+    {
+      "byteCount": 40960,
+      "name": "module.layer00.attn_hc.hc_norm_weight",
+      "offset": 184352,
+      "shape": [
+        10240
+      ]
+    },
+    {
+      "byteCount": 81920,
+      "name": "module.layer00.attn_hc.normed",
+      "offset": 225312,
+      "shape": [
+        1,
+        2,
+        10240
+      ]
+    },
+    {
+      "byteCount": 2560,
+      "name": "module.layer00.attn_hc.mix_down",
+      "offset": 307232,
+      "shape": [
+        1,
+        2,
+        320
+      ]
+    },
+    {
+      "byteCount": 2560,
+      "name": "module.layer00.attn_hc.mix_lowrank",
+      "offset": 309792,
+      "shape": [
+        1,
+        2,
+        320
+      ]
+    },
+    {
+      "byteCount": 81920,
+      "name": "module.layer00.attn_hc.mix_up",
+      "offset": 312352,
+      "shape": [
+        1,
+        2,
+        10240
+      ]
+    },
+    {
+      "byteCount": 32,
+      "name": "module.layer00.attn_hc.injection_raw",
+      "offset": 394272,
+      "shape": [
+        1,
+        2,
+        4
+      ]
+    },
+    {
+      "byteCount": 81920,
+      "name": "module.layer00.mlp_hc.input",
+      "offset": 394304,
+      "shape": [
+        1,
+        2,
+        10240
+      ]
+    },
+    {
+      "byteCount": 20480,
+      "name": "module.layer00.mlp_hc.mixed",
+      "offset": 476224,
+      "shape": [
+        1,
+        2,
+        2560
+      ]
+    },
+    {
+      "byteCount": 32,
+      "name": "module.layer00.mlp_hc.injection_weights",
+      "offset": 496704,
+      "shape": [
+        1,
+        2,
+        4
+      ]
+    },
+    {
+      "byteCount": 81920,
+      "name": "module.layer00.mlp_hc.passthrough",
+      "offset": 496736,
+      "shape": [
+        1,
+        2,
+        10240
+      ]
+    },
+    {
+      "byteCount": 40960,
+      "name": "module.layer00.mlp_hc.hc_norm_weight",
+      "offset": 578656,
+      "shape": [
+        10240
+      ]
+    },
+    {
+      "byteCount": 81920,
+      "name": "module.layer00.mlp_hc.normed",
+      "offset": 619616,
+      "shape": [
+        1,
+        2,
+        10240
+      ]
+    },
+    {
+      "byteCount": 2560,
+      "name": "module.layer00.mlp_hc.mix_down",
+      "offset": 701536,
+      "shape": [
+        1,
+        2,
+        320
+      ]
+    },
+    {
+      "byteCount": 2560,
+      "name": "module.layer00.mlp_hc.mix_lowrank",
+      "offset": 704096,
+      "shape": [
+        1,
+        2,
+        320
+      ]
+    },
+    {
+      "byteCount": 81920,
+      "name": "module.layer00.mlp_hc.mix_up",
+      "offset": 706656,
+      "shape": [
+        1,
+        2,
+        10240
+      ]
+    },
+    {
+      "byteCount": 32,
+      "name": "module.layer00.mlp_hc.injection_raw",
+      "offset": 788576,
+      "shape": [
+        1,
+        2,
+        4
+      ]
+    }
+  ],
+  "tokenIds": [],
+  "version": 1
+}

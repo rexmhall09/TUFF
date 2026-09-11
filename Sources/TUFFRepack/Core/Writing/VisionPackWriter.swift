@@ -41,7 +41,12 @@ public enum VisionPackWriter {
             throw RepackError.sourceFingerprintRejected(
                 path: meta.indexPath, sha256: meta.indexSha256Hex)
         }
-        let visionFamily: GTurboVisionFamilyV1 = source == .qwen36 ? .qwen36 : .gemma4
+        let visionFamily: GTurboVisionFamilyV1
+        switch source {
+        case .qwen36: visionFamily = .qwen36
+        case .qwen38FlashNext: visionFamily = .qwen4Exp
+        default: visionFamily = .gemma4
+        }
 
         var headers: [Safetensors.Header] = []
         for filename in meta.shardFilenames {

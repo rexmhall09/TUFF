@@ -48,6 +48,9 @@ import TUFFRepackCore
             .gemma4_12B_QAT: 102_556_672,
             .gemma4_26B_A4B: 1_539_478_890,
             .qwen36_35B_A3B: 1_137_999_008,
+            // Measured by the installer's own planner against this pin:
+            // "planned: 1009.1 MiB to download, 859.6 MiB to write".
+            .qwen38FlashNext: 1_058_209_792,
         ]
         for model in TUFFModelCatalog.all {
             guard let addon = model.addons.first(where: { $0.kind == .imageInput })
@@ -72,6 +75,10 @@ import TUFFRepackCore
         #expect(AppModelInstallDescriptor.visionCompanion(for: ModelFamily.gptOss) == nil)
         #expect(AppModelInstallDescriptor.visionCompanion(for: .minimaxM27) == nil)
         #expect(AppModelInstallDescriptor.visionCompanion(for: ModelFamily.minimaxM2) == nil)
+        // Flash Next is no longer text-only: it carries the same vision tower
+        // as Qwen 3.6, so the companion resolves rather than returning nil.
+        #expect(AppModelInstallDescriptor.visionCompanion(for: .qwen38FlashNext) != nil)
+        #expect(AppModelInstallDescriptor.visionCompanion(for: ModelFamily.qwen4Exp) != nil)
     }
 
     @Test func catalogExposesStableAPIIDsAndPromptDialects() {
@@ -81,7 +88,7 @@ import TUFFRepackCore
                 "You are \(descriptor.shortName), a helpful AI assistant."))
             switch descriptor.family {
             case .gemma4: #expect(descriptor.chatDialect == .gemma)
-            case .qwen36: #expect(descriptor.chatDialect == .chatml)
+            case .qwen36, .qwen4Exp: #expect(descriptor.chatDialect == .chatml)
             case .gptOss: #expect(descriptor.chatDialect == .harmony)
             case .minimaxM2: #expect(descriptor.chatDialect == .minimax)
             }
@@ -137,6 +144,7 @@ import TUFFRepackCore
             "gpt-oss-20b",
             "gpt-oss-120b",
             "minimax-m2.7",
+            "qwen3.8-flash-next",
         ])
         #expect(AppModelInstallDescriptor.catalog.map(\.installDirectoryName) == [
             "gemma4-e2b.gturbo",
@@ -147,6 +155,7 @@ import TUFFRepackCore
             "gpt-oss-20b.gturbo",
             "gpt-oss-120b.gturbo",
             "minimax-m2.7.gturbo",
+            "qwen38-flash-next.gturbo",
         ])
         #expect(AppModelInstallDescriptor.gemma4E4B.supportsImageInput)
         #expect(MacModelSettings.defaults(

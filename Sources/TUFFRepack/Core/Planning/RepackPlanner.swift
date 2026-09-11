@@ -116,6 +116,52 @@ struct LayerFilePlan: Sendable {
     }
 }
 
+/// One shard of the n-gram PLE table. The three source tensors are copied
+/// verbatim into three contiguous regions, keeping the shard's own row order.
+struct NgramShardPlan: Sendable {
+    let shardIndex: Int
+    /// First global row this shard holds. Shards are contiguous and ordered.
+    let rowStart: UInt64
+    let rowCount: UInt64
+    /// Byte offsets of the three regions within the table file.
+    let weightOffset: UInt64
+    let scaleOffset: UInt64
+    let biasOffset: UInt64
+    let sourceWeight: SourceTensor
+    let sourceScales: SourceTensor
+    let sourceBiases: SourceTensor
+
+    var weightSize: UInt64 { sourceWeight.sizeBytes }
+    var scaleSize: UInt64 { sourceScales.sizeBytes }
+    var biasSize: UInt64 { sourceBiases.sizeBytes }
+}
+
+/// The n-gram per-layer-embedding table, held in one file outside the resident
+/// image.
+///
+/// The table is 29.80 GiB in the pinned checkpoint while a token reads only a
+/// handful of its 100-byte rows, so it is neither resident nor a slot-cached
+/// stream: it is mapped and rows are faulted in on demand. Rounding rows up to
+/// a page the way routed experts are rounded would turn 100 bytes into 16 KiB
+/// and the table into terabytes, which is why it has a class of its own.
+///
+/// Regions stay separate rather than interleaving weight, scales and biases
+/// into one record per row. Interleaving would be one page fault per row
+/// instead of three, but expressing it needs a strided scatter that the range
+/// copier has no vocabulary for, and against the 1.47 GB of routed-expert
+/// traffic a token already pays, the difference does not register.
+struct NgramTablePlan: Sendable {
+    let path: String
+    /// Decoder layer the module belongs to.
+    let layerIndex: Int
+    /// Quantized values per row, before packing.
+    let rowWidth: Int
+    let groupSize: Int
+    let rowCount: UInt64
+    let shards: [NgramShardPlan]
+    let fileSize: UInt64
+}
+
 struct RepackPlan: Sendable {
     let arch: ArchInfo
     let baseMode: String                  // "affine"
@@ -123,6 +169,8 @@ struct RepackPlan: Sendable {
     let bitsOverrideCount: Int
     let resident: ResidentFilePlan
     let layers: [LayerFilePlan]
+    /// Nil for every architecture without an n-gram embedding table.
+    let ngramTable: NgramTablePlan?
     let matchedModelID: String?
     let excludedMultimodalTensorNames: [String]
 }
@@ -150,10 +198,17 @@ enum RepackPlanner {
         meta: IndexLoader.SourceMetadata,
         shardHeaders: [Safetensors.Header]
     ) throws -> VisionPackPlan {
-        guard meta.baseBits == 4, meta.baseGroupSize == 64,
+        // The vision tensors are BF16 in every supported checkpoint, so the
+        // base quantization only has to be one this repacker understands —
+        // not one particular group size. Qwen3.8 Flash Next is grouped at 32
+        // because its 160-wide PLE rows cannot be grouped at 64, and rejecting
+        // it here would have refused a tower that is bit-identical to one
+        // already shipping.
+        guard meta.baseBits == 4,
+              meta.baseGroupSize == 64 || meta.baseGroupSize == 32,
               meta.baseMode.lowercased() == "affine" else {
             throw RepackError.configurationInvalid(
-                detail: "vision companion requires MLX affine 4-bit group-64 source metadata")
+                detail: "vision companion requires MLX affine 4-bit source metadata")
         }
 
         guard let modelID = SourceFingerprint.modelID(
@@ -168,6 +223,12 @@ enum RepackPlanner {
         switch modelID {
         case SupportedModelSource.qwen36.modelID:
             expected = (333, 893_142_496)
+        case SupportedModelSource.qwen38FlashNext.modelID:
+            // The same 333 tensors as Qwen 3.6, and exactly 4,719,616 bytes
+            // more: (2560 - 2048) * 4608 * 2 for the merger's second linear
+            // and (2560 - 2048) * 2 for its bias. Nothing else in the tower
+            // differs.
+            expected = (333, 897_862_112)
         case SupportedModelSource.gemma4E2B.modelID:
             expected = (213, 335_392_768)
         case SupportedModelSource.gemma4E4B.modelID:
@@ -275,6 +336,8 @@ enum RepackPlanner {
     enum Bucket: Equatable {
         case lmResident
         case routedExpert(role: String, layer: Int)   // role = "gate"|"up"|"down"
+        /// One shard of a `qwen4_exp` n-gram per-layer-embedding table.
+        case ngramEmbeddingShard(shard: Int, layer: Int)
         case excludedMultimodal
         case unknown
     }
@@ -308,6 +371,13 @@ enum RepackPlanner {
                layer >= 0 && layer < numLayers {
                 return .routedExpert(role: role, layer: layer)
             }
+            // The n-gram table is orders of magnitude larger than every other
+            // resident tensor combined, so it never joins the resident bucket.
+            if let shard = ngramShardIndex(in: name),
+               let layer = layerIndex(in: name),
+               layer >= 0 && layer < numLayers {
+                return .ngramEmbeddingShard(shard: shard, layer: layer)
+            }
             return .lmResident
         }
         if isMultimodalTensorName(name) {
@@ -324,12 +394,22 @@ enum RepackPlanner {
         case .qwen36: routedContainer = ".mlp.switch_mlp."
         case .gptOss: routedContainer = ".mlp.experts."
         case .minimaxM2: routedContainer = ".block_sparse_moe.switch_mlp."
+        case .qwen4Exp: routedContainer = ".mlp.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
         if name.contains(".up_proj.")   { return "up" }
         if name.contains(".down_proj.") { return "down" }
         return nil
+    }
+
+    /// Shard index of a `...ple_embedding.ngram_embedding.shards.<N>...`
+    /// tensor, or nil when the name is not one.
+    static func ngramShardIndex(in name: String) -> Int? {
+        guard let r = name.range(of: ".ngram_embedding.shards.") else { return nil }
+        let tail = name[r.upperBound...]
+        guard let dot = tail.firstIndex(of: ".") else { return nil }
+        return Int(tail[tail.startIndex..<dot])
     }
 
     private static func layerIndex(in name: String) -> Int? {
@@ -374,6 +454,7 @@ enum RepackPlanner {
         var lmResidentBases: [String] = []
         var excludedMultimodalNames: [String] = []
         var routedByLayerAndRole: [Int: [String: String]] = [:]
+        var ngramShardBases: [Int: (Int, String)] = [:]
         for (name, _) in registry {
             if isMultimodalTensorName(name) {
                 excludedMultimodalNames.append(name)
@@ -390,6 +471,12 @@ enum RepackPlanner {
                 }
                 byRole[role] = name
                 routedByLayerAndRole[layer] = byRole
+            case .ngramEmbeddingShard(let shard, let layer):
+                if let existing = ngramShardBases[shard] {
+                    throw RepackError.configurationInvalid(detail:
+                        "two n-gram shards numbered \(shard): \(existing.1), \(name)")
+                }
+                ngramShardBases[shard] = (layer, name)
             case .excludedMultimodal:           continue
             case .unknown:                      throw RepackError.unknownTensorPrefix(name: name)
             }
@@ -440,6 +527,12 @@ enum RepackPlanner {
                 detail: "dense architecture contains routed-expert tensors")
         }
 
+        let ngramTable = try planNgramTable(
+            shardBases: ngramShardBases,
+            registry: registry,
+            arch: arch,
+            outputDir: outputDir)
+
         let matched = SourceFingerprint.modelID(forIndexSha256: meta.indexSha256Hex)
 
         return RepackPlan(arch: arch,
@@ -448,6 +541,7 @@ enum RepackPlanner {
                           bitsOverrideCount: bitsOverrideCount,
                           resident: resident,
                           layers: layerPlans,
+                          ngramTable: ngramTable,
                           matchedModelID: matched,
                           excludedMultimodalTensorNames: excludedMultimodalNames)
     }
@@ -581,6 +675,133 @@ enum RepackPlanner {
                                 residentSize: residentSize)
     }
 
+    /// Lay the n-gram shards out in one file, shard by shard in index order,
+    /// three contiguous regions each.
+    ///
+    /// Shards must be complete and consecutively numbered: a gap would make
+    /// global row ids meaningless, since a row's shard is found by dividing
+    /// through a uniform row count.
+    private static func planNgramTable(
+        shardBases: [Int: (Int, String)],
+        registry: [String: SourceTensor],
+        arch: ArchInfo,
+        outputDir: String
+    ) throws -> NgramTablePlan? {
+        guard !shardBases.isEmpty else {
+            guard arch.ngramShardCount == 0 else {
+                throw RepackError.configurationInvalid(detail:
+                    "architecture declares \(arch.ngramShardCount) n-gram shards "
+                        + "but the checkpoint has none")
+            }
+            return nil
+        }
+        guard arch.ngramShardCount == shardBases.count else {
+            throw RepackError.configurationInvalid(detail:
+                "architecture declares \(arch.ngramShardCount) n-gram shards, "
+                    + "checkpoint has \(shardBases.count)")
+        }
+        let layers = Set(shardBases.values.map(\.0))
+        guard layers.count == 1, let layerIndex = layers.first,
+              layerIndex == arch.ngramLayer else {
+            throw RepackError.configurationInvalid(detail:
+                "n-gram shards span layers \(layers.sorted()), expected "
+                    + "layer \(arch.ngramLayer)")
+        }
+
+        let path = (outputDir as NSString)
+            .appendingPathComponent(ngramTableFileName)
+        var shards: [NgramShardPlan] = []
+        shards.reserveCapacity(shardBases.count)
+        var cursor: UInt64 = 0
+        var rowStart: UInt64 = 0
+        var rowWidth = 0
+
+        for index in 0..<shardBases.count {
+            guard let (_, base) = shardBases[index] else {
+                throw RepackError.configurationInvalid(detail:
+                    "n-gram shard \(index) is missing")
+            }
+            let stem = String(base.dropLast(".weight".count))
+            guard let weight = registry[base] else {
+                throw RepackError.missingTensor(name: base)
+            }
+            guard let scales = registry[stem + ".scales"] else {
+                throw RepackError.missingScalesCompanion(name: base)
+            }
+            guard let biases = registry[stem + ".biases"] else {
+                throw RepackError.missingBiasesCompanion(name: base)
+            }
+            guard weight.dtype == .u32, scales.dtype == .bf16,
+                  biases.dtype == .bf16 else {
+                throw RepackError.dtypeMismatch(name: base, detail:
+                    "expected U32 weight with BF16 scales and biases, got "
+                        + "\(weight.dtype)/\(scales.dtype)/\(biases.dtype)")
+            }
+            guard weight.shape.count == 2, scales.shape.count == 2,
+                  biases.shape.count == 2 else {
+                throw RepackError.shapeMismatch(name: base,
+                    detail: "n-gram shard tensors must be two-dimensional")
+            }
+            let rows = weight.shape[0]
+            guard rows > 0, scales.shape[0] == rows, biases.shape[0] == rows else {
+                throw RepackError.shapeMismatch(name: base, detail:
+                    "n-gram shard row counts disagree: \(weight.shape[0])/"
+                        + "\(scales.shape[0])/\(biases.shape[0])")
+            }
+            // Eight 4-bit values per packed U32 word.
+            let width = Int(weight.shape[1]) * 8
+            if rowWidth == 0 { rowWidth = width }
+            guard width == rowWidth else {
+                throw RepackError.shapeMismatch(name: base, detail:
+                    "n-gram shard row width \(width) disagrees with \(rowWidth)")
+            }
+            guard width == arch.ngramEmbedDim / max(1, arch.ngramHeads) else {
+                throw RepackError.shapeMismatch(name: base, detail:
+                    "n-gram row width \(width) does not divide the embedding "
+                        + "across \(arch.ngramHeads) heads")
+            }
+            let groups = UInt64(width / ngramGroupSize)
+            guard width % ngramGroupSize == 0,
+                  scales.shape[1] == groups, biases.shape[1] == groups else {
+                throw RepackError.shapeMismatch(name: base, detail:
+                    "n-gram scales and biases must carry one value per "
+                        + "\(ngramGroupSize)-wide group")
+            }
+
+            let weightOffset = cursor
+            let scaleOffset = weightOffset + weight.sizeBytes
+            let biasOffset = scaleOffset + scales.sizeBytes
+            cursor = biasOffset + biases.sizeBytes
+            shards.append(NgramShardPlan(
+                shardIndex: index,
+                rowStart: rowStart,
+                rowCount: rows,
+                weightOffset: weightOffset,
+                scaleOffset: scaleOffset,
+                biasOffset: biasOffset,
+                sourceWeight: weight,
+                sourceScales: scales,
+                sourceBiases: biases))
+            rowStart += rows
+        }
+
+        return NgramTablePlan(
+            path: path,
+            layerIndex: layerIndex,
+            rowWidth: rowWidth,
+            groupSize: ngramGroupSize,
+            rowCount: rowStart,
+            shards: shards,
+            fileSize: cursor)
+    }
+
+    /// The n-gram table's own file, beside `model_weights.bin`.
+    static let ngramTableFileName = "ngram_ple.bin"
+    /// The checkpoint quantizes the table at group size 32 rather than the
+    /// 64 the rest of the affine weights use; the conversion notes call that
+    /// out as what lets the PLE dimensions be quantized at all.
+    static let ngramGroupSize = 32
+
     private static func canonicalResidentName(
         _ sourceName: String,
         family: RepackModelFamily
@@ -655,6 +876,8 @@ enum RepackPlanner {
             bitsOverrideCount: bitsOverrideCount,
             resident: resident,
             layers: layers,
+            // GPT-OSS has no n-gram table.
+            ngramTable: nil,
             matchedModelID: SourceFingerprint.modelID(
                 forIndexSha256: meta.indexSha256Hex),
             excludedMultimodalTensorNames: [])
@@ -847,6 +1070,7 @@ enum RepackPlanner {
         case .fp16: 2
         case .fp32: 3
         case .u8: 4
+        case .i64: 5
         }
     }
 
@@ -891,6 +1115,7 @@ enum RepackPlanner {
                 case .qwen36: slot = qwenSlotRank(in: n)
                 case .gptOss: slot = gptOssSlotRank(in: n)
                 case .minimaxM2: slot = minimaxSlotRank(in: n)
+                case .qwen4Exp: slot = qwen4ExpSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -962,6 +1187,46 @@ enum RepackPlanner {
         if n.contains(".mlp.shared_expert.down_proj.weight") { return 19 }
         if n.hasSuffix(".input_layernorm.weight")        { return 20 }
         if n.hasSuffix(".post_attention_layernorm.weight") { return 21 }
+        return 100
+    }
+
+    /// Within-layer slot order for `qwen4_exp`. The blocks it shares with
+    /// Qwen 3.6 keep that order; the hyper-connection modules, which stand in
+    /// for the two layer norms Qwen 3.6 has, bracket it, and the sparse
+    /// indexer follows the full-attention projections it feeds.
+    private static func qwen4ExpSlotRank(in n: String) -> Int {
+        if n.contains(".attn_hyper_connection.hc_norm.weight") { return 0 }
+        if n.contains(".attn_hyper_connection.input_mix_weight_down.weight") { return 1 }
+        if n.contains(".attn_hyper_connection.input_mix_weight_up.weight") { return 2 }
+        if n.contains(".attn_hyper_connection.block_inject_weight.weight") { return 3 }
+        if n.contains(".self_attn.q_proj.weight")   { return 4 }
+        if n.contains(".self_attn.k_proj.weight")   { return 5 }
+        if n.contains(".self_attn.v_proj.weight")   { return 6 }
+        if n.contains(".self_attn.o_proj.weight")   { return 7 }
+        if n.contains(".self_attn.q_norm.weight")   { return 8 }
+        if n.contains(".self_attn.k_norm.weight")   { return 9 }
+        if n.contains(".self_attn.indexer.index_qk_proj.weight") { return 10 }
+        if n.contains(".self_attn.indexer.q_layernorm.weight")   { return 11 }
+        if n.contains(".self_attn.indexer.k_layernorm.weight")   { return 12 }
+        if n.contains(".linear_attn.in_proj_qkv.weight") { return 13 }
+        if n.contains(".linear_attn.in_proj_z.weight")   { return 14 }
+        if n.contains(".linear_attn.in_proj_a.weight")   { return 15 }
+        if n.contains(".linear_attn.in_proj_b.weight")   { return 16 }
+        if n.contains(".linear_attn.conv1d.weight")      { return 17 }
+        if n.hasSuffix(".linear_attn.A_log")             { return 18 }
+        if n.hasSuffix(".linear_attn.dt_bias")           { return 19 }
+        if n.contains(".linear_attn.norm.weight")        { return 20 }
+        if n.contains(".linear_attn.out_proj.weight")    { return 21 }
+        if n.contains(".mlp_hyper_connection.hc_norm.weight") { return 22 }
+        if n.contains(".mlp_hyper_connection.input_mix_weight_down.weight") { return 23 }
+        if n.contains(".mlp_hyper_connection.input_mix_weight_up.weight") { return 24 }
+        if n.contains(".mlp_hyper_connection.block_inject_weight.weight") { return 25 }
+        if n.contains(".mlp.gate.weight")                { return 26 }
+        if n.contains(".mlp.shared_expert_gate.weight")  { return 27 }
+        if n.contains(".mlp.shared_expert.gate_proj.weight") { return 28 }
+        if n.contains(".mlp.shared_expert.up_proj.weight")   { return 29 }
+        if n.contains(".mlp.shared_expert.down_proj.weight") { return 30 }
+        if n.contains(".ple.")                           { return 31 }
         return 100
     }
 

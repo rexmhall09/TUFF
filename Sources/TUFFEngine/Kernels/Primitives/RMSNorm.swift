@@ -24,6 +24,8 @@ final class RMSNorm {
     private let psoNoScalePerHead512: MTLComputePipelineState
     private let psoFloatBF16: MTLComputePipelineState
     private let psoFloatBF16Block: MTLComputePipelineState
+    private let psoBF16GroupedCentered: MTLComputePipelineState
+    private let psoBF16PerHeadCentered: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
@@ -51,6 +53,68 @@ final class RMSNorm {
         self.psoFloatBF16 = try context.pipeline("rmsnorm_float_bf16w_half")
         self.psoFloatBF16Block = try context.pipeline(
             "rmsnorm_float_bf16w_half_block")
+        self.psoBF16GroupedCentered = try context.pipeline(
+            "rmsnorm_bf16w_grouped_centered")
+        self.psoBF16PerHeadCentered = try context.pipeline(
+            "rmsnorm_bf16w_perhead_centered")
+    }
+
+    /// `y = x * inv * (1 + weight)` over `groups` independently normalized
+    /// spans of `d`, each reading its own slice of a `[groups * d]` weight.
+    ///
+    /// Qwen4-Exp stores its norm weights centered at zero, so the one has to
+    /// be added at use. It is added in float rather than folded into the BF16
+    /// weights during repack, because BF16 keeps far more of a stored 0.02
+    /// than of a stored 1.02.
+    ///
+    /// Pass `groups: 1` for an ordinary single-row centered norm.
+    func encodeBF16WGroupedCentered(commandBuffer: MTLCommandBuffer,
+                                    x: MTLBuffer, xOffset: Int = 0,
+                                    weight: MTLBuffer, weightOffset: Int = 0,
+                                    out: MTLBuffer, outOffset: Int = 0,
+                                    d: UInt32, groups: Int,
+                                    eps: Float) {
+        precondition(groups > 0)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoBF16GroupedCentered)
+        enc.setBuffer(x,      offset: xOffset,      index: 0)
+        enc.setBuffer(weight, offset: weightOffset, index: 1)
+        enc.setBuffer(out,    offset: outOffset,    index: 2)
+        var dVar = d
+        var epsVar = eps
+        enc.setBytes(&dVar,   length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 4)
+        let w = min(Int(psoBF16GroupedCentered.maxTotalThreadsPerThreadgroup), 256)
+        enc.dispatchThreadgroups(
+            MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// `y = x * inv * (1 + weight)` per head, one `[headDim]` weight shared
+    /// across heads. Qwen4-Exp's q_norm and k_norm, which unlike Qwen3.6's
+    /// are centered at zero.
+    func encodeBF16WPerHeadCentered(commandBuffer: MTLCommandBuffer,
+                                    x: MTLBuffer, xOffset: Int = 0,
+                                    weight: MTLBuffer, weightOffset: Int = 0,
+                                    out: MTLBuffer, outOffset: Int = 0,
+                                    headDim: UInt32, numHeads: Int,
+                                    eps: Float) {
+        precondition(numHeads > 0)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.setComputePipelineState(psoBF16PerHeadCentered)
+        enc.setBuffer(x,      offset: xOffset,      index: 0)
+        enc.setBuffer(weight, offset: weightOffset, index: 1)
+        enc.setBuffer(out,    offset: outOffset,    index: 2)
+        var hd = headDim
+        var epsVar = eps
+        enc.setBytes(&hd,     length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 4)
+        let w = min(Int(psoBF16PerHeadCentered.maxTotalThreadsPerThreadgroup), 256)
+        enc.dispatchThreadgroups(
+            MTLSize(width: numHeads, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     /// Encode the BF16-weight variant (Gemma 4 norms).

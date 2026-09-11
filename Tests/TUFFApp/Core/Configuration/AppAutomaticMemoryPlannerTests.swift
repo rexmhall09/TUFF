@@ -17,13 +17,13 @@ import TUFFModelCatalog
             appleSiliconGeneration: 5)
     }
 
-    @Test func speedKeepsTheQualifiedContextOn16GB() throws {
+    @Test func speedGrowsBeyondTheQualifiedContextOn16GB() throws {
         let plan = try #require(AppAutomaticMemoryPlanner.plan(
-            for: .minimaxM27,
+            for: .qwen38FlashNext,
             on: device(16),
             profile: .speed))
 
-        #expect(plan.contextTokens == 4_096)
+        #expect(plan.contextTokens > 4_096)
         #expect(plan.estimatedWorkingSetBytes <= plan.safeBudgetBytes)
     }
 
@@ -58,24 +58,27 @@ import TUFFModelCatalog
 
     // MARK: - Profiles
 
-    @Test func speedNeverRaisesContextAboveTheQualifiedDefault() throws {
-        for descriptor in [AppModelInstallDescriptor.gemma4E4B, .minimaxM27] {
-            let plan = try #require(AppAutomaticMemoryPlanner.plan(
-                for: descriptor, on: device(128), profile: .speed))
-            let qualified = try #require(descriptor.catalogID
-                .flatMap(TUFFModelCatalog.model(id:)))
-                .runtimeDefaults.contextTokens
-            #expect(plan.contextTokens == qualified)
+    @Test func profilesScaleWithAffordableModelContext() throws {
+        for descriptor in [AppModelInstallDescriptor.gemma4E4B, .qwen38FlashNext, .minimaxM27] {
+            let longest = try #require(AppAutomaticMemoryPlanner.plan(
+                for: descriptor, on: device(64), profile: .context))
+            for profile in [AppAutomaticMemoryProfile.speed, .balanced] {
+                let plan = try #require(AppAutomaticMemoryPlanner.plan(
+                    for: descriptor, on: device(64), profile: profile))
+                let target = longest.contextTokens / profile.contextCapacityDivisor
+                let expected = AppContextLengthOption.options(for: descriptor).last { $0.tokens <= target }
+                #expect(plan.contextTokens == expected?.tokens)
+            }
         }
     }
 
-    @Test func balancedStopsAtTwiceTheQualifiedContext() throws {
-        let qualified = TUFFModelCatalog.gemma4_E4B.runtimeDefaults.contextTokens
-        let plan = try #require(AppAutomaticMemoryPlanner.plan(
-            for: .gemma4E4B, on: device(128), profile: .balanced))
-
-        #expect(plan.contextTokens <= qualified * 2)
-        #expect(plan.contextTokens > qualified)
+    @Test func moreRAMBuysMoreContextForTheSameCheckpoint() throws {
+        let small = try #require(AppAutomaticMemoryPlanner.plan(
+            for: .qwen38FlashNext, on: device(16), profile: .balanced))
+        let large = try #require(AppAutomaticMemoryPlanner.plan(
+            for: .qwen38FlashNext, on: device(64), profile: .balanced))
+        #expect(large.contextTokens > small.contextTokens)
+        #expect(small.contextTokens >= 32_768)
     }
 
     @Test func contextTakesTheLongestWindowThatFits() throws {
@@ -86,7 +89,7 @@ import TUFFModelCatalog
 
         #expect(longest.contextTokens > balanced.contextTokens)
         #expect(longest.contextTokens
-            == AppContextLengthOption.allCases.map(\.tokens).max())
+            == TUFFModelCatalog.gemma4_E4B.maximumContextTokens)
         #expect(longest.estimatedWorkingSetBytes <= longest.safeBudgetBytes)
     }
 

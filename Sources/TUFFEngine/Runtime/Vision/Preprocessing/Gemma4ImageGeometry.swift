@@ -31,7 +31,7 @@ public struct Gemma4ImageGeometry: Sendable, Equatable {
         guard !sourceOverflow else {
             throw VisionImageError.invalidMetadata("source dimensions overflow")
         }
-        if config.family == .qwen36 {
+        if config.family.usesQwenVisionTower {
             self = try Self(
                 qwenSourceWidth: sourceWidth,
                 sourceHeight: sourceHeight,

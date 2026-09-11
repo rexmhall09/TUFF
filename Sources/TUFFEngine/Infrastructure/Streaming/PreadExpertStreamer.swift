@@ -430,6 +430,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 count - filled,
                 off_t(fileOffset) + off_t(filled))
             if readCount < 0 {
+                if errno == EINTR { continue }
                 throw StreamerError.preadFailed(errno: errno)
             }
             if readCount == 0 {

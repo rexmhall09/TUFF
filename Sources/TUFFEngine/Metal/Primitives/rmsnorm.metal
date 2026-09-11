@@ -214,6 +214,83 @@ void rmsnorm_bf16w_perhead(
     }
 }
 
+// Qwen4-Exp norms store weights centered at zero and scale by (1 + w), the
+// way Gemma's reference does and unlike Qwen3.6, whose weights are centered at
+// one. Every norm in the architecture takes this form except the gated
+// DeltaNet output norm: q_norm, k_norm, the sparse indexer's q/k layernorms,
+// the three PLE norms, and the hyper-connection hc_norm.
+//
+// The offset is applied here rather than folded into the weights at repack
+// time on purpose. These weights are BF16, with eight mantissa bits; a stored
+// 0.02 carries far more precision than a stored 1.02 does, so adding the one
+// before the cast would quantize away most of what the tensor says. The
+// reference adds it in float32, and so does this.
+
+// Grouped variant: `groups` independent normalizations of `D` elements each,
+// every group carrying its own slice of a [groups * D] weight. One
+// threadgroup per group.
+//
+// This covers the hyper-connection hc_norm, whose four residual streams are
+// normalized separately across a 10,240-wide weight, and a plain single-row
+// norm is the same kernel with one group.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void rmsnorm_bf16w_grouped_centered(
+    device const half*   x          [[buffer(0)]],   // [groups * D] FP16
+    device const bfloat* weight     [[buffer(1)]],   // [groups * D] BF16
+    device       half*   out        [[buffer(2)]],   // [groups * D] FP16
+    constant     uint&   D          [[buffer(3)]],
+    constant     float&  eps        [[buffer(4)]],
+    uint  group            [[threadgroup_position_in_grid]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial[kRmsMaxSimdGroups];
+    const uint DD = rms_fc_d(D);
+    device const half*   xg = x      + group * DD;
+    device const bfloat* wg = weight + group * DD;
+    device       half*   og = out    + group * DD;
+    const float inv = rms_block_inv(xg, DD, eps, lid, lsize,
+                                    simd_lane_id, simd_group_id, simdgroups,
+                                    partial);
+    for (uint i = lid; i < DD; i += lsize) {
+        float xv = float(xg[i]);
+        float wv = 1.0f + float(wg[i]);
+        og[i] = half(xv * inv * wv);
+    }
+}
+
+// Per-head variant: one [headDim] weight shared across every head, as q_norm
+// and k_norm use it.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void rmsnorm_bf16w_perhead_centered(
+    device const half*   x          [[buffer(0)]],   // [numHeads * headDim] FP16
+    device const bfloat* weight     [[buffer(1)]],   // [headDim] BF16, shared
+    device       half*   out        [[buffer(2)]],   // [numHeads * headDim] FP16
+    constant     uint&   headDim    [[buffer(3)]],
+    constant     float&  eps        [[buffer(4)]],
+    uint  head             [[threadgroup_position_in_grid]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial[kRmsMaxSimdGroups];
+    const uint HD = rms_fc_d(headDim);
+    device const half* xh = x   + head * HD;
+    device       half* oh = out + head * HD;
+    const float inv = rms_block_inv(xh, HD, eps, lid, lsize,
+                                    simd_lane_id, simd_group_id, simdgroups, partial);
+    for (uint i = lid; i < HD; i += lsize) {
+        float xv = float(xh[i]);
+        float wv = 1.0f + float(weight[i]);
+        oh[i] = half(xv * inv * wv);
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void rmsnorm_no_scale_perhead(
     device const half*  x          [[buffer(0)]],   // [numHeads * headDim] FP16

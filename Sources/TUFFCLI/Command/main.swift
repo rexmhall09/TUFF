@@ -26,7 +26,7 @@ final class RunBox: @unchecked Sendable {
 func drive(_ args: Args) -> Int32 {
     let box = RunBox()
     let sem = DispatchSemaphore(value: 0)
-    box.task = Task {
+    box.task = Task(priority: .userInitiated) {
         let result = await run(args: args)
         box.code = result.exitCode
         sem.signal()

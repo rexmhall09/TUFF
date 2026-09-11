@@ -16,6 +16,20 @@ enum MacAppIcon {
         return Bundle.module
     }()
 
+    /// Only used as a Dock fallback by bare SwiftPM launches. App bundles use
+    /// their compiled icon; the PNG's artwork fills its canvas and needs the
+    /// normal macOS inset when supplied directly to NSApplication.
+    static func dockFallback() -> NSImage? {
+        guard let source = load() else { return nil }
+        let size = NSSize(width: 1024, height: 1024)
+        let result = NSImage(size: size)
+        result.lockFocus()
+        source.draw(in: NSRect(x: 100, y: 100, width: 824, height: 824),
+                    from: .zero, operation: .sourceOver, fraction: 1)
+        result.unlockFocus()
+        return result
+    }
+
     static func load() -> NSImage? {
         guard let url = resourceBundle.url(
             forResource: "tuff-app-icon",
