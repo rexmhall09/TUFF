@@ -40,6 +40,8 @@ import Metal
         #expect(runner.maxContext == 64)
         #expect(runner.usesFusedGreedyHead)
         #expect(!runner.supportsSpeculativeVerification)
+        // Gated DeltaNet state is recurrent, so the KV cannot be rewound.
+        #expect(!runner.supportsPrefixCheckpoints)
     }
 
     @Test func runnerRejectsCacheSmallerThanRoutedTopK() throws {

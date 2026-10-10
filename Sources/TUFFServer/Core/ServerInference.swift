@@ -1100,7 +1100,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             reasoning: request.reasoning)
 
         let checkpointPositions = promptCacheMode == .singlePrefix && multimodalInput == nil
-            ? harmonyCheckpointPositions(request: request, effectivePromptIDs: effectivePromptIDs)
+            ? checkpointPositions(request: request, effectivePromptIDs: effectivePromptIDs)
             : []
 
         completionStarted = true
@@ -1168,30 +1168,58 @@ public actor ServerModelSession: ServerInferenceBackend {
             timingSeconds: timingSeconds)
     }
 
-    /// Where a GPT-OSS request takes checkpoints. Where the instructions and
-    /// tools end lets a new conversation with the same system prompt skip
-    /// them; an agent's is often thousands of tokens. Where a user turn's
-    /// prompt ends lets the next message resume there, because Harmony
-    /// rewrites a finished turn when the next one is rendered. Tool rounds
-    /// keep both.
-    func harmonyCheckpointPositions(request: ValidatedChatRequest,
-                                    effectivePromptIDs: [Int32]) -> [Int] {
-        guard chatDialect == .harmony,
-              let effort = request.reasoningEffort,
-              let date = request.harmonyCurrentDate else { return [] }
+    /// Where a request takes checkpoints, for a runner that can return to
+    /// one. Where the instructions and tools end lets a new conversation with
+    /// the same system prompt skip them; an agent's is often thousands of
+    /// tokens. Where a user turn's prompt ends lets the next message resume
+    /// there when the template rewrites the finished turn, as Harmony always
+    /// does and Gemma and Qwen do with thinking on. Tool rounds keep both.
+    /// Each costs a copy of the runner's sliding-window rows, which the
+    /// conversation store charges against its memory budget.
+    func checkpointPositions(request: ValidatedChatRequest,
+                             effectivePromptIDs: [Int32]) -> [Int] {
         var positions: [Int] = []
-        if let instructions = try? tokenizer.harmonyInstructionPrefix(
-            messages: request.messages, tools: request.tools,
-            reasoningEffort: effort, currentDate: date),
-           instructions.count >= Self.minimumSharedPrefixTokens,
-           effectivePromptIDs.count > instructions.count,
-           effectivePromptIDs.starts(with: instructions) {
-            positions.append(instructions.count)
+        if let instructions = instructionPrefixLength(
+            request: request, effectivePromptIDs: effectivePromptIDs),
+           instructions >= Self.minimumSharedPrefixTokens,
+           effectivePromptIDs.count > instructions {
+            positions.append(instructions)
         }
-        if request.messages.last?.role == .user {
+        // Without that rewrite a follow-up already continues from the end of
+        // the KV, so the copy would only cost memory.
+        if request.messages.last?.role == .user, !request.allowsTextBridge {
             positions.append(effectivePromptIDs.count)
         }
         return positions
+    }
+
+    /// How many of the prompt's tokens every request with the same system
+    /// prompt, tools and settings shares: the leading system message rendered
+    /// on its own, as far as it agrees with the prompt. A template may close
+    /// that render differently, so only the agreeing tokens count.
+    private func instructionPrefixLength(request: ValidatedChatRequest,
+                                         effectivePromptIDs: [Int32]) -> Int? {
+        let leading = request.messages.prefix { $0.role == .system || $0.role == .developer }
+        guard !leading.isEmpty || !request.tools.isEmpty else { return nil }
+        let instructions: [Int32]?
+        if chatDialect == .harmony {
+            guard let effort = request.reasoningEffort,
+                  let date = request.harmonyCurrentDate else { return nil }
+            instructions = try? tokenizer.harmonyInstructionPrefix(
+                messages: request.messages, tools: request.tools,
+                reasoningEffort: effort, currentDate: date)
+        } else if usesToolTemplate(request) {
+            instructions = try? tokenizer.encodeToolChat(
+                messages: Array(leading), tools: request.tools, reasoning: request.reasoning,
+                preserveThinking: request.preserveThinking, addGenerationPrompt: false)
+        } else {
+            instructions = (try? tokenizer.applyChatTemplate(
+                Array(leading), modelVariant: model.config.variant,
+                reasoning: request.reasoning, preserveThinking: request.preserveThinking))
+                .map { tokenizer.encode($0, addBOS: false) }
+        }
+        guard let instructions else { return nil }
+        return zip(instructions, effectivePromptIDs).prefix { $0 == $1 }.count
     }
 
     /// Shorter instructions cost less to read than the checkpoint saves.

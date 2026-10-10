@@ -41,6 +41,52 @@ import Metal
         #expect(model.openLayerFileCount() == 0)
     }
 
+    /// Generating past the checkpoint overwrites the sliding-window ring
+    /// (window 32 here, with PLE and shared KV layers). Rewinding must bring
+    /// back exactly the state at the checkpoint, so continuing from it equals
+    /// a fresh run, logit for logit.
+    @Test func rewindingToACheckpointMatchesAFreshRun() async throws {
+        let directory = try DenseGemmaToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let context = try MetalContext()
+        let model = try Model.load(directoryURL: directory, device: context.device,
+                                   expecting: .gemma4E4BToy())
+        let runner = try RealForwardRunner(
+            model: model, context: context, maxContext: 512,
+            runtimeConfiguration: RuntimeConfiguration(forceLogitsHead: true))
+        #expect(runner.supportsPrefixCheckpoints)
+        let output = logits(context)
+        func values() -> [Float16] {
+            let pointer = output.contents().assumingMemoryBound(to: Float16.self)
+            return (0..<256).map { pointer[$0] }
+        }
+        let prompt = (0..<40).map { Int32(($0 * 7) % 200 + 1) }
+        let next: [Int32] = [17, 4, 61]
+
+        for (position, token) in prompt.enumerated() {
+            try await runner.produce(token: token, position: position, into: output)
+        }
+        let checkpoint = try runner.capturePrefixCheckpoint()
+        #expect(checkpoint.position == 40)
+        for offset in 0..<300 {
+            try await runner.produce(token: Int32(offset % 90 + 2), position: 40 + offset,
+                                     into: output)
+        }
+        try runner.rewind(to: checkpoint)
+        #expect(runner.continuationPosition == 40)
+        try runner.prepareForContinuation(expectedPosition: 40)
+        for (offset, token) in next.enumerated() {
+            try await runner.produce(token: token, position: 40 + offset, into: output)
+        }
+        let resumed = values()
+
+        runner.reset()
+        for (position, token) in (prompt + next).enumerated() {
+            try await runner.produce(token: token, position: position, into: output)
+        }
+        #expect(resumed == values())
+    }
+
     @Test func chunkedPrefillContinuesIntoDecode() async throws {
         let (directory, context, _, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: directory) }

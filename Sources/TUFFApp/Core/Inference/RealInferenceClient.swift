@@ -757,11 +757,12 @@ actor RealInferenceSession {
                 }
             }
 
-            // GPT-OSS rewrites a finished turn when the next one is rendered,
-            // so a user turn records where it began and the next message
-            // resumes there. Tool rounds inside the turn keep it.
-            let capturesTurnCheckpoint = tokenizer.dialect == .harmony
-                && multimodalInput == nil && request.assistantPrefix.isEmpty
+            // A template that rewrites a finished turn when the next one is
+            // rendered (GPT-OSS always, Gemma and Qwen with thinking on) is
+            // resumed where the user turn began. Tool rounds keep it.
+            let capturesTurnCheckpoint = multimodalInput == nil
+                && !Self.allowsTextBridge(request)
+                && request.assistantPrefix.isEmpty
                 && transcript.messages.last?.role == .user
 
             completionStarted = true

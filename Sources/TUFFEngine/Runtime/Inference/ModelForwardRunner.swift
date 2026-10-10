@@ -385,21 +385,23 @@ extension ModelForwardRunner: StateSnapshottingRunner {
 
 extension ModelForwardRunner: PrefixCheckpointingRunner {
     public var supportsPrefixCheckpoints: Bool {
-        if case .gptOss = backend { return true }
-        return false
+        switch backend {
+        case .affine(let runner): return runner.supportsPrefixCheckpoints
+        case .gptOss: return true
+        }
     }
 
     public func capturePrefixCheckpoint() throws -> RunnerStateSnapshot {
-        guard case .gptOss(let runner) = backend else {
-            throw RunnerStateSnapshotError.unsupported("prefix checkpoints are GPT-OSS only")
+        switch backend {
+        case .affine(let runner): return try runner.capturePrefixCheckpoint()
+        case .gptOss(let runner): return try runner.capturePrefixCheckpoint()
         }
-        return try runner.capturePrefixCheckpoint()
     }
 
     public func rewind(to checkpoint: RunnerStateSnapshot) throws {
-        guard case .gptOss(let runner) = backend else {
-            throw RunnerStateSnapshotError.unsupported("prefix checkpoints are GPT-OSS only")
+        switch backend {
+        case .affine(let runner): try runner.rewind(to: checkpoint)
+        case .gptOss(let runner): try runner.rewind(to: checkpoint)
         }
-        try runner.rewind(to: checkpoint)
     }
 }

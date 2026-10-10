@@ -324,4 +324,31 @@ import Metal
         #expect(cached >= firstPrompt.count)
         #expect(runner.tag == "first")
     }
+
+    // MARK: Memory
+
+    /// The active conversation's checkpoints are copies outside the runner,
+    /// so they count against the budget and are dropped when they cannot fit.
+    @Test func checkpointsThatDoNotFitTheBudgetAreDropped() async throws {
+        let tokenizer = try await Self.harmony()
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        func publish(budget: Int) throws -> ConversationStateStore {
+            let store = ConversationStateStore(budgetBytes: budget, memoryIsPressured: { false })
+            let runner = CheckpointRunner()
+            var entry = try #require(try Self.finishedTurn(tokenizer, runner: runner))
+            let checkpoint = try #require(entry.prefixCheckpoints.first)
+            let sized = RunnerStateSnapshot(
+                owner: ObjectIdentifier(runner),
+                storage: device.makeBuffer(length: 64 << 10, options: .storageModeShared),
+                segments: [], host: .init(position: checkpoint.position, ngramContext: [],
+                                          ropeDelta: 0))
+            entry.prefixCheckpoints = [try #require(ConversationPrefixCheckpoint(
+                tokenIDs: checkpoint.tokenIDs, snapshot: sized))]
+            store.publish(entry)
+            return store
+        }
+        #expect(try publish(budget: 1 << 20).activeCheckpointBytes == 64 << 10)
+        #expect(try publish(budget: 32 << 10).activeCheckpointBytes == 0)
+        #expect(try publish(budget: 0).activeCheckpointBytes == 0)
+    }
 }

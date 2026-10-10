@@ -4619,6 +4619,56 @@ extension RealForwardRunner {
     }
 }
 
+extension RealForwardRunner: PrefixCheckpointingRunner {
+    /// Gemma's full-attention rows are only appended to, so returning to an
+    /// earlier position needs just its sliding-window rings. A runner that
+    /// also carries recurrent state (Qwen's Gated DeltaNet), a sparse indexer,
+    /// an n-gram history or an image RoPE offset cannot go back that way.
+    public var supportsPrefixCheckpoints: Bool {
+        kv != nil && gdnState == nil && qwenSparseAttention == nil
+            && pleConvHistory == nil && qwenMultimodalRopeDelta == 0
+    }
+
+    private func ringSnapshotBuilder(position: Int) -> RunnerStateSnapshotBuilder {
+        var builder = RunnerStateSnapshotBuilder()
+        if let kv {
+            kv.addSnapshotRanges(to: &builder, position: position,
+                                 skipLayer: { [self] in snapshotSkipsLayer($0) || !kv.isRingLayer($0) })
+        }
+        return builder
+    }
+
+    public func capturePrefixCheckpoint() throws -> RunnerStateSnapshot {
+        guard supportsPrefixCheckpoints, speculativeStartPosition == nil else {
+            throw RunnerStateSnapshotError.unsupported("this runner cannot take prefix checkpoints")
+        }
+        let position = continuationPosition
+        return try ringSnapshotBuilder(position: position).capture(
+            owner: self, queue: ctx.queue,
+            host: .init(position: position, ngramContext: [], ropeDelta: 0))
+    }
+
+    public func rewind(to checkpoint: RunnerStateSnapshot) throws {
+        guard checkpoint.owner == ObjectIdentifier(self) else {
+            throw RunnerStateSnapshotError.foreignSnapshot
+        }
+        let position = checkpoint.host.position
+        do {
+            guard supportsPrefixCheckpoints, let kv, speculativeStartPosition == nil,
+                  position > 0, position <= kv.position else {
+                throw RunnerStateSnapshotError.layoutMismatch(
+                    "checkpoint at \(position) cannot be reached from \(continuationPosition)")
+            }
+            try prefillChunkState.requireClean(operation: "rewind")
+            try ringSnapshotBuilder(position: position).restore(checkpoint, queue: ctx.queue)
+            kv.rewind(to: position)
+        } catch {
+            reset()
+            throw error
+        }
+    }
+}
+
 extension RealForwardRunner: StateSnapshottingRunner {
     public var stateSnapshotByteEstimate: Int? {
         guard speculativeTransactionIsIdle else { return nil }

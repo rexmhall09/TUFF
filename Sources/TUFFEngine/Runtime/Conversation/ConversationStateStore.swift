@@ -131,7 +131,10 @@ public final class ConversationStateStore {
         // A plan's static budget does not anticipate another application's
         // allocations. Keep the active runner usable but discard optional
         // snapshots and stop making new ones while macOS reports pressure.
-        if memoryIsPressured() { releaseRetained() }
+        if memoryIsPressured() {
+            releaseRetained()
+            active?.prefixCheckpoints = []
+        }
         // An active entry is only as good as the runner's agreement with it.
         if let entry = active, runner.continuationPosition != entry.kvPosition {
             active = nil
@@ -235,11 +238,36 @@ public final class ConversationStateStore {
     /// request. Nil says the runner's state cannot be continued.
     public func publish(_ entry: ConversationCacheEntry?) {
         active = entry
-        guard let key = entry?.conversationKey else { return }
-        // The same conversation's older state is superseded by this one.
-        let before = retained.count
-        retained.removeAll { $0.entry.conversationKey == key }
-        counters.evictions += before - retained.count
+        if let key = entry?.conversationKey {
+            // The same conversation's older state is superseded by this one.
+            let before = retained.count
+            retained.removeAll { $0.entry.conversationKey == key }
+            counters.evictions += before - retained.count
+        }
+        fitActiveCheckpoints()
+    }
+
+    /// Bytes held by the active conversation's checkpoints. They live outside
+    /// the runner, so they count against the budget like retained snapshots.
+    public var activeCheckpointBytes: Int {
+        active?.prefixCheckpoints.reduce(0) { $0 + $1.snapshot.byteCount } ?? 0
+    }
+
+    /// Makes room for the active checkpoints by evicting the least recently
+    /// used retained conversations, and drops the checkpoints if they still
+    /// do not fit, for example under a zero budget or memory pressure.
+    private func fitActiveCheckpoints() {
+        guard activeCheckpointBytes > 0 else { return }
+        guard budgetBytes > 0, !memoryIsPressured() else {
+            active?.prefixCheckpoints = []
+            return
+        }
+        while !retained.isEmpty, retainedBytes + activeCheckpointBytes > budgetBytes {
+            let oldest = retained.indices.min { retained[$0].lastUse < retained[$1].lastUse }!
+            retained.remove(at: oldest)
+            counters.evictions += 1
+        }
+        if activeCheckpointBytes > budgetBytes { active?.prefixCheckpoints = [] }
     }
 
     /// The runner's state no longer matches any claim; called after a failed
@@ -306,7 +334,8 @@ public final class ConversationStateStore {
         defer { active = nil }
         guard let entry = active, maximumRetained > 0, budgetBytes > 0 else { return }
         guard !memoryIsPressured() else { return }
-        guard let bytes = runner.stateSnapshotByteEstimate,
+        guard let stateBytes = runner.stateSnapshotByteEstimate,
+              case let bytes = stateBytes + activeCheckpointBytes,
               bytes + reservedBytes <= budgetBytes else {
             counters.declined += 1
             return
