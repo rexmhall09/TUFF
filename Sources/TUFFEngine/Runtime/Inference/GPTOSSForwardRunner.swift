@@ -59,6 +59,10 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     private lazy var lookaheadIndices: MTLBuffer = context.device.makeBuffer(
         length: max(1, config.topKExperts) * MemoryLayout<UInt32>.stride,
         options: .storageModeShared)!
+    private lazy var lookahead2Indices: MTLBuffer = context.device.makeBuffer(
+        length: config.topKExperts * MemoryLayout<UInt32>.stride, options: .storageModeShared)!
+    private lazy var lookahead2Weights: MTLBuffer = context.device.makeBuffer(
+        length: config.topKExperts * MemoryLayout<Float>.stride, options: .storageModeShared)!
     private lazy var lookaheadWeights: MTLBuffer = context.device.makeBuffer(
         length: max(1, config.topKExperts) * MemoryLayout<Float16>.stride,
         options: .storageModeShared)!
@@ -1100,6 +1104,26 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                 numExperts: UInt32(config.numExperts))
             lookaheadEncoded = true
         }
+        // Two ahead: layer + 2's router over the same input. Its reads start
+        // a layer earlier, at the cost of a less accurate guess.
+        var lookahead2Encoded = false
+        if lookahead.enabled, lookahead.depth >= 2, layer + 2 < config.numLayers {
+            let next = layers[layer + 2]
+            bf16.encodeFloat(commandBuffer: cb1,
+                             weights: next.routerWeight,
+                             input: normed,
+                             output: routerLogits,
+                             bias: next.routerBias,
+                             rows: config.numExperts,
+                             columns: hiddenSize)
+            moePrimitives.encodeRouterTop4(
+                commandBuffer: cb1,
+                logits: routerLogits,
+                outputIndices: lookahead2Indices,
+                outputWeights: lookahead2Weights,
+                numExperts: UInt32(config.numExperts))
+            lookahead2Encoded = true
+        }
         cb1.commit()
         try waitForCompletion(cb1)
         totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cb1Start
@@ -1108,7 +1132,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             .assumingMemoryBound(to: UInt32.self)
         let experts = (0..<config.topKExperts).map { Int(indexPointer[$0]) }
 
-        if let finished = lookahead.drain(), finished.layer == layer {
+        if let finished = lookahead.drain(layer: layer) {
             lookahead.record(predicted: finished.experts, actual: experts)
         }
         var lookaheadDispatch: (() -> Void)?
@@ -1118,31 +1142,51 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
         }
         // Every exit, including a throw, releases a registered read.
         defer { fireLookahead() }
+        func predictions(_ buffer: MTLBuffer) -> [Int] {
+            let pointer = buffer.contents().assumingMemoryBound(to: UInt32.self)
+            return (0..<config.topKExperts).map { min(Int(pointer[$0]), config.numExperts - 1) }
+        }
+        // Reads are planned here on the runner's thread and run one after
+        // another off it, the nearer layer first, once this layer's own fetch
+        // is done: started together they would split the SSD's bandwidth.
+        var reads: [(operation: @Sendable () throws -> Void, group: DispatchGroup)] = []
+        func planRead(layer target: Int, experts predicted: [Int]) throws -> DispatchGroup? {
+            guard let plan = try model.planRoutedExperts(layer: target, experts: predicted,
+                                                         purpose: .prefetch),
+                  !plan.misses.isEmpty else { return nil }
+            let group = DispatchGroup()
+            group.enter()
+            reads.append((try model.expertPrefetchOperation(plan: plan), group))
+            lookahead.noteRead()
+            return group
+        }
         if lookaheadEncoded {
-            let predictedPointer = lookaheadIndices.contents()
-                .assumingMemoryBound(to: UInt32.self)
-            let predicted = (0..<config.topKExperts).map {
-                min(Int(predictedPointer[$0]), config.numExperts - 1)
+            let predicted = predictions(lookaheadIndices)
+            // A read two ahead may still be filling layer + 1's slots, and a
+            // streamer is planned again only once its reads have landed. If
+            // it has not, that layer's own fetch reads whatever is missing.
+            if lookahead.isSettled(layer: layer + 1) {
+                lookahead.expect(layer: layer + 1, experts: predicted,
+                                 reads: try planRead(layer: layer + 1, experts: predicted))
             }
-            var reads: DispatchGroup?
-            if let plan = try model.planRoutedExperts(layer: layer + 1, experts: predicted, purpose: .prefetch),
-               !plan.misses.isEmpty {
-                // Dispatched after this layer's own fetch so the two reads
-                // do not split the SSD's bandwidth.
-                let prefetch = try model.expertPrefetchOperation(plan: plan)
-                let group = DispatchGroup()
-                group.enter()
-                lookaheadDispatch = {
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        try? prefetch()
-                        group.leave()
+        }
+        if lookahead2Encoded {
+            let predicted = predictions(lookahead2Indices)
+            lookahead.expect(layer: layer + 2, experts: predicted,
+                             reads: try planRead(layer: layer + 2, experts: predicted))
+        }
+        if !reads.isEmpty {
+            let queued = reads
+            lookaheadDispatch = {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    for read in queued {
+                        // A failed read only loses the head start: the
+                        // layer's own fetch reads whatever is missing.
+                        try? read.operation()
+                        read.group.leave()
                     }
                 }
-                reads = group
-                lookahead.noteRead()
             }
-            lookahead.pending = ExpertLookahead.Pending(layer: layer + 1, experts: predicted,
-                                                        reads: reads)
         }
 
         let plannedFetch = try model.planRoutedExperts(

@@ -376,7 +376,7 @@ enum GPTOSSToySynthetic {
 }
 
 extension ArchConfig {
-    static func gptOssToy(numExperts: Int = 4) -> ArchConfig {
+    static func gptOssToy(numExperts: Int = 4, numLayers: Int = 2) -> ArchConfig {
         ArchConfig(
             hiddenSize: 64,
             intermediateSize: 64,
@@ -392,12 +392,12 @@ extension ArchConfig {
             ropeTheta: 150_000,
             fullRopeTheta: 150_000,
             partialRotaryFactor: 1,
-            numLayers: 2,
+            numLayers: numLayers,
             numExperts: numExperts,
             topKExperts: 4,
             tieWordEmbeddings: false,
             attentionKEqV: false,
-            fullAttentionLayerMask: [0, 1],
+            fullAttentionLayerMask: (0..<numLayers).map { UInt8($0 % 2) },
             hiddenActivation: "swiglu_capped",
             family: .gptOss,
             variant: .gptOss_20B,

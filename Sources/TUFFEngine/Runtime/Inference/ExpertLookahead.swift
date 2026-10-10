@@ -30,10 +30,17 @@ struct ExpertLookahead {
     private(set) var exposedWaitNanos: UInt64 = 0
     private(set) var enabled = true
     var pending: Pending?
+    /// How many layers ahead a runner that supports it predicts. GPT-OSS
+    /// reads two ahead, so a read has two layers of compute to hide behind,
+    /// and tops up one ahead with whatever the earlier guess missed.
+    let depth: Int
+    /// Reads for layers further ahead than the next, by layer.
+    private var ahead: [Int: Pending] = [:]
 
     // Read once when the runner is created, never while GPU work is in flight.
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         enabled = environment["TUFF_EXPERT_LOOKAHEAD"] != "off"
+        depth = environment["TUFF_EXPERT_LOOKAHEAD_DEPTH"] == "1" ? 1 : 2
     }
 
     var precision: Double {
@@ -52,15 +59,43 @@ struct ExpertLookahead {
 
     /// Waits for the in-flight read, if any, and returns what it predicted.
     /// Every path that plans or fetches experts drains first, so a background
-    /// read never races the layer it fills.
+    /// read never races the layer it fills. Reads for layers further ahead
+    /// are drained too.
     mutating func drain() -> Pending? {
+        for layer in ahead.keys.sorted() { _ = drain(layer: layer) }
         guard let pending else { return nil }
+        wait(for: pending)
+        self.pending = nil
+        return pending
+    }
+
+    /// Adds a prediction for `layer`, with the read that fills it, to any
+    /// already made. One group per layer, so draining waits for all of them.
+    mutating func expect(layer: Int, experts: [Int], reads: DispatchGroup?) {
+        let earlier = ahead[layer]
+        let merged = (earlier?.experts ?? []) + experts.filter { !(earlier?.experts.contains($0) ?? false) }
+        ahead[layer] = Pending(layer: layer, experts: merged, reads: reads ?? earlier?.reads)
+    }
+
+    /// Whether `layer`'s reads have all landed, without waiting. Its streamer
+    /// may be planned again only then.
+    func isSettled(layer: Int) -> Bool {
+        guard let reads = ahead[layer]?.reads else { return true }
+        return reads.wait(timeout: .now()) == .success
+    }
+
+    /// Waits for `layer`'s reads and returns everything predicted for it.
+    mutating func drain(layer: Int) -> Pending? {
+        guard let pending = ahead.removeValue(forKey: layer) else { return nil }
+        wait(for: pending)
+        return pending
+    }
+
+    private mutating func wait(for pending: Pending) {
         if let reads = pending.reads, reads.wait(timeout: .now()) == .timedOut {
             let start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             reads.wait()
             exposedWaitNanos += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start
         }
-        self.pending = nil
-        return pending
     }
 }

@@ -474,6 +474,34 @@ private enum GPTOSSToyCPUReference {
         #expect(small.gptOssSplitExpertLayers > 0)
     }
 
+    /// Reading two layers ahead only changes what is in the cache, never the
+    /// math: depth 2, depth 1 and no lookahead decode identical logits.
+    @Test func lookingTwoLayersAheadKeepsTheLogits() async throws {
+        let config = ArchConfig.gptOssToy(numExperts: 16, numLayers: 4)
+        var outputs: [[[Float16]]] = []
+        var reads: [Int] = []
+        for setting in [("2", "auto"), ("1", "auto"), ("2", "off")] {
+            setenv("TUFF_EXPERT_LOOKAHEAD_DEPTH", setting.0, 1)
+            setenv("TUFF_EXPERT_LOOKAHEAD", setting.1, 1)
+            defer { unsetenv("TUFF_EXPERT_LOOKAHEAD_DEPTH"); unsetenv("TUFF_EXPERT_LOOKAHEAD") }
+            let (directory, context, _, runner) = try makeRunner(cacheSlots: 8, config: config)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let output = try #require(context.device.makeBuffer(
+                length: config.vocabSize * MemoryLayout<Float16>.stride, options: .storageModeShared))
+            var steps: [[Float16]] = []
+            for (position, token) in (0..<32).map({ Int32(($0 * 13) % 120 + 1) }).enumerated() {
+                try await runner.produce(token: token, position: position, into: output)
+                let pointer = output.contents().assumingMemoryBound(to: Float16.self)
+                steps.append((0..<config.vocabSize).map { pointer[$0] })
+            }
+            outputs.append(steps)
+            reads.append(runner.expertLookahead?.readsIssued ?? 0)
+        }
+        #expect(outputs[0] == outputs[1])
+        #expect(outputs[0] == outputs[2])
+        #expect(reads[0] > reads[1], "depth 2 should issue more reads: \(reads)")
+    }
+
     @Test func resetRestoresDeterministicKVState() async throws {
         let (directory, context, _, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: directory) }
