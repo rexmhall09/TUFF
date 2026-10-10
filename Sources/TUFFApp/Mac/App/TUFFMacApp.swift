@@ -77,6 +77,7 @@ struct TUFFMacApp: App {
                 backgroundAPI: backgroundAPI,
                 updateController: updateController)
                 .sheet(isPresented: $isReportingBug) { BugReportSheet(model: model) }
+                .task { backgroundAPI.refreshRegistrationAfterUpdate() }
                 .alert("Recovery Update", isPresented: Binding(
                     get: { updateController.recoveryMessage != nil },
                     set: { if !$0 { updateController.recoveryMessage = nil } })) {

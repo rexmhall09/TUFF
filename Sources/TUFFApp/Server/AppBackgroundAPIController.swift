@@ -78,6 +78,7 @@ public final class AppBackgroundAPIController {
                 }
                 if candidate.enabled && service.status != .enabled {
                     try service.register()
+                    recordRegistration()
                 }
                 if requiresApproval {
                     message = "Allow TUFF in Login Items to start the Background API."
@@ -97,6 +98,48 @@ public final class AppBackgroundAPIController {
                 message = "Could not change Background API settings: \(error.localizedDescription)"
             }
         }
+    }
+
+    /// Registers the login item again after an update. TUFF is signed
+    /// without a developer team, so macOS pins the item to the exact binary
+    /// that registered it, and after an update launchd refuses the new one
+    /// ("Launch Constraint Violation") and the Background API stays down.
+    /// Registering again from the new build points it at the new binary.
+    public func refreshRegistrationAfterUpdate(build: String = TUFFVersion.current) {
+        guard isAvailable, let service, settings.enabled, !isChanging,
+              registeredBuild != build else { return }
+        isChanging = true
+        Task {
+            defer { isChanging = false }
+            do {
+                if service.status == .enabled || service.status == .requiresApproval {
+                    try await service.unregister()
+                }
+                try service.register()
+                recordRegistration(build: build)
+                await refreshStatus()
+            } catch {
+                message = "Could not restart the Background API after updating: "
+                    + error.localizedDescription
+            }
+        }
+    }
+
+    /// The build the login item was last registered from, kept beside the
+    /// settings so the settings format itself does not change.
+    private var registrationURL: URL {
+        settingsURL.deletingLastPathComponent().appendingPathComponent("registered-build")
+    }
+
+    var registeredBuild: String? {
+        (try? String(contentsOf: registrationURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func recordRegistration(build: String = TUFFVersion.current) {
+        try? FileManager.default.createDirectory(
+            at: registrationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? build.write(to: registrationURL, atomically: true, encoding: .utf8)
     }
 
     public func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }

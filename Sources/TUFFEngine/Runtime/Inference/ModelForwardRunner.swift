@@ -226,6 +226,11 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
         }
     }
 
+    var gptOssSplitExpertLayers: UInt64 {
+        if case .gptOss(let runner) = backend { return runner.splitExpertLayers }
+        return 0
+    }
+
     func selectHead(pureGreedy: Bool) {
         if case .affine(let runner) = backend { runner.selectHead(pureGreedy: pureGreedy) }
     }

@@ -7,8 +7,7 @@ import TUFFFormat
 /// one full-attention layer, BF16 resident projections, and four MXFP4 routed
 /// experts. The shapes are small but retain every production layout rule.
 enum GPTOSSToySynthetic {
-    static func write() throws -> URL {
-        let config = ArchConfig.gptOssToy()
+    static func write(config: ArchConfig = .gptOssToy()) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-gptoss-toy-\(UUID().uuidString)")
         let expertsDirectory = directory.appendingPathComponent("packed_experts")
@@ -377,7 +376,7 @@ enum GPTOSSToySynthetic {
 }
 
 extension ArchConfig {
-    static func gptOssToy() -> ArchConfig {
+    static func gptOssToy(numExperts: Int = 4) -> ArchConfig {
         ArchConfig(
             hiddenSize: 64,
             intermediateSize: 64,
@@ -394,7 +393,7 @@ extension ArchConfig {
             fullRopeTheta: 150_000,
             partialRotaryFactor: 1,
             numLayers: 2,
-            numExperts: 4,
+            numExperts: numExperts,
             topKExperts: 4,
             tieWordEmbeddings: false,
             attentionKEqV: false,

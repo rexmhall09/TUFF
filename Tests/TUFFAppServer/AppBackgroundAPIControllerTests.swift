@@ -62,4 +62,35 @@ import TUFFModelCatalog
         #expect(!clone.isAvailable && !clone.settings.enabled)
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("clone.json").path))
     }
+
+    /// An update changes the binary the login item was pinned to, so the
+    /// first launch of a new build registers it again, once.
+    @MainActor @Test func aNewBuildRegistersTheLoginItemAgainOnce() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let agent = FixtureAgent(), file = root.appendingPathComponent("settings.json")
+        let controller = AppBackgroundAPIController(service: agent, settingsURL: file)
+        controller.update { $0.enabled = true; $0.port = 65433 }
+        try await settle(controller)
+        #expect(agent.calls == ["register"])
+
+        controller.refreshRegistrationAfterUpdate(build: TUFFVersion.current)
+        try await settle(controller)
+        #expect(agent.calls == ["register"])
+
+        controller.refreshRegistrationAfterUpdate(build: "99.0.0")
+        try await settle(controller)
+        #expect(agent.calls == ["register", "unregister", "register"])
+        #expect(controller.registeredBuild == "99.0.0")
+        controller.refreshRegistrationAfterUpdate(build: "99.0.0")
+        try await settle(controller)
+        #expect(agent.calls.count == 3)
+
+        // Off stays off.
+        controller.update { $0.enabled = false }
+        try await settle(controller)
+        controller.refreshRegistrationAfterUpdate(build: "100.0.0")
+        try await settle(controller)
+        #expect(agent.calls.last == "unregister")
+    }
 }

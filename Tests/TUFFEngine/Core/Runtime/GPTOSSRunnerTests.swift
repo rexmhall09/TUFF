@@ -231,14 +231,15 @@ private enum GPTOSSToyCPUReference {
 }
 
 @Suite(.serialized) struct GPTOSSRunnerTests {
-    private func makeRunner(cacheSlots: Int = 8, maxContext: Int = 64, chunkTokens: Int = 32) throws
+    private func makeRunner(cacheSlots: Int = 8, maxContext: Int = 64, chunkTokens: Int = 32,
+                            config: ArchConfig = .gptOssToy()) throws
         -> (URL, MetalContext, Model, ModelForwardRunner) {
-        let directory = try GPTOSSToySynthetic.write()
+        let directory = try GPTOSSToySynthetic.write(config: config)
         let context = try MetalContext()
         let model = try Model.load(
             directoryURL: directory,
             device: context.device,
-            expecting: .gptOssToy(),
+            expecting: config,
             streamingMode: .pread(slotCount: cacheSlots))
         let runtime = RuntimeConfiguration(
             expertCacheSlots: cacheSlots,
@@ -444,6 +445,33 @@ private enum GPTOSSToyCPUReference {
         try await runner.produce(token: 9, position: 0, into: output)
         #expect(throws: RunnerStateSnapshotError.self) { try runner.rewind(to: checkpoint) }
         #expect(runner.continuationPosition == 0)
+    }
+
+    /// Decode runs cached experts before the missing ones are read. The math
+    /// is the same either way, so a cache too small to hold the working set
+    /// (hits and misses every layer) gives exactly the logits of one that
+    /// holds everything.
+    @Test func splittingCachedAndMissingExpertsKeepsTheLogits() async throws {
+        let config = ArchConfig.gptOssToy(numExperts: 16)
+        let (directoryA, contextA, _, small) = try makeRunner(cacheSlots: 8, config: config)
+        defer { try? FileManager.default.removeItem(at: directoryA) }
+        let (directoryB, contextB, _, large) = try makeRunner(cacheSlots: 32, config: config)
+        defer { try? FileManager.default.removeItem(at: directoryB) }
+        let size = config.vocabSize * MemoryLayout<Float16>.stride
+        let outputA = try #require(contextA.device.makeBuffer(length: size, options: .storageModeShared))
+        let outputB = try #require(contextB.device.makeBuffer(length: size, options: .storageModeShared))
+        func read(_ buffer: MTLBuffer) -> [Float16] {
+            let pointer = buffer.contents().assumingMemoryBound(to: Float16.self)
+            return (0..<config.vocabSize).map { pointer[$0] }
+        }
+        let tokens: [Int32] = (0..<40).map { Int32(($0 * 13) % 120 + 1) }
+        for (position, token) in tokens.enumerated() {
+            try await small.produce(token: token, position: position, into: outputA)
+            try await large.produce(token: token, position: position, into: outputB)
+            #expect(read(outputA) == read(outputB), "position \(position)")
+        }
+        // The split only runs for a layer with both: make sure it did.
+        #expect(small.gptOssSplitExpertLayers > 0)
     }
 
     @Test func resetRestoresDeterministicKVState() async throws {

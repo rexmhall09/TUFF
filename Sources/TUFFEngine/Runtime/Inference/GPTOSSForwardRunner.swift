@@ -65,6 +65,8 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
     var lookaheadPrecision: Double { lookahead.precision }
     var lookaheadReadsIssued: Int { lookahead.readsIssued }
     var exposedPrefetchWaitNanos: UInt64 { lookahead.exposedWaitNanos }
+    /// Decoded layers whose cached experts started before the misses were read.
+    private(set) var splitExpertLayers: UInt64 = 0
     var expertReadMetrics: ExpertReadMetrics { model.expertReadMetrics }
     var lookaheadEnabled: Bool { lookahead.enabled }
     /// Prefill K and V rows before they are copied into KV slots.
@@ -1143,9 +1145,35 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
                                                         reads: reads)
         }
 
-        let ioStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let plannedFetch = try model.planRoutedExperts(
             layer: layer, experts: experts)
+        // Experts already in the cache start on the GPU while the missing ones
+        // are read. Each route writes its own scratch slot and the reduce
+        // below sums them in the same order, so the result is unchanged.
+        var cachedRoutes = Set<Int>()
+        var cachedCB: MTLCommandBuffer?
+        if let plannedFetch, plannedFetch.hits > 0, !plannedFetch.misses.isEmpty {
+            let planned = try model.routedExpertBuffers(for: plannedFetch)
+            let misses = Set(plannedFetch.misses)
+            let cb = context.queue.makeCommandBuffer()!
+            for route in 0..<config.topKExperts where !misses.contains(route) {
+                try expertRuntime.encodeExpert(
+                    commandBuffer: cb,
+                    blob: planned[route],
+                    offsets: views.expertOffsets,
+                    input: normed,
+                    queryIndex: 0,
+                    routeSlot: route,
+                    scratch: expertScratch,
+                    swigluLimit: Float(config.swigluLimit))
+                cachedRoutes.insert(route)
+            }
+            cb.commit()
+            cachedCB = cb
+            splitExpertLayers &+= 1
+        }
+
+        let ioStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let blobs: [TensorView]
         if let plannedFetch {
             recordDecodeExpertFetch(layer: layer, plan: plannedFetch)
@@ -1159,7 +1187,7 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
 
         let cb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let cb2 = context.queue.makeCommandBuffer()!
-        for route in 0..<config.topKExperts {
+        for route in 0..<config.topKExperts where !cachedRoutes.contains(route) {
             try expertRuntime.encodeExpert(
                 commandBuffer: cb2,
                 blob: blobs[route],
@@ -1178,6 +1206,9 @@ final class GPTOSSForwardRunner: ChunkedPrefillRunner, ContextWindowReporting,
             queryCount: 1)
         cb2.commit()
         try waitForCompletion(cb2)
+        // Same queue, so it finished before cb2 started; this only surfaces
+        // an error it hit.
+        if let cachedCB { try checkCommandBufferError(cachedCB) }
         totalCb2Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cb2Start
     }
 
