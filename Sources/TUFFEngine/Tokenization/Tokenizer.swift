@@ -716,26 +716,6 @@ public struct GFTokenizer: @unchecked Sendable {
             addBOS: false)
     }
 
-    /// The tokens a Harmony prompt opens with before the conversation: the
-    /// system message and the developer message holding the instructions and
-    /// tools. Every request with the same instructions, tools, effort and date
-    /// starts with exactly these, whatever the conversation says.
-    public func harmonyInstructionPrefix(
-        messages: [Message],
-        tools: [FunctionDefinition],
-        reasoningEffort: GPTOSSReasoningEffort,
-        currentDate: String
-    ) throws -> [Int32] {
-        let leading = messages.first.map {
-            $0.role == .system || $0.role == .developer ? [$0] : []
-        } ?? []
-        return encode(
-            try HarmonyPromptRenderer().render(
-                messages: leading, tools: tools, reasoningEffort: reasoningEffort,
-                currentDate: currentDate, addGenerationPrompt: false),
-            addBOS: false)
-    }
-
     private func gemmaChatTemplate(
         _ messages: [Message],
         modelVariant: ModelVariant?,

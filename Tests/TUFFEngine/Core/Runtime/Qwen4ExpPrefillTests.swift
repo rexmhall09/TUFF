@@ -146,6 +146,42 @@ import TUFFValidationSupport
         #expect(runner.supportsChunkedPrefill)
     }
 
+    /// A checkpoint copies the Gated DeltaNet state, the convolution tails
+    /// and the n-gram history; the KV and the sparse indexer only grow, so
+    /// moving the position back covers them. Taken mid-block (22 with blocks
+    /// of 4), so the block being filled is rebuilt after the rewind.
+    @Test func rewindingToACheckpointMatchesAFreshRun() async throws {
+        let config = ArchConfig.qwen4ExpToy(ngramLayer: 1, indexer: .init(
+            budget: 8, compressRatio: 4, headDim: 32, numHeads: 2, numKVHeads: 1))
+        let (dir, ctx, runner) = try makeRunner(config: config)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(runner.supportsPrefixCheckpoints)
+        let logits = try makeLogits(ctx, vocab: config.vocabSize)
+        let prompt: [Int32] = (0..<22).map { Int32(($0 * 7 + 3) % 31) }
+        let next: [Int32] = [5, 17, 9]
+        for (position, token) in prompt.enumerated() {
+            try await runner.produce(token: token, position: position, into: logits)
+        }
+        let checkpoint = try runner.capturePrefixCheckpoint()
+        for offset in 0..<40 {
+            try await runner.produce(token: Int32(offset % 29 + 1), position: 22 + offset,
+                                     into: logits)
+        }
+        try runner.rewind(to: checkpoint)
+        #expect(runner.continuationPosition == 22)
+        try runner.prepareForContinuation(expectedPosition: 22)
+        for (offset, token) in next.enumerated() {
+            try await runner.produce(token: token, position: 22 + offset, into: logits)
+        }
+        let resumed = Fp16Buffer.read(logits, count: config.vocabSize)
+
+        runner.reset()
+        for (position, token) in (prompt + next).enumerated() {
+            try await runner.produce(token: token, position: position, into: logits)
+        }
+        #expect(resumed == Fp16Buffer.read(logits, count: config.vocabSize))
+    }
+
     @Test func continuationPreservesNgramGDNAndSparseAttentionState() async throws {
         let config = ArchConfig.qwen4ExpToy(ngramLayer: 1, indexer: .init(
             budget: 8, compressRatio: 4, headDim: 32, numHeads: 2, numKVHeads: 1))

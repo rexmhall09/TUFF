@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import Metal
 @testable import TUFFEngine
+import TUFFValidationSupport
 
 /// Qwen 3.6 runtime integration: runner construction against the qwen toy
 /// fixture (no Gemma sandwich tensors present — init must not touch them),
@@ -40,8 +41,8 @@ import Metal
         #expect(runner.maxContext == 64)
         #expect(runner.usesFusedGreedyHead)
         #expect(!runner.supportsSpeculativeVerification)
-        // Gated DeltaNet state is recurrent, so the KV cannot be rewound.
-        #expect(!runner.supportsPrefixCheckpoints)
+        // Checkpoints copy the Gated DeltaNet state along with the position.
+        #expect(runner.supportsPrefixCheckpoints)
     }
 
     @Test func runnerRejectsCacheSmallerThanRoutedTopK() throws {
@@ -111,6 +112,41 @@ import Metal
 
         runner.selectHead(pureGreedy: true)
         #expect(runner.usesFusedGreedyHead)
+    }
+
+    /// The Gated DeltaNet state is recurrent: every token rewrites it. A
+    /// checkpoint copies it, so after generating on and rewinding, the next
+    /// tokens give exactly what a fresh run gives.
+    @Test func rewindingToACheckpointMatchesAFreshRun() async throws {
+        let dir = try QwenToySynthetic.write()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ctx = try MetalContext()
+        let model = try Model.load(directoryURL: dir, device: ctx.device, expecting: .qwen36Toy())
+        let runner = try RealForwardRunner(
+            model: model, context: ctx, maxContext: 128,
+            runtimeConfiguration: RuntimeConfiguration(forceLogitsHead: true))
+        let logits = try makeLogits(ctx, vocab: 1024)
+        let prompt: [Int32] = (0..<20).map { Int32(($0 * 11) % 900 + 1) }
+        let next: [Int32] = [17, 4, 61]
+        for (position, token) in prompt.enumerated() {
+            try await runner.produce(token: token, position: position, into: logits)
+        }
+        let checkpoint = try runner.capturePrefixCheckpoint()
+        for offset in 0..<30 {
+            try await runner.produce(token: Int32(offset + 2), position: 20 + offset, into: logits)
+        }
+        try runner.rewind(to: checkpoint)
+        try runner.prepareForContinuation(expectedPosition: 20)
+        for (offset, token) in next.enumerated() {
+            try await runner.produce(token: token, position: 20 + offset, into: logits)
+        }
+        let resumed = Fp16Buffer.read(logits, count: 1024)
+
+        runner.reset()
+        for (position, token) in (prompt + next).enumerated() {
+            try await runner.produce(token: token, position: position, into: logits)
+        }
+        #expect(resumed == Fp16Buffer.read(logits, count: 1024))
     }
 
     /// Chunked prefill smoke: one chunk through the qwen prefill path

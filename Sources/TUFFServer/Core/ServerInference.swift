@@ -1179,53 +1179,62 @@ public actor ServerModelSession: ServerInferenceBackend {
     func checkpointPositions(request: ValidatedChatRequest,
                              effectivePromptIDs: [Int32]) -> [Int] {
         var positions: [Int] = []
-        if let instructions = instructionPrefixLength(
-            request: request, effectivePromptIDs: effectivePromptIDs),
+        let leading = request.messages.prefix { $0.role == .system || $0.role == .developer }
+        if !leading.isEmpty || !request.tools.isEmpty,
+           let instructions = agreeingTokens(
+            with: effectivePromptIDs, request: request,
+            probe: Array(leading) + [.init(role: .user, content: Self.probeText)]),
            instructions >= Self.minimumSharedPrefixTokens,
            effectivePromptIDs.count > instructions {
             positions.append(instructions)
         }
         // Without that rewrite a follow-up already continues from the end of
         // the KV, so the copy would only cost memory.
-        if request.messages.last?.role == .user, !request.allowsTextBridge {
-            positions.append(effectivePromptIDs.count)
+        if request.messages.last?.role == .user, !request.allowsTextBridge,
+           let turn = agreeingTokens(
+            with: effectivePromptIDs, request: request,
+            probe: request.messages + [.init(role: .assistant, content: Self.probeText)]),
+           turn > (positions.last ?? 0) {
+            positions.append(turn)
         }
         return positions
     }
 
-    /// How many of the prompt's tokens every request with the same system
-    /// prompt, tools and settings shares: the leading system message rendered
-    /// on its own, as far as it agrees with the prompt. A template may close
-    /// that render differently, so only the agreeing tokens count.
-    private func instructionPrefixLength(request: ValidatedChatRequest,
-                                         effectivePromptIDs: [Int32]) -> Int? {
-        let leading = request.messages.prefix { $0.role == .system || $0.role == .developer }
-        guard !leading.isEmpty || !request.tools.isEmpty else { return nil }
-        let instructions: [Int32]?
-        if chatDialect == .harmony {
-            guard let effort = request.reasoningEffort,
-                  let date = request.harmonyCurrentDate else { return nil }
-            instructions = try? tokenizer.harmonyInstructionPrefix(
-                messages: request.messages, tools: request.tools,
-                reasoningEffort: effort, currentDate: date)
-        } else if usesToolTemplate(request) {
-            instructions = try? tokenizer.encodeToolChat(
-                messages: Array(leading), tools: request.tools, reasoning: request.reasoning,
-                preserveThinking: request.preserveThinking, addGenerationPrompt: false)
-        } else {
-            instructions = (try? tokenizer.applyChatTemplate(
-                Array(leading), modelVariant: model.config.variant,
-                reasoning: request.reasoning, preserveThinking: request.preserveThinking))
-                .map { tokenizer.encode($0, addBOS: false) }
+    /// How many of the prompt's tokens a render of `probe` shares. With a
+    /// placeholder user message after the instructions, that is everything a
+    /// new conversation with the same system prompt and tools also starts
+    /// with. With a placeholder answer after the last user message, it is
+    /// everything the next request renders the same way, which excludes an
+    /// opening such as Qwen's `<think>` that a finished turn drops.
+    private func agreeingTokens(with prompt: [Int32], request: ValidatedChatRequest,
+                                probe: [GFTokenizer.Message]) -> Int? {
+        guard let rendered = try? renderPromptIDs(messages: probe, request: request) else {
+            return nil
         }
-        guard let instructions else { return nil }
-        return zip(instructions, effectivePromptIDs).prefix { $0 == $1 }.count
+        return zip(rendered, prompt).prefix { $0 == $1 }.count
     }
+
+    /// Text no real message starts with, so a probe render stops agreeing
+    /// with the prompt exactly where the probe message's content begins.
+    static let probeText = "\u{1}"
 
     /// Shorter instructions cost less to read than the checkpoint saves.
     static let minimumSharedPrefixTokens = 256
 
     private func renderPrompt(_ request: ValidatedChatRequest) throws -> [Int32] {
+        let promptIDs = try renderPromptIDs(messages: request.messages, request: request)
+        guard promptIDs.count < maxContext else {
+            throw ServerRequestError.invalid(
+                message: "prompt exceeds the configured context",
+                param: "messages",
+                code: "context_length_exceeded")
+        }
+        return promptIDs
+    }
+
+    /// `messages` rendered with `request`'s tools, template and settings.
+    private func renderPromptIDs(messages: [GFTokenizer.Message],
+                                 request: ValidatedChatRequest) throws -> [Int32] {
         let promptIDs: [Int32]
         if chatDialect == .harmony {
             guard let reasoningEffort = request.reasoningEffort,
@@ -1236,29 +1245,23 @@ public actor ServerModelSession: ServerInferenceBackend {
                     code: "invalid_request")
             }
             promptIDs = try tokenizer.encodeHarmonyChat(
-                messages: request.messages,
+                messages: messages,
                 tools: request.tools,
                 reasoningEffort: reasoningEffort,
                 currentDate: currentDate)
         } else if usesToolTemplate(request) {
             promptIDs = try tokenizer.encodeToolChat(
-                messages: request.messages,
+                messages: messages,
                 tools: request.tools,
                 reasoning: request.reasoning,
                 preserveThinking: request.preserveThinking)
         } else {
             let rendered = try tokenizer.applyChatTemplate(
-                request.messages,
+                messages,
                 modelVariant: model.config.variant,
                 reasoning: request.reasoning,
                 preserveThinking: request.preserveThinking)
             promptIDs = tokenizer.encode(rendered, addBOS: false)
-        }
-        guard promptIDs.count < maxContext else {
-            throw ServerRequestError.invalid(
-                message: "prompt exceeds the configured context",
-                param: "messages",
-                code: "context_length_exceeded")
         }
         return promptIDs
     }

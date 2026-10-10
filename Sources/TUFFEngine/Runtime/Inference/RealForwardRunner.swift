@@ -4620,20 +4620,25 @@ extension RealForwardRunner {
 }
 
 extension RealForwardRunner: PrefixCheckpointingRunner {
-    /// Gemma's full-attention rows are only appended to, so returning to an
-    /// earlier position needs just its sliding-window rings. A runner that
-    /// also carries recurrent state (Qwen's Gated DeltaNet), a sparse indexer,
-    /// an n-gram history or an image RoPE offset cannot go back that way.
+    /// Rows that later tokens only append after stay where they are: Gemma
+    /// and Qwen's full-attention KV and the sparse indexer's keys and
+    /// completed blocks. A checkpoint copies what is overwritten in place:
+    /// sliding-window rings, Qwen's Gated DeltaNet recurrent and convolution
+    /// state, and Flash Next's n-gram history. An image RoPE offset would
+    /// also have to be undone, so a runner holding one declines.
     public var supportsPrefixCheckpoints: Bool {
-        kv != nil && gdnState == nil && qwenSparseAttention == nil
-            && pleConvHistory == nil && qwenMultimodalRopeDelta == 0
+        kv != nil && qwenMultimodalRopeDelta == 0
     }
 
-    private func ringSnapshotBuilder(position: Int) -> RunnerStateSnapshotBuilder {
+    private func checkpointBuilder(position: Int) -> RunnerStateSnapshotBuilder {
         var builder = RunnerStateSnapshotBuilder()
         if let kv {
             kv.addSnapshotRanges(to: &builder, position: position,
                                  skipLayer: { [self] in snapshotSkipsLayer($0) || !kv.isRingLayer($0) })
+        }
+        gdnState?.addSnapshotRanges(to: &builder)
+        if let pleConvHistory {
+            builder.add("ngram.conv", pleConvHistory, length: pleConvHistory.length)
         }
         return builder
     }
@@ -4643,9 +4648,9 @@ extension RealForwardRunner: PrefixCheckpointingRunner {
             throw RunnerStateSnapshotError.unsupported("this runner cannot take prefix checkpoints")
         }
         let position = continuationPosition
-        return try ringSnapshotBuilder(position: position).capture(
+        return try checkpointBuilder(position: position).capture(
             owner: self, queue: ctx.queue,
-            host: .init(position: position, ngramContext: [], ropeDelta: 0))
+            host: .init(position: position, ngramContext: ngramContext, ropeDelta: 0))
     }
 
     public func rewind(to checkpoint: RunnerStateSnapshot) throws {
@@ -4655,13 +4660,16 @@ extension RealForwardRunner: PrefixCheckpointingRunner {
         let position = checkpoint.host.position
         do {
             guard supportsPrefixCheckpoints, let kv, speculativeStartPosition == nil,
-                  position > 0, position <= kv.position else {
+                  position > 0, position <= kv.position,
+                  checkpoint.host.ngramContext.count == ngramContext.count else {
                 throw RunnerStateSnapshotError.layoutMismatch(
                     "checkpoint at \(position) cannot be reached from \(continuationPosition)")
             }
             try prefillChunkState.requireClean(operation: "rewind")
-            try ringSnapshotBuilder(position: position).restore(checkpoint, queue: ctx.queue)
+            try checkpointBuilder(position: position).restore(checkpoint, queue: ctx.queue)
             kv.rewind(to: position)
+            ngramContext = checkpoint.host.ngramContext
+            resetTransientState()
         } catch {
             reset()
             throw error

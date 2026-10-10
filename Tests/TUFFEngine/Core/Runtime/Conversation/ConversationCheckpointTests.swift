@@ -254,8 +254,13 @@ import Metal
                               tokenizer: GFTokenizer, question: String, tag: String) throws -> Int {
         let messages = session(question)
         let prompt = try agentRender(tokenizer, messages)
-        let instructions = try tokenizer.harmonyInstructionPrefix(
-            messages: messages, tools: [readTool], reasoningEffort: .low, currentDate: date)
+        // The system and developer messages: what every session with these
+        // instructions and tools opens with.
+        let instructions = tokenizer.encode(
+            try HarmonyPromptRenderer().render(
+                messages: [messages[0]], tools: [readTool], reasoningEffort: .low,
+                currentDate: date, addGenerationPrompt: false),
+            addBOS: false)
         #expect(prompt.starts(with: instructions))
         let kv = prompt + tokenizer.encode("<|channel|>final<|message|>Done.", addBOS: false)
         runner.position = kv.count
