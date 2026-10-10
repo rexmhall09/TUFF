@@ -80,6 +80,13 @@ public protocol StateSnapshottingRunner: AnyObject {
     /// Replaces the runner's sequence state with `snapshot`. On a throw the
     /// runner has been reset and holds no sequence.
     func restoreState(_ snapshot: RunnerStateSnapshot) throws
+    /// The runner whose layout snapshots describe: this one, or the backend a
+    /// wrapper forwards to. A snapshot read from disk is made out to it.
+    var snapshotOwner: ObjectIdentifier { get }
+}
+
+extension StateSnapshottingRunner {
+    public var snapshotOwner: ObjectIdentifier { ObjectIdentifier(self) }
 }
 
 /// A runner that can return to an earlier position of the sequence it holds.

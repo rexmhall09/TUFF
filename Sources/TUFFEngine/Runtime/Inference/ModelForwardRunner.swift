@@ -361,6 +361,13 @@ public final class ModelForwardRunner: ChunkedPrefillRunner,
 }
 
 extension ModelForwardRunner: StateSnapshottingRunner {
+    public var snapshotOwner: ObjectIdentifier {
+        switch backend {
+        case .affine(let runner): return ObjectIdentifier(runner)
+        case .gptOss(let runner): return ObjectIdentifier(runner)
+        }
+    }
+
     public var stateSnapshotByteEstimate: Int? {
         switch backend {
         case .affine(let runner): return runner.stateSnapshotByteEstimate

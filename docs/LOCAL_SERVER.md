@@ -77,8 +77,16 @@ continues from where it left off instead of reading everything again.
 and `prompt_cache_key` helps it find the right conversation first. Under
 memory pressure the extra states are dropped.
 
-`TUFF_CONVERSATION_CACHE_MB` lowers the budget (`0` keeps only the current
-conversation), and `TFF_LOG_CACHE=1` logs each reuse decision.
+A new conversation that starts with the same system prompt and tools as an
+earlier one (256 tokens or more) skips reading them again. The server also
+saves that state to disk the first time it reads a system prompt, so it
+survives restarts. The files live in `~/Library/Caches/TUFF/PrefixSnapshots`,
+use at most 2 GB, and are only used for the same model, settings and TUFF
+version.
+
+`TUFF_CONVERSATION_CACHE_MB` lowers the memory budget (`0` keeps only the
+current conversation), `TUFF_PREFIX_DISK_CACHE_MB` lowers the disk budget
+(`0` turns it off), and `TFF_LOG_CACHE=1` logs each reuse decision.
 
 ## Timings
 

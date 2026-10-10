@@ -393,6 +393,45 @@ private enum GPTOSSToyCPUReference {
         #expect(resumed == values(output))
     }
 
+    /// A snapshot written by one runner and loaded into another, as after a
+    /// restart, continues exactly like a fresh run of the whole prompt.
+    @Test func aSnapshotFromDiskContinuesLikeAFreshRun() async throws {
+        let (directoryA, context, _, first) = try makeRunner(maxContext: 256)
+        defer { try? FileManager.default.removeItem(at: directoryA) }
+        let (directoryB, _, _, second) = try makeRunner(maxContext: 256)
+        defer { try? FileManager.default.removeItem(at: directoryB) }
+        let cache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tuff-prefix-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let store = PrefixSnapshotDiskStore(directory: cache, budgetBytes: 64 << 20,
+                                            buildIdentity: "test")
+        let domain = ConversationCacheDomain(
+            modelID: "toy", sourceSnapshotHash: nil, runtimeProfileHash: "r",
+            maximumContext: 256, kvStorage: "fp16", fp16RingEnabled: true, templateSHA256: "t")
+        let output = try logits(context)
+        let prompt = (0..<70).map { Int32(($0 * 3) % 90 + 1) }
+        let next: [Int32] = [12, 40]
+
+        _ = try await first.prefillChunked(tokens: prompt[...], startPosition: 0,
+            outputMode: .logits, config: .production(chunkTokens: 32), into: output,
+            onProgress: { _ in })
+        store.save(try first.captureState(), tokens: prompt, domain: domain)
+        store.flush()
+        let snapshot = try #require(store.load(tokens: prompt, domain: domain,
+                                               runner: second, device: context.device))
+        try second.restoreState(snapshot)
+        try second.prepareForContinuation(expectedPosition: 70)
+        for (offset, token) in next.enumerated() {
+            try await second.produce(token: token, position: 70 + offset, into: output)
+        }
+        let resumed = values(output)
+
+        for (offset, token) in next.enumerated() {
+            try await first.produce(token: token, position: 70 + offset, into: output)
+        }
+        #expect(resumed == values(output))
+    }
+
     @Test func aCheckpointPastTheSequenceIsRefused() async throws {
         let (directory, context, _, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: directory) }

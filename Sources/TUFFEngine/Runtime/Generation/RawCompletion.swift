@@ -39,6 +39,9 @@ public struct RawDecodeResult: Sendable {
     /// The runner's checkpoints at the prompt positions the caller asked
     /// for, in order, when the runner can take them.
     public var prefixCheckpoints: [RunnerStateSnapshot] = []
+    /// The runner's whole state at `stateSnapshotPosition`, when asked for,
+    /// for a caller that keeps it beyond this process.
+    public var stateSnapshot: RunnerStateSnapshot?
 
     public init(prefillTokens: Int,
                 cachedPromptTokens: Int,
@@ -161,6 +164,7 @@ public func runRawCompletion(producer: any LogitProducer,
                              start: RawCompletionStart = .reset,
                              draftProducer: (any DraftTokenProducer)? = nil,
                              prefixCheckpointPositions: [Int] = [],
+                             stateSnapshotPosition: Int? = nil,
                              shouldStop: () -> Bool = { false },
                              onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
     try config.validate()
@@ -250,9 +254,13 @@ public func runRawCompletion(producer: any LogitProducer,
         prefixCheckpointPositions.filter { $0 > cachedPromptTokens && $0 <= promptIds.count }
     )).sorted()
     var prefixCheckpoints: [RunnerStateSnapshot] = []
+    var stateSnapshot: RunnerStateSnapshot?
     func takeCheckpoint() {
         if let snapshot = try? checkpointing?.capturePrefixCheckpoint() {
             prefixCheckpoints.append(snapshot)
+            if snapshot.position == stateSnapshotPosition {
+                stateSnapshot = try? (producer as? any StateSnapshottingRunner)?.captureState()
+            }
         }
     }
     switch (multimodalInput, prefillConfig.mode) {
@@ -711,6 +719,7 @@ public func runRawCompletion(producer: any LogitProducer,
                                adaptiveDisabled: speculativeUnavailableForAuto
                                    || speculativeController.disabled))
     result.prefixCheckpoints = prefixCheckpoints
+    result.stateSnapshot = stateSnapshot
     return result
 }
 

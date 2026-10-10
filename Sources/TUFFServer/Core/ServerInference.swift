@@ -541,6 +541,8 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// The conversation the runner holds plus any retained ones, within the
     /// retained-state budget the loader charged against the memory plan.
     private let conversations: ConversationStateStore
+    /// Shared-prefix snapshots kept across restarts, or nil when off.
+    private let prefixSnapshots: PrefixSnapshotDiskStore?
     public nonisolated let visionCapability: String
     private let visionRuntime: VisionRuntime?
     private let visionResidencyPolicy: VisionResidencyPolicy
@@ -699,7 +701,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                                   retainedConversationBytes: retainedConversationBytes,
                                   visionRuntime: visionRuntime,
                                   visionCapability: visionCapability,
-                                  visionResidencyPolicy: visionResidencyPolicy)
+                                  visionResidencyPolicy: visionResidencyPolicy,
+                                  prefixSnapshots: .standard(modelID: model.modelID,
+                                                             buildIdentity: TUFFVersion.current))
     }
 
     static func hardwareVisionCapability(
@@ -730,7 +734,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                  retainedConversationBytes: Int,
                  visionRuntime: VisionRuntime?,
                  visionCapability: String,
-                 visionResidencyPolicy: VisionResidencyPolicy) {
+                 visionResidencyPolicy: VisionResidencyPolicy,
+                 prefixSnapshots: PrefixSnapshotDiskStore? = nil) {
+        self.prefixSnapshots = promptCacheMode == .off ? nil : prefixSnapshots
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
@@ -751,6 +757,10 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.visionResidencyPolicy = visionResidencyPolicy
         self.visionCapability = visionCapability
     }
+
+    // An unload waits for a snapshot still being written, so an idle model
+    // that is released right after reading a new system prompt keeps it.
+    deinit { prefixSnapshots?.flush() }
 
     public func generate(
         _ request: ValidatedChatRequest,
@@ -1023,6 +1033,29 @@ public actor ServerModelSession: ServerInferenceBackend {
                     "tool-result bridge failed to encode"))
             }
         }
+        // Nothing in memory matched: a system prompt read by an earlier
+        // process may still be on disk.
+        var diskCheckpoint: ConversationPrefixCheckpoint?
+        if !cacheMatch.isHit, let store = prefixSnapshots, let renderedTextIDs,
+           runner.supportsPrefixCheckpoints,
+           let instructions = instructionPrefixLength(request: request, promptIDs: renderedTextIDs) {
+            let tokens = Array(renderedTextIDs.prefix(instructions))
+            let loadStart = DispatchTime.now().uptimeNanoseconds
+            if let snapshot = store.load(tokens: tokens, domain: promptCacheDomain,
+                                         runner: runner, device: context.device) {
+                do {
+                    try runner.restoreState(snapshot)
+                    diskCheckpoint = ConversationPrefixCheckpoint(
+                        tokenIDs: tokens, snapshot: try runner.capturePrefixCheckpoint())
+                    cacheMatch = .hit(effectivePromptIDs: renderedTextIDs,
+                                      cachedPromptTokens: instructions)
+                } catch {
+                    // The runner reset itself; read the prompt from scratch.
+                    diskCheckpoint = nil
+                }
+            }
+            phases.record("prefix_snapshot_load", since: loadStart)
+        }
         let effectivePromptIDs: [Int32]
         let completionStart: RawCompletionStart
         var multimodalInput: MultimodalPrefillInput?
@@ -1102,6 +1135,14 @@ public actor ServerModelSession: ServerInferenceBackend {
         let checkpointPositions = promptCacheMode == .singlePrefix && multimodalInput == nil
             ? checkpointPositions(request: request, effectivePromptIDs: effectivePromptIDs)
             : []
+        // A system prompt read for the first time is also written to disk,
+        // once, so a later process can skip it.
+        let diskSnapshotPosition = prefixSnapshots.flatMap { store in
+            instructionPrefixLength(request: request, promptIDs: effectivePromptIDs).flatMap {
+                !store.contains(tokens: Array(effectivePromptIDs.prefix($0)),
+                                domain: promptCacheDomain) ? $0 : nil
+            }
+        }
 
         completionStarted = true
         let decoded = try await Self.decodeStructuredCompletion(
@@ -1119,8 +1160,13 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefillConfig: prefillConfig,
             start: completionStart,
             prefixCheckpointPositions: checkpointPositions,
+            stateSnapshotPosition: diskSnapshotPosition,
             onEvent: onEvent)
         let result = decoded.result
+        if let snapshot = result.stateSnapshot, let store = prefixSnapshots {
+            store.save(snapshot, tokens: Array(effectivePromptIDs.prefix(snapshot.position)),
+                       domain: promptCacheDomain)
+        }
         let reason: String
         if !decoded.calls.isEmpty {
             reason = "tool_calls"
@@ -1146,7 +1192,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 prefixCheckpoints: result.prefixCheckpoints.compactMap {
                     ConversationPrefixCheckpoint(
                         tokenIDs: Array(effectivePromptIDs.prefix($0.position)), snapshot: $0)
-                } + (plannedEntry?.prefixCheckpoints ?? [])))
+                } + (plannedEntry?.prefixCheckpoints ?? []) + (diskCheckpoint.map { [$0] } ?? [])))
         } else {
             conversations.invalidateActive()
         }
@@ -1179,13 +1225,8 @@ public actor ServerModelSession: ServerInferenceBackend {
     func checkpointPositions(request: ValidatedChatRequest,
                              effectivePromptIDs: [Int32]) -> [Int] {
         var positions: [Int] = []
-        let leading = request.messages.prefix { $0.role == .system || $0.role == .developer }
-        if !leading.isEmpty || !request.tools.isEmpty,
-           let instructions = agreeingTokens(
-            with: effectivePromptIDs, request: request,
-            probe: Array(leading) + [.init(role: .user, content: Self.probeText)]),
-           instructions >= Self.minimumSharedPrefixTokens,
-           effectivePromptIDs.count > instructions {
+        if let instructions = instructionPrefixLength(request: request,
+                                                      promptIDs: effectivePromptIDs) {
             positions.append(instructions)
         }
         // Without that rewrite a follow-up already continues from the end of
@@ -1198,6 +1239,20 @@ public actor ServerModelSession: ServerInferenceBackend {
             positions.append(turn)
         }
         return positions
+    }
+
+    /// Where the instructions and tools end in `promptIDs`: everything a new
+    /// conversation with the same system prompt also starts with. Nil when
+    /// there are none, or too few to be worth a checkpoint.
+    func instructionPrefixLength(request: ValidatedChatRequest, promptIDs: [Int32]) -> Int? {
+        let leading = request.messages.prefix { $0.role == .system || $0.role == .developer }
+        guard !leading.isEmpty || !request.tools.isEmpty,
+              let instructions = agreeingTokens(
+                with: promptIDs, request: request,
+                probe: Array(leading) + [.init(role: .user, content: Self.probeText)]),
+              instructions >= Self.minimumSharedPrefixTokens,
+              promptIDs.count > instructions else { return nil }
+        return instructions
     }
 
     /// How many of the prompt's tokens a render of `probe` shares. With a
@@ -1303,6 +1358,7 @@ extension ServerModelSession {
         prefillConfig: PrefillRuntimeConfig,
         start: RawCompletionStart,
         prefixCheckpointPositions: [Int] = [],
+        stateSnapshotPosition: Int? = nil,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerStructuredDecodeOutcome {
         let state = ServerDecodeState(
@@ -1342,6 +1398,7 @@ extension ServerModelSession {
             prefillConfig: prefillConfig,
             start: start,
             prefixCheckpointPositions: prefixCheckpointPositions,
+            stateSnapshotPosition: stateSnapshotPosition,
             shouldStop: { state.shouldStop }) { @Sendable progress in
                 guard state.decodingError == nil else { return }
                 do {
