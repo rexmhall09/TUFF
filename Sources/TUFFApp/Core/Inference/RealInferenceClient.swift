@@ -419,6 +419,29 @@ actor RealInferenceSession {
         return tokenizer.encode(rendered + request.assistantPrefix, addBOS: false)
     }
 
+    /// How much of `promptIDs` the next request will render the same way: up
+    /// to where this turn's answer begins. A template may open the answer
+    /// with something a finished turn drops, such as Qwen's `<think>` with
+    /// thinking on, so the turn is rendered with a placeholder answer and
+    /// only the tokens that agree count. The server finds its checkpoints
+    /// the same way.
+    static func turnCheckpointPosition(request: AppGenerationRequest,
+                                       promptIDs: [Int32],
+                                       tokenizer: GFTokenizer,
+                                       modelVariant: ModelVariant?,
+                                       harmonyDate: String) -> Int? {
+        var probe = request
+        probe.history.append(AppChatTurn(prompt: request.prompt, response: "\u{1}"))
+        probe.prompt = "\u{1}"
+        probe.currentRounds = []
+        probe.assistantPrefix = ""
+        guard let rendered = try? encode(request: probe, turns: probe.history[...],
+                                         tokenizer: tokenizer, modelVariant: modelVariant,
+                                         harmonyDate: harmonyDate) else { return nil }
+        let agreeing = zip(rendered, promptIDs).prefix { $0 == $1 }.count
+        return agreeing > 0 ? agreeing : nil
+    }
+
     /// Render the conversation to tokens, dropping oldest turns until it fits.
     ///
     /// A conversation grows without bound while the context window does not, so
@@ -771,7 +794,11 @@ actor RealInferenceSession {
                 multimodalInput: multimodalInput,
                 config: config, context: ctx, scratch: scratch,
                 prefillConfig: prefillConfig, start: completionStart,
-                prefixCheckpointPositions: capturesTurnCheckpoint ? [promptIds.count] : []) { @Sendable event in
+                prefixCheckpointPositions: capturesTurnCheckpoint
+                    ? [Self.turnCheckpointPosition(
+                        request: request, promptIDs: promptIds, tokenizer: tokenizer,
+                        modelVariant: variant, harmonyDate: harmonyDate)].compactMap { $0 }
+                    : []) { @Sendable event in
                 switch event {
                 case .prefill(let done, let total):
                     if done == total {

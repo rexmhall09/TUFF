@@ -73,6 +73,9 @@ def main():
     p.add_argument('--service', type=Path, required=True, help='Packaged TUFFDecodeService outside /Applications')
     p.add_argument('--model-root', type=Path, required=True, help='Installed Gemma 26B model and optional image companion directory')
     p.add_argument('--output', type=Path, required=True, help='New directory for synthetic conversations and validation evidence')
+    p.add_argument('--allow-busy', action='store_true',
+                   help='Run beside idle TUFF processes; a correctness check, not a timing')
+    p.add_argument('--model', default='gemma4', help='Installed model name, for example gemma4 or qwen36')
     p.add_argument('--workloads', default='reasoning,image', help='Comma-separated workloads: reasoning,image; image requires the installed companion')
     p.add_argument('--context', type=int, default=4096)
     p.add_argument('--max-new', type=int, default=256)
@@ -81,10 +84,10 @@ def main():
     service_path = args.service.absolute()
     assert service_path.is_file() and not service_path.resolve().is_relative_to('/Applications')
     workloads = args.workloads.split(','); assert all(w in PROMPTS for w in workloads)
-    model, options = model_options(args, 'gemma4')
-    companion = args.model_root / 'gemma4.vision.gturbo'
+    model, options = model_options(args, args.model)
+    companion = args.model_root / f'{args.model}.vision.gturbo'
     if 'image' in workloads: assert (companion / 'manifest.json').is_file(), 'Installed Gemma26B image companion required'
-    require_idle_inference()
+    (args.allow_busy or require_idle_inference())
     args.output.mkdir(parents=True, exist_ok=False)
     home = args.output / 'isolated-home'; home.mkdir()
     temp = args.output / 'temporary'; temp.mkdir()
@@ -108,7 +111,7 @@ def main():
             for workload in workloads:
                 reference = {}
                 for schedule in ['uninterrupted', 'interrupted']:
-                    require_idle_inference()
+                    (args.allow_busy or require_idle_inference())
                     label = workload + '-' + schedule
                     environment = dict(CFFIXED_USER_HOME=str(home.resolve()), HOME=str(home.resolve()), TMPDIR=str(temp.resolve()) + '/', TFF_LOG_CACHE='1')
                     service = Service(service_path, environment, args.output / (label + '.service.log'))
@@ -156,7 +159,7 @@ def main():
                                 # turn's prompt ended but never cover its
                                 # generated reasoning, which a text bridge would.
                                 assert cached <= previous_prompt, \
-                                    f'Gemma thinking history reused {cached} tokens, past the previous prompt ({previous_prompt})'
+                                    f'Thinking history reused {cached} tokens, past the previous prompt ({previous_prompt})'
                             elif turn:
                                 assert cached > 0, 'Expected image-history continuation reuse'
                                 assert terminal.get('conversationCacheSource') == ('active' if schedule == 'uninterrupted' else 'retained'), terminal

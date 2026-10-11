@@ -174,4 +174,35 @@ import TUFFEngine
         }
         #expect(try !RealInferenceSession.finish(decoder, reason: .maxTokens))
     }
+
+    /// With thinking on, Qwen's prompt ends with an opening `<think>` that the
+    /// next request's render of this finished turn does not repeat. The turn
+    /// checkpoint must sit before it, where the next prompt still agrees.
+    @Test func qwenTurnCheckpointStopsBeforeTheOpeningThink() async throws {
+        let tokenizer = try await GFTokenizer.load(from: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("TUFFEngine/Core/Tokenization/Fixtures/ChatMLTokenizer"))
+        var request = AppGenerationRequest(
+            modelDirectory: URL(fileURLWithPath: "/tmp/model.gturbo"),
+            prompt: "What is 7 plus 8?", maxContextTokens: 8_192)
+        request.reasoning = .on
+        let prompt = try RealInferenceSession.encode(
+            request: request, turns: request.history[...], tokenizer: tokenizer,
+            modelVariant: .qwen36_35B_A3B, harmonyDate: "2026-10-10")
+        let position = try #require(RealInferenceSession.turnCheckpointPosition(
+            request: request, promptIDs: prompt, tokenizer: tokenizer,
+            modelVariant: .qwen36_35B_A3B, harmonyDate: "2026-10-10"))
+        #expect(position < prompt.count)
+        #expect(tokenizer.decode(Array(prompt[position...]), skipSpecialTokens: false)
+            .contains("<think>"))
+
+        var next = request
+        next.history = [AppChatTurn(prompt: request.prompt, response: "15", thinking: "7+8=15")]
+        next.prompt = "And twice that?"
+        let nextPrompt = try RealInferenceSession.encode(
+            request: next, turns: next.history[...], tokenizer: tokenizer,
+            modelVariant: .qwen36_35B_A3B, harmonyDate: "2026-10-10")
+        #expect(nextPrompt.starts(with: prompt.prefix(position)))
+    }
 }
