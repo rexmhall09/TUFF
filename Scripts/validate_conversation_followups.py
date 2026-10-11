@@ -93,7 +93,7 @@ def main():
             'source': source_identity(), 'machine_before': machine_state(), 'model_directory': str((args.model_root / model).resolve()),
             'model_manifest_sha256': hashlib.sha256((args.model_root / model / 'manifest.json').read_bytes()).hexdigest(),
             'vision_companion': str(companion.resolve()), 'vision_manifest_sha256': hashlib.sha256((companion / 'manifest.json').read_bytes()).hexdigest() if companion.exists() else None,
-            'image': image, 'note': 'Gemma has no preserve-thinking UI toggle. Requests explicitly use preserveThinking=false; reasoning=on still disables text bridging.'})
+            'image': image, 'note': 'Gemma has no preserve-thinking UI toggle. Requests explicitly use preserveThinking=false; reasoning=on still disables text bridging; reuse may only resume where the previous prompt ended.'})
         rows, failures = [], []
         def request_for(workload, turn, history, distractor=False):
             value = dict(prompt='Say hello in one short sentence.' if distractor else PROMPTS[workload][turn],
@@ -113,6 +113,7 @@ def main():
                     environment = dict(CFFIXED_USER_HOME=str(home.resolve()), HOME=str(home.resolve()), TMPDIR=str(temp.resolve()) + '/', TFF_LOG_CACHE='1')
                     service = Service(service_path, environment, args.output / (label + '.service.log'))
                     history = []
+                    previous_prompt = 0
                     try:
                         load = dict(modelPath=str((args.model_root / model).resolve()), maxContextTokens=args.context, runtimeOptions=options,
                                     forceLogitsHead=False, requestID=str(uuid.uuid4()))
@@ -150,7 +151,12 @@ def main():
                             cached = terminal.get('cachedPromptTokens') or 0
                             if workload == 'reasoning':
                                 assert row['thinking'].strip(), 'Reasoning-on was not exercised'
-                                assert cached == 0, 'Gemma thinking history should not admit a text bridge'
+                                # A finished thinking turn is dropped from the next
+                                # render, so reuse may resume where the previous
+                                # turn's prompt ended but never cover its
+                                # generated reasoning, which a text bridge would.
+                                assert cached <= previous_prompt, \
+                                    f'Gemma thinking history reused {cached} tokens, past the previous prompt ({previous_prompt})'
                             elif turn:
                                 assert cached > 0, 'Expected image-history continuation reuse'
                                 assert terminal.get('conversationCacheSource') == ('active' if schedule == 'uninterrupted' else 'retained'), terminal
@@ -161,6 +167,7 @@ def main():
                             entry = dict(prompt=request['prompt'], response=row['output'], thinking=row['thinking'] or None)
                             if request.get('imageAttachments'): entry['images'] = request['imageAttachments']
                             history.append(entry)
+                            previous_prompt = terminal.get('promptTokenCount') or 0
                             print(name, 'cached=', cached, 'source=', terminal.get('conversationCacheSource'), 'wall=', elapsed, 'output=', repr(row['output']), flush=True)
                     except Exception as error:
                         failures.append(dict(workload=workload, schedule=schedule, error=repr(error)))

@@ -7,8 +7,6 @@ change what I work on next.
 
 ## Known limits
 
-- **Flash Next's first prompt got a bit slower in 8.0** (about 0.3 s), after
-  shader compilation was split by model. Cause unknown.
 - **Search is untested on GPT-OSS 120B and MiniMax M2.7.**
 - **Small-block prefill is off by default** until it's shown to speed up real
   requests.
