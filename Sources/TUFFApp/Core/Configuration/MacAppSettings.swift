@@ -188,6 +188,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     /// Web searches and page reads go through the sandbox. Off until the
     /// person turns it on; files written before it existed load as off.
     var runWebInSandbox: Bool = false
+    /// Reading the folders chosen for file search happens in a second
+    /// sandbox with no network. Off until the person turns it on.
+    var runFilesInSandbox: Bool = false
     var fileSearchEnabled: Bool = false
     var searchProvider: AppSearchProviderKind = .duckDuckGo
 
@@ -248,6 +251,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case webSearchEnabled
         case pauseWebSearchWhenOffline
         case runWebInSandbox
+        case runFilesInSandbox
         case fileSearchEnabled
         case searchProvider
     }
@@ -346,6 +350,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
                 Bool.self, forKey: .pauseWebSearchWhenOffline) ?? false
             runWebInSandbox = try container.decodeIfPresent(
                 Bool.self, forKey: .runWebInSandbox) ?? false
+            runFilesInSandbox = try container.decodeIfPresent(
+                Bool.self, forKey: .runFilesInSandbox) ?? false
             webSearchEnabled = try container.decodeIfPresent(
                 Bool.self, forKey: .webSearchEnabled) ?? false
             fileSearchEnabled = try container.decodeIfPresent(

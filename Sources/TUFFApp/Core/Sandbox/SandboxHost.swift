@@ -230,12 +230,14 @@ enum SandboxLocations {
         return support.appendingPathComponent("TUFF/Sandbox", isDirectory: true)
     }
 
-    static func secretsDirectory(in state: URL) -> URL {
-        state.appendingPathComponent("secrets", isDirectory: true)
+    /// Each profile has a folder and a lock file of its own, so the web and
+    /// the files sandbox neither share a lock nor remove each other's secret.
+    static func secretsDirectory(in state: URL, profile: SandboxProfile = .web) -> URL {
+        state.appendingPathComponent(profile.secretsDirectoryName, isDirectory: true)
     }
 
-    static func lockFile(in state: URL) -> URL {
-        state.appendingPathComponent("instance.lock")
+    static func lockFile(in state: URL, profile: SandboxProfile = .web) -> URL {
+        state.appendingPathComponent(profile.lockFileName)
     }
 }
 #endif

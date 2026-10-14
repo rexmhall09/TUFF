@@ -41,6 +41,12 @@ final class SandboxStubProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
+    /// Keeps the handler and what was seen, and answers with this key from now
+    /// on: for tests that start a sandbox whose secret is made at the start.
+    static func setKey(_ key: Data) {
+        lock.withLock { storedKey = key }
+    }
+
     static var seen: [Seen] { lock.withLock { storedSeen } }
 
     /// A 200 answer with this JSON object.

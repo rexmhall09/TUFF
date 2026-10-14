@@ -18,7 +18,7 @@ public enum AppAnswerExport {
                 case .web:
                     lines.append("\(source.id). [\(source.title)](\(source.url ?? "")) (\(source.origin))")
                 case .file:
-                    let place = [source.filePath, source.location].compactMap { $0 }
+                    let place = [source.filePath.map(AppFileNameText.safe), source.location].compactMap { $0 }
                         .joined(separator: ", ")
                     lines.append("\(source.id). \(source.title): \(place)")
                 }

@@ -225,6 +225,29 @@ enum ToolLoopFixtures {
         #expect(allowed.results[0].status == .succeeded)
     }
 
+    @Test func directionControlsInAFileNameAreWrittenOutNotApplied() async {
+        let name = "report\u{202E}fdp.exe"
+        let session = AppToolAnswerSession(
+            capabilities: .init(web: false, files: true),
+            toolbox: ToolLoopFixtures.toolbox(
+                passages: [AppFilePassage(filePath: "/tmp/\(name)", folderID: UUID(), page: nil,
+                                          lineStart: 1, lineEnd: 1, text: "plain text", score: 1)],
+                searches: QueryLog()),
+            userText: "Please search the report")
+        let files = AppToolCall(id: "f", name: "search_files",
+                                arguments: .object(["query": .string("report")]))
+        let round = await session.execute(calls: [files], thinking: nil, content: "",
+                                          characterBudget: 20_000, onActivity: { _ in })
+        let text = round.results[0].modelText
+        #expect(text.contains("report\\u{202E}fdp.exe"))
+        #expect(!text.unicodeScalars.contains("\u{202E}"))
+    }
+
+    @Test func fileNamesKeepOrdinaryCharacters() {
+        #expect(AppFileNameText.safe("Übersicht 日本語 – notes (1).txt") == "Übersicht 日本語 – notes (1).txt")
+        #expect(AppFileNameText.safe("a\u{200B}b\nc") == "a\\u{200B}b\\u{A}c")
+    }
+
     @Test func callsBeyondTheRoundLimitAndRequestLimitAreRefused() async {
         var limits = AppToolLimits.standard
         limits.maximumCallsPerRound = 2

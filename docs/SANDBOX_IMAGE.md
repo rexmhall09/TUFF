@@ -1,7 +1,7 @@
 # Updating the sandbox image
 
-For whoever maintains TUFF. The web sandbox
-([`WEB_SANDBOX.md`](WEB_SANDBOX.md)) runs a Linux image built from
+For whoever maintains TUFF. The web and file sandboxes
+([`WEB_SANDBOX.md`](WEB_SANDBOX.md)) run one Linux image built from
 [`Sandbox/`](../Sandbox/README.md). TUFF does not trust a name or a tag: the app
 carries the **digest** of the image it will run (`SandboxImagePin.release` in
 `Sources/TUFFApp/Core/Sandbox/SandboxImage.swift`), pulls exactly that
@@ -12,7 +12,7 @@ digest, then change the digest in the app and release the app.
 ## What goes into the image
 
 `Sandbox/Containerfile` copies `server.py`, `firewall-web.nft`,
-`entrypoint.sh` and `default_gateway.py`, and installs the
+`firewall-files.nft`, `entrypoint.sh` and `default_gateway.py`, and installs the
 packages in `requirements.txt`. Everything is pinned, so the same files give the
 same image:
 
@@ -38,8 +38,8 @@ python3 Sandbox/test_server.py && python3 Sandbox/test_signing.py && python3 San
 Scripts/sandbox_selftest.sh all        # builds tuff-sandbox:dev, starts it, checks it, stops it
 ```
 
-`all` checks the firewall, the missing privileges, the blocked addresses and
-every endpoint. To try
+`all` checks both profiles: the firewalls, the missing privileges, every
+endpoint, a read-only mount, nothing reachable from the file sandbox. To try
 the image in the real app without publishing it, read its digest and start TUFF
 with the two developer variables (also described in
 [`WEB_SANDBOX.md`](WEB_SANDBOX.md#developers)):
@@ -50,8 +50,8 @@ env TUFF_SANDBOX_DEV_IMAGE=tuff-sandbox:dev TUFF_SANDBOX_DEV_DIGEST=$D /path/to/
 ```
 
 TUFF then runs the local image, still checking that its digest is exactly `$D`,
-and never pulls it. Turn on the sandbox switch under Settings > Search and try a
-search, a page and a PDF. Also run the app's own tests
+and never pulls it. Turn on both switches under Settings > Search and try a
+search, a page, a PDF and a folder. Also run the app's own tests
 (`Scripts/test.sh --filter Sandbox`).
 
 ## 2. Publish it and read the digest

@@ -112,7 +112,7 @@ struct FolderAccessPanel: View {
                 Button("Add Folder…", action: addFolders)
                 Spacer()
                 if model.toolStore.isIndexing {
-                    Button("Stop Indexing") { model.toolStore.stopIndexing() }
+                    Button("Stop Indexing") { model.toolStore.cancelIndexing() }
                 } else if !model.toolStore.folders.isEmpty {
                     Button("Update Index") { model.toolStore.reindex() }
                 }
@@ -177,7 +177,9 @@ struct FolderAccessPanel: View {
         panel.allowsMultipleSelection = true
         panel.treatsFilePackagesAsDirectories = false
         panel.prompt = "Add"
-        panel.message = "Choose folders for TUFF to search. Only these folders are read."
+        panel.message = "Choose folders for TUFF to search. Only these folders are read. "
+            + "With the file sandbox on, macOS may ask whether \u{201C}container-runtime-linux\u{201D} "
+            + "may read the folder; allow it."
         guard panel.runModal() == .OK else { return }
         model.toolStore.addFolders(panel.urls)
         if !model.toolStore.folders.isEmpty { model.fileSearchEnabled = true }

@@ -220,7 +220,7 @@ struct SourceRow: View {
         case .web:
             return source.url.flatMap(URL.init(string:))?.host ?? source.origin
         case .file:
-            return [source.location, source.filePath.map { ($0 as NSString).abbreviatingWithTildeInPath }]
+            return [source.location, source.filePath.map { AppFileNameText.safe(($0 as NSString).abbreviatingWithTildeInPath) }]
                 .compactMap { $0 }.joined(separator: " · ")
         }
     }

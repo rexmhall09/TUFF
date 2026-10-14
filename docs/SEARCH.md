@@ -38,7 +38,10 @@ Files only reads folders you add. TUFF keeps a small text index in
 `~/Library/Caches/TUFF/LocalSearch` (no embedding model) covering text,
 Markdown, code, CSV, JSON, YAML and PDF. It skips hidden and build folders,
 links, and big files, and pauses while the model is answering. Removing a
-folder deletes its part of the index.
+folder deletes its part of the index. On macOS 26 and newer, **Settings >
+Search** can also read the folders in a second sandbox with no network, so a
+harmful file never reaches TUFF directly; it is off until you turn it on. See
+[Web sandbox](WEB_SANDBOX.md).
 
 ## Limits
 

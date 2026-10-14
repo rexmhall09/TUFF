@@ -27,6 +27,12 @@ public enum SandboxError: Error, Equatable, Sendable, CustomStringConvertible {
     case stoppedWhileStarting
     case notReady
     case stillStarting
+    /// A files sandbox was asked to start with no folder to mount.
+    case noFoldersToMount
+    /// macOS refused to let the container tool read a folder.
+    case folderAccessDenied
+    /// A search folder's path cannot be given to `container run --mount`.
+    case unmountableFolder
 
     public var description: String {
         switch self {
@@ -74,6 +80,14 @@ public enum SandboxError: Error, Equatable, Sendable, CustomStringConvertible {
             "The sandbox is not ready."
         case .stillStarting:
             "The sandbox is still starting."
+        case .noFoldersToMount:
+            "There is no search folder for the file sandbox to read."
+        case .unmountableFolder:
+            "A search folder's path has a comma or a line break in it, which the container tool cannot mount."
+        case .folderAccessDenied:
+            "macOS did not let the file sandbox read a search folder. In System Settings, open Privacy & "
+                + "Security, then Files and Folders (or, if it is not listed there, Full Disk Access), allow "
+                + "\u{201C}container-runtime-linux\u{201D} for the folder, and try again."
         }
     }
 }

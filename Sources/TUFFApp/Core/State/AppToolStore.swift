@@ -66,7 +66,13 @@ public final class AppToolStore {
     /// The sandbox web requests go through when an answer runs with the
     /// sandbox setting on. Set by the model; nothing else owns one.
     @ObservationIgnored var sandboxWeb: SandboxWebAccess?
+    /// The sandbox the folders are read through when `indexInSandbox` is on.
+    @ObservationIgnored var sandboxFiles: SandboxFilesService?
     #endif
+    /// Whether files are read and turned into passages in the files sandbox
+    /// instead of by the app. Mirrors the setting; with no sandbox to use,
+    /// indexing fails and nothing is read directly.
+    @ObservationIgnored public var indexInSandbox = false
     @ObservationIgnored let indexLimits: AppLocalIndexLimits
     @ObservationIgnored private var index: AppLocalSearchIndex?
     @ObservationIgnored private var indexTask: Task<Void, Never>?
@@ -150,6 +156,30 @@ public final class AppToolStore {
         folderStatus = [:]
         saveFolders()
         removeIndexedFolder(nil)
+        stopFilesSandboxWithoutFolders()
+    }
+
+    /// With no folder left there is nothing for the files sandbox to read,
+    /// and the folders must not stay mounted into it.
+    private func stopFilesSandboxWithoutFolders() {
+        #if os(macOS)
+        guard indexInSandbox, let service = sandboxFiles else { return }
+        Task { await service.stop() }
+        #endif
+    }
+
+    /// Forgets the files that were skipped, so the next update reads them
+    /// again with whichever reader is in use. For when the setting that
+    /// chooses the reader changes.
+    public func forgetSkippedFiles() {
+        let previous = indexMaintenanceTask
+        let running = indexDrainTask
+        let index = try? openIndex()
+        indexMaintenanceTask = Task {
+            await previous?.value
+            await running?.value
+            try? await index?.forgetSkipped()
+        }
     }
 
     private func removeIndexedFolder(_ id: UUID?) {
@@ -179,7 +209,10 @@ public final class AppToolStore {
         stopIndexing()
         let runID = indexRunID
         let folders = folders
-        guard !folders.isEmpty else { return }
+        guard !folders.isEmpty else {
+            stopFilesSandboxWithoutFolders()
+            return
+        }
         let index: AppLocalSearchIndex
         do {
             index = try openIndex()
@@ -187,15 +220,80 @@ public final class AppToolStore {
             lastError = "\(error)"
             return
         }
-        let indexer = AppLocalIndexer(index: index, limits: indexLimits)
+        let indexer: AppLocalIndexer
+        #if os(macOS)
+        let sandboxService: SandboxFilesService?
+        if indexInSandbox {
+            guard let service = sandboxFiles else {
+                for folder in folders {
+                    var status = folderStatus[folder.id] ?? AppIndexFolderStatus()
+                    status.lastError = "The file sandbox is not available."
+                    folderStatus[folder.id] = status
+                }
+                return
+            }
+            sandboxService = service
+            indexer = AppLocalIndexer(index: index, limits: indexLimits,
+                                      reader: SandboxFileReader(access: service.access))
+        } else {
+            sandboxService = nil
+            indexer = AppLocalIndexer(index: index, limits: indexLimits)
+        }
+        #else
+        indexer = AppLocalIndexer(index: index, limits: indexLimits)
+        #endif
         let activity = inferenceActivity
         let previous = indexDrainTask
         let maintenance = indexMaintenanceTask
         indexTask = Task(priority: .background) { [weak self] in
             await previous?.value
             await maintenance?.value
+            guard !Task.isCancelled else { return }
+            #if os(macOS)
+            // Folders macOS did not let the sandbox read: left out, with the
+            // reason, while the others are indexed.
+            var blockedFolders: [String: String] = [:]
+            if let sandboxService {
+                // The sandbox runs with exactly these folders mounted before
+                // any file is read. Starting it can take a while: indexing
+                // shows as under way meanwhile.
+                await MainActor.run {
+                    guard self?.indexRunID == runID else { return }
+                    self?.indexingFolderID = folders.first?.id
+                }
+                do {
+                    blockedFolders = try await sandboxService.ensureRunning(for: folders)
+                } catch {
+                    let message = error is CancellationError ? nil : "\(error)"
+                    await MainActor.run {
+                        guard self?.indexRunID == runID else { return }
+                        if let message {
+                            for folder in folders {
+                                var status = self?.folderStatus[folder.id] ?? AppIndexFolderStatus()
+                                status.lastError = message
+                                self?.folderStatus[folder.id] = status
+                            }
+                        }
+                        self?.indexingFolderID = nil
+                        self?.indexTask = nil
+                    }
+                    return
+                }
+            }
+            #endif
             for folder in folders {
                 guard !Task.isCancelled else { break }
+                #if os(macOS)
+                if let message = blockedFolders[folder.id.uuidString.lowercased()] {
+                    await MainActor.run {
+                        guard self?.indexRunID == runID else { return }
+                        var status = self?.folderStatus[folder.id] ?? AppIndexFolderStatus()
+                        status.lastError = message
+                        self?.folderStatus[folder.id] = status
+                    }
+                    continue
+                }
+                #endif
                 await MainActor.run {
                     guard self?.indexRunID == runID else { return }
                     self?.indexingFolderID = folder.id
@@ -238,6 +336,18 @@ public final class AppToolStore {
         indexTask?.cancel()
         indexTask = nil
         indexingFolderID = nil
+    }
+
+    /// "Stop Indexing" from the settings: the run ends, and a start of the
+    /// files sandbox under way for it does not finish and leave the folders
+    /// mounted. (Not part of `stopIndexing`, which a new run calls first.)
+    public func cancelIndexing() {
+        stopIndexing()
+        #if os(macOS)
+        if indexInSandbox, let service = sandboxFiles, service.controller.state.isBusy {
+            Task { await service.stop() }
+        }
+        #endif
     }
 
     public var isIndexing: Bool { indexingFolderID != nil }

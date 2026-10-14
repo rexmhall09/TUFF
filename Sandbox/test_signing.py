@@ -1522,7 +1522,24 @@ def child_environment(**extra):
     return env
 
 
-class MainProcessTests(unittest.TestCase):
+class AnnouncedPort:
+    """For tests that start the real server in a child process."""
+
+    def announced_port(self, process):
+        """The port the child announced on its first line. If it announced
+        nothing (it died, or the watchdog killed it), the test fails with what
+        the child wrote to standard error."""
+        line = process.stdout.readline()
+        parts = line.split()
+        if len(parts) < 2 or parts[0] != "PORT":
+            process.kill()
+            process.wait()
+            self.fail(f"the server process announced no port (first line {line!r}); "
+                      f"its standard error: {process.stderr.read()[:2000]!r}")
+        return int(parts[1])
+
+
+class MainProcessTests(AnnouncedPort, unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -1549,19 +1566,6 @@ class MainProcessTests(unittest.TestCase):
 
         self.addCleanup(cleanup)
         return process
-
-    def announced_port(self, process):
-        """The port the child announced on its first line. If it announced
-        nothing (it died, or the watchdog killed it), the test fails with what
-        the child wrote to standard error."""
-        line = process.stdout.readline()
-        parts = line.split()
-        if len(parts) < 2 or parts[0] != "PORT":
-            process.kill()
-            process.wait()
-            self.fail(f"the server process announced no port (first line {line!r}); "
-                      f"its standard error: {process.stderr.read()[:2000]!r}")
-        return int(parts[1])
 
     def run_to_exit(self, **env):
         process = self.spawn(**env)
@@ -1664,6 +1668,8 @@ class MainUnitTests(unittest.TestCase):
             mock.patch.object(server, "BoundedServer", self.make_server),
             mock.patch.object(server, "BLOCKED_ADDRESSES", frozenset()),
             mock.patch.object(server.Handler, "secret", b""),
+            mock.patch.object(server.Handler, "profile", "web"),
+            mock.patch.object(server.Handler, "tools", server.Handler.tools),
             mock.patch.dict(os.environ, {}),
             mock.patch.object(sys, "stderr", io.StringIO()),
         ):
@@ -1671,6 +1677,7 @@ class MainUnitTests(unittest.TestCase):
             self.addCleanup(patch.stop)
         os.environ.pop("SANDBOX_SECRET_FILE", None)
         os.environ.pop(server.BLOCKED_ENV, None)
+        os.environ.pop(server.PROFILE_ENV, None)
 
     def make_server(self, address, handler):
         instance = self.FakeServer(address, handler)
@@ -1692,6 +1699,40 @@ class MainUnitTests(unittest.TestCase):
             ipaddress.ip_address("10.1.2.3"), ipaddress.ip_address("2001:db8::7")}))
         self.assertEqual(server.Handler.secret, SECRET)
         self.assertEqual(self.paths, ["/somewhere/secret"])
+
+    def test_the_default_profile_is_web_and_serves_the_web_tools(self):
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(server.Handler.profile, "web")
+        self.assertIsInstance(server.Handler.tools, server.WebTools)
+        self.assertIn("web sandbox listening", sys.stderr.getvalue())
+
+    def test_the_files_profile_serves_the_files_tools_and_ignores_the_blocklist(self):
+        os.environ[server.PROFILE_ENV] = "files"
+        os.environ[server.BLOCKED_ENV] = "not an address at all"
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(server.Handler.profile, "files")
+        self.assertIsInstance(server.Handler.tools, server.FilesTools)
+        self.assertEqual(server.BLOCKED_ADDRESSES, frozenset())
+        self.assertNotIn(server.BLOCKED_ENV, os.environ)
+        self.assertIn("files sandbox listening", sys.stderr.getvalue())
+
+    def test_the_files_profile_drops_privileges_before_it_binds_and_before_any_file_is_read(self):
+        os.environ[server.PROFILE_ENV] = "files"
+        with mock.patch.object(server.FilesTools, "folders",
+                               side_effect=AssertionError("read a folder")):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.events, ["secret", "drop", "bind", "sigterm", "serve", "close"])
+
+    def test_an_unknown_profile_stops_before_the_secret_is_read(self):
+        for value in ("", "Web", "FILES", "files ", "other"):
+            with self.subTest(value=value):
+                del self.events[:]
+                os.environ[server.PROFILE_ENV] = value
+                message = str(self.run_main())
+                self.assertIn("SANDBOX_PROFILE", message)
+                self.assertIn("refusing to start", message)
+                self.assertEqual(self.events, [])
+                self.assertEqual(self.created, [])
 
     def test_the_secret_is_read_first_privileges_are_dropped_before_binding(self):
         os.environ[server.BLOCKED_ENV] = "10.1.2.3"
@@ -1763,6 +1804,272 @@ class BindTests(unittest.TestCase):
         # No secret is set on this handler, so the sandbox answers 500 and signs nothing;
         # the point is that the bound socket accepts and answers.
         self.assertIn(connection.getresponse().status, (401, 500))
+
+
+# --- The files profile ------------------------------------------------------
+
+FOLDER = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+FILES_CHILD = CHILD.replace(
+    "server.main()\n",
+    "import os\n"
+    "_tools = server.FilesTools\n"
+    "server.FilesTools = lambda: _tools(root=os.environ['TEST_FILES_ROOT'])\n"
+    "server.main()\n")
+
+
+class FilesLiveServer(LiveServer):
+    """LiveServer in the files profile, over a temporary /files."""
+
+    def setUp(self):
+        super().setUp()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.base = directory.name
+        self.root = os.path.join(self.base, FOLDER)
+        os.mkdir(self.root)
+        for name, content in (("a.txt", "alpha\nbeta\n"), ("sub/b.md", "# Heading\n\ntext\n")):
+            path = os.path.join(self.root, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+        os.symlink("/etc/passwd", os.path.join(self.root, "link.txt"))
+        for patch in (mock.patch.object(server.Handler, "profile", "files"),
+                      mock.patch.object(server.Handler, "tools", server.FilesTools(root=self.base))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+
+class FilesProfileTests(FilesLiveServer):
+    def test_health_says_files_and_lists_the_folders(self):
+        answer = self.exchange("GET", "/health")
+        self.assertEqual(answer.status, 200)
+        self.assertSigned(answer)
+        self.assertEqual(answer.json, {
+            "status": "ok", "profile": "files", "api": 1, "pdf": server.PdfReader is not None,
+            "blocked_addresses": 0, "folders": [FOLDER]})
+        self.assertEqual(list(answer.json), ["status", "profile", "api", "pdf", "blocked_addresses",
+                                             "folders"])
+
+    def test_health_ignores_the_blocked_addresses_the_web_profile_would_report(self):
+        with mock.patch.object(server, "BLOCKED_ADDRESSES", frozenset({"10.0.0.1"})):
+            self.assertEqual(self.exchange("GET", "/health").json["blocked_addresses"], 0)
+
+    def test_list(self):
+        answer = self.post("/v1/files/list", {"folder": FOLDER})
+        self.assertEqual(answer.status, 200, answer.body)
+        self.assertSigned(answer)
+        data = answer.json
+        self.assertIsNone(data["next_cursor"])
+        self.assertEqual(data["unreadable"], 0)
+        self.assertEqual(list(data), ["entries", "next_cursor", "unreadable"])
+        self.assertEqual([(e["path"], e["size"]) for e in data["entries"]],
+                         [("a.txt", 11), ("sub/b.md", 16)])
+        self.assertEqual(set(data["entries"][0]), {"path", "size", "mtime"})
+
+    def test_list_with_a_cursor_and_a_limit(self):
+        answer = self.post("/v1/files/list", {"folder": FOLDER, "limit": 1})
+        self.assertEqual(answer.json["next_cursor"], "a.txt")
+        answer = self.post("/v1/files/list", {"folder": FOLDER, "cursor": "a.txt", "limit": 1})
+        self.assertEqual([e["path"] for e in answer.json["entries"]], ["sub/b.md"])
+        self.assertIsNone(answer.json["next_cursor"])
+
+    def test_passages(self):
+        answer = self.post("/v1/files/passages", {"folder": FOLDER, "path": "sub/b.md"})
+        self.assertEqual(answer.status, 200, answer.body)
+        self.assertSigned(answer)
+        data = answer.json
+        self.assertEqual(data["size"], 16)
+        self.assertEqual(data["passages"], [
+            {"page": None, "line_start": 1, "line_end": 4, "text": "# Heading\n\ntext"}])
+
+    def test_the_sandbox_client_verifies_the_answers_of_the_files_endpoints(self):
+        self.clock.value = time.time()
+        status, body, signed = sandbox_client.call(
+            self.port, self.secret, "POST", "/v1/files/passages",
+            {"folder": FOLDER, "path": "a.txt"}, timeout=10)
+        self.assertEqual((status, signed), (200, True))
+        self.assertEqual(json.loads(body)["passages"][0]["text"], "alpha\nbeta")
+
+    def test_the_web_paths_are_unknown_here(self):
+        for path in ("/v1/page", "/v1/http"):
+            for payload in (self.page_payload(), {}):
+                answer = self.post(path, payload)
+                self.assertError(answer, 404, "not_found")
+        self.assertEqual(self.world.calls, [])
+
+    def test_other_paths_are_unknown_too(self):
+        for path in ("/v1/files", "/v1/files/", "/v1/files/list/", "/v1/files/read", "/v1/files/LIST"):
+            self.assertError(self.post(path, {"folder": FOLDER}), 404, "not_found")
+
+    def test_a_get_of_a_files_path_is_404(self):
+        self.assertError(self.exchange("GET", "/v1/files/list"), 404, "not_found")
+
+    def test_errors_are_signed_with_their_status_and_code(self):
+        cases = (
+            ("/v1/files/list", {"folder": "nope"}, 400, "invalid_folder"),
+            ("/v1/files/list", {}, 400, "invalid_folder"),
+            ("/v1/files/list", {"folder": FOLDER, "cursor": "../x"}, 400, "invalid_path"),
+            ("/v1/files/list", {"folder": FOLDER, "limit": 0}, 400, "invalid_argument"),
+            ("/v1/files/list", {"folder": "ffffffff-0000-4000-8000-000000000001"}, 404, "not_found"),
+            ("/v1/files/passages", {"folder": FOLDER}, 400, "invalid_path"),
+            ("/v1/files/passages", {"folder": FOLDER, "path": "/etc/passwd"}, 400, "invalid_path"),
+            ("/v1/files/passages", {"folder": FOLDER, "path": "a/../a.txt"}, 400, "invalid_path"),
+            ("/v1/files/passages", {"folder": FOLDER, "path": "missing.txt"}, 404, "not_found"),
+            ("/v1/files/passages", {"folder": FOLDER, "path": "link.txt"}, 422, "not_a_file"),
+            ("/v1/files/passages", {"folder": FOLDER, "path": "sub"}, 422, "not_a_file"),
+        )
+        for path, payload, status, code in cases:
+            with self.subTest(path=path, payload=payload):
+                self.assertError(self.post(path, payload), status, code)
+
+    def test_unknown_fields_are_refused(self):
+        for path, payload in (("/v1/files/list", {"folder": FOLDER, "path": "a.txt"}),
+                              ("/v1/files/list", {"folder": FOLDER, "extra": 1}),
+                              ("/v1/files/passages", {"folder": FOLDER, "path": "a.txt", "limit": 1}),
+                              ("/v1/files/passages", {"folder": FOLDER, "path": "a.txt", "cursor": "a"})):
+            answer = self.post(path, payload)
+            self.assertError(answer, 400, "invalid_argument")
+
+    def test_a_null_cursor_or_limit_is_the_same_as_none(self):
+        answer = self.post("/v1/files/list", {"folder": FOLDER, "cursor": None, "limit": None})
+        self.assertEqual(answer.status, 200, answer.body)
+        self.assertEqual(len(answer.json["entries"]), 2)
+
+    def test_the_request_rules_are_the_same(self):
+        # unsigned, wrong secret, replay, content type, size cap
+        self.assertError(self.exchange("POST", "/v1/files/list", b"{}", edit=drop(AUTH)), 401,
+                         "unauthorized")
+        self.assertError(self.post("/v1/files/list", {"folder": FOLDER}, secret=b"x" * 40), 401,
+                         "unauthorized")
+        body = json.dumps({"folder": FOLDER}).encode()
+        nonce = os.urandom(32).hex()
+        first = self.exchange("POST", "/v1/files/list", body, nonce=nonce)
+        self.assertEqual(first.status, 200)
+        self.assertError(self.exchange("POST", "/v1/files/list", body, nonce=nonce), 401,
+                         "replayed_request")
+        self.assertError(self.exchange("POST", "/v1/files/list", body, content_type="text/plain"),
+                         415, "invalid_request")
+        big = b'{"folder": "' + b"a" * (server.MAX_REQUEST_BYTES + 1) + b'"}'
+        self.assertError(self.exchange("POST", "/v1/files/list", big), 413, "invalid_request")
+        self.assertError(self.exchange("POST", "/v1/files/list", body, host="evil.example"), 403,
+                         "forbidden_host")
+
+    def test_an_error_does_not_contain_the_files_contents_or_names(self):
+        with open(os.path.join(self.root, "secret.txt"), "wb") as handle:
+            handle.write(b"hunter2\xff")
+        answer = self.post("/v1/files/passages", {"folder": FOLDER, "path": "secret.txt"})
+        self.assertError(answer, 422, "unreadable")
+        self.assertNotIn(b"hunter2", answer.body)
+
+    def test_an_unexpected_failure_is_a_signed_500_without_details(self):
+        with mock.patch.object(server.FilesTools, "list_files", side_effect=RuntimeError("/secret/path")):
+            answer = self.post("/v1/files/list", {"folder": FOLDER})
+        self.assertError(answer, 500, "internal_error")
+        self.assertNotIn(b"/secret/path", answer.body)
+
+
+class WebProfileRefusesFilesPathsTests(LiveServer):
+    def test_the_files_paths_are_unknown_in_the_web_profile(self):
+        self.assertEqual(server.Handler.profile, "web")
+        for path in ("/v1/files/list", "/v1/files/passages"):
+            self.assertError(self.post(path, {"folder": FOLDER, "path": "a.txt"}), 404, "not_found")
+
+    def test_the_web_health_is_unchanged(self):
+        data = self.exchange("GET", "/health").json
+        self.assertEqual(list(data), ["status", "profile", "api", "pdf", "extractor",
+                                      "blocked_addresses"])
+        self.assertEqual(data["profile"], "web")
+
+    def test_the_default_profile_of_the_handler_is_web(self):
+        self.assertEqual(server.Handler.profile, "web")
+        self.assertIsInstance(server.Handler.tools, server.WebTools)
+        self.assertEqual(server.PROFILES, ("web", "files"))
+        self.assertEqual(sorted(server.PROFILE_PATHS), ["files", "web"])
+        self.assertEqual(server.PROFILE_PATHS["web"], ("/v1/page", "/v1/http"))
+        self.assertEqual(server.PROFILE_PATHS["files"], ("/v1/files/list", "/v1/files/passages"))
+
+
+class FilesMainProcessTests(AnnouncedPort, unittest.TestCase):
+    """The real process in the files profile (a real /files is not needed)."""
+
+    def spawn_files(self, **env):
+        process = subprocess.Popen(
+            [sys.executable, "-c", FILES_CHILD], cwd=HERE,
+            env=child_environment(SANDBOX_SECRET_FILE=self.secret_file, SANDBOX_PROFILE="files",
+                                  TEST_FILES_ROOT=self.files, **env),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        watchdog = threading.Timer(60, process.kill)
+        watchdog.start()
+
+        def cleanup():
+            watchdog.cancel()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            process.stdout.close()
+            process.stderr.close()
+
+        self.addCleanup(cleanup)
+        return process
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.secret = b"main-process-secret-0123456789abcdef-xyz"
+        self.secret_file = os.path.join(directory.name, "secret")
+        with open(self.secret_file, "wb") as handle:
+            handle.write(self.secret + b"\n")
+        self.directory = directory.name
+        self.files = os.path.join(self.directory, "files")
+        os.makedirs(os.path.join(self.files, FOLDER))
+        with open(os.path.join(self.files, FOLDER, "hello.txt"), "w") as handle:
+            handle.write("hello from the files profile\n")
+
+    spawn = MainProcessTests.spawn
+    run_to_exit = MainProcessTests.run_to_exit
+
+    def test_serves_the_files_endpoints_and_exits_0_on_sigterm(self):
+        # The blocklist is ignored (even a bad one) in the files profile.
+        process = self.spawn_files(SANDBOX_BLOCKED_ADDRESSES="not an address")
+        port = self.announced_port(process)
+        self.assertIn("files sandbox listening", process.stderr.readline())
+        status, body, signed = sandbox_client.call(port, self.secret, "GET", "/health", timeout=10)
+        self.assertEqual((status, signed), (200, True))
+        self.assertEqual(json.loads(body)["profile"], "files")
+        self.assertEqual(json.loads(body)["folders"], [FOLDER])
+        status, body, signed = sandbox_client.call(
+            port, self.secret, "POST", "/v1/files/passages",
+            {"folder": FOLDER, "path": "hello.txt"}, timeout=10)
+        self.assertEqual((status, signed), (200, True))
+        self.assertEqual(json.loads(body)["passages"][0]["text"], "hello from the files profile")
+        status, body, signed = sandbox_client.call(
+            port, self.secret, "POST", "/v1/page", {"url": "http://93.184.216.34/"}, timeout=10)
+        self.assertEqual((status, signed, json.loads(body)["error"]["code"]), (404, True, "not_found"))
+        process.send_signal(signal.SIGTERM)
+        self.assertEqual(process.wait(timeout=20), 0)
+
+    def test_an_unknown_profile_refuses_to_start_before_it_reads_the_secret(self):
+        for value in ("", "Files", "web ", "both", "files\n", "none"):
+            with self.subTest(value=value):
+                code, stdout, stderr = self.run_to_exit(
+                    SANDBOX_SECRET_FILE=os.path.join(self.directory, "missing"),
+                    SANDBOX_PROFILE=value)
+                self.assertNotEqual(code, 0)
+                self.assertIn("SANDBOX_PROFILE", stderr)
+                self.assertIn("refusing to start", stderr)
+                self.assertNotIn("secret file", stderr)
+                self.assertNotIn("listening", stderr)
+                self.assertEqual(stdout, "")
+
+    def test_the_web_profile_can_be_named(self):
+        process = self.spawn(SANDBOX_SECRET_FILE=self.secret_file, SANDBOX_PROFILE="web")
+        port = self.announced_port(process)
+        self.assertIn("web sandbox listening", process.stderr.readline())
+        status, body, _ = sandbox_client.call(port, self.secret, "GET", "/health", timeout=10)
+        self.assertEqual((status, json.loads(body)["profile"]), (200, "web"))
+        process.send_signal(signal.SIGTERM)
+        self.assertEqual(process.wait(timeout=20), 0)
+
 
 
 class DropPrivilegesTests(unittest.TestCase):

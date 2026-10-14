@@ -28,7 +28,26 @@ public struct AppSearchFolder: Codable, Equatable, Hashable, Identifiable, Senda
     }
 
     public var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
-    public var displayName: String { url.lastPathComponent }
+    public var displayName: String { AppFileNameText.safe(url.lastPathComponent) }
+}
+
+/// File and folder names are chosen by whoever made the file, so they are
+/// shown to the person and the model with invisible and direction-changing
+/// characters written out (`\u{202E}`), not applied: a name such as
+/// `report\u{202E}fdp.exe` cannot pass for a PDF.
+public enum AppFileNameText {
+    public static func safe(_ text: String) -> String {
+        var result = ""
+        for scalar in text.unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator:
+                result += "\\u{" + String(scalar.value, radix: 16, uppercase: true) + "}"
+            default:
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
+    }
 }
 
 /// The chosen folders, stored in Application Support so clearing caches does
@@ -100,7 +119,7 @@ public enum AppLocalSearchError: Error, Equatable, Sendable, CustomStringConvert
 
     public var description: String {
         switch self {
-        case .notAFolder(let path): "\((path as NSString).lastPathComponent) is not a folder."
+        case .notAFolder(let path): "\(AppFileNameText.safe((path as NSString).lastPathComponent)) is not a folder."
         case .tooBroad: "Choose a specific folder rather than the whole disk."
         case .noFolders: "No folders are selected for file search. Add one with the Files button."
         case .index(let message): message
@@ -118,7 +137,7 @@ public struct AppFilePassage: Equatable, Sendable {
     public let text: String
     public let score: Double
 
-    public var displayName: String { (filePath as NSString).lastPathComponent }
+    public var displayName: String { AppFileNameText.safe((filePath as NSString).lastPathComponent) }
 
     public var location: String? {
         if let page { return "page \(page)" }
@@ -240,6 +259,13 @@ public actor AppLocalSearchIndex {
              .text("skipped"), .text(reason)])
     }
 
+    /// Forgets the files that were skipped, so the next update reads them
+    /// again. Used when the reader changes: a file one reader could not
+    /// handle may be fine for the other.
+    func forgetSkipped() throws {
+        try database.query("DELETE FROM files WHERE status != ?", [.text("indexed")])
+    }
+
     func forget(paths: [String]) throws {
         guard !paths.isEmpty else { return }
         try database.execute("BEGIN IMMEDIATE")
@@ -355,6 +381,30 @@ public actor AppLocalSearchIndex {
     }
 }
 
+/// Where the indexer gets the files of a folder and their passages from. The
+/// default is the Mac process itself (`AppLocalIndexer.scan` and `passages`);
+/// with the sandbox setting on it is a VM that has the folders mounted
+/// read-only, so a file the app cannot parse safely is never opened here.
+protocol AppLocalFileReading: Sendable {
+    /// The files to index, in the form `AppLocalIndexer.scan` gives them.
+    func scan(_ folder: AppSearchFolder, limits: AppLocalIndexLimits) async throws
+        -> (files: [AppLocalIndexer.FoundFile], reachedLimit: Bool)
+    /// The passages of one file. Throws `AppLocalFileSkip` for a file that
+    /// cannot be indexed and `AppLocalFileChanged` for one that changed
+    /// while it was read; any other error stops the folder's update.
+    func passages(for file: AppLocalIndexer.FoundFile, in folder: AppSearchFolder,
+                  limits: AppLocalIndexLimits) async throws -> [(Int?, Int?, Int?, String)]
+}
+
+/// This file cannot be indexed (too large, unreadable, no text); `reason` is
+/// remembered so it is not tried again until it changes.
+struct AppLocalFileSkip: Error, Equatable {
+    let reason: String
+}
+
+/// The file changed while it was read: leave it for the next update.
+struct AppLocalFileChanged: Error, Equatable {}
+
 /// Walks the chosen folders and keeps the index current: new and changed
 /// files are read, deleted ones dropped, unchanged ones left alone. It runs at
 /// background priority, checks for cancellation between files, and waits
@@ -362,10 +412,18 @@ public actor AppLocalSearchIndex {
 public struct AppLocalIndexer: Sendable {
     public let index: AppLocalSearchIndex
     public let limits: AppLocalIndexLimits
+    /// nil: the app reads the folders itself.
+    let reader: (any AppLocalFileReading)?
 
     public init(index: AppLocalSearchIndex, limits: AppLocalIndexLimits = .standard) {
+        self.init(index: index, limits: limits, reader: nil)
+    }
+
+    init(index: AppLocalSearchIndex, limits: AppLocalIndexLimits = .standard,
+         reader: (any AppLocalFileReading)?) {
         self.index = index
         self.limits = limits
+        self.reader = reader
     }
 
     public func update(_ folder: AppSearchFolder,
@@ -380,7 +438,12 @@ public struct AppLocalIndexer: Sendable {
             status.lastError = "The folder is missing or TUFF can no longer read it."
             return status
         }
-        let found = try scan(folder)
+        let found: (files: [FoundFile], reachedLimit: Bool)
+        if let reader {
+            found = try await reader.scan(folder, limits: limits)
+        } else {
+            found = try scan(folder)
+        }
         status.reachedFileLimit = found.reachedLimit
         let known = try await index.indexedFiles(folder: folder.id)
         let present = Set(found.files.map(\.path))
@@ -396,6 +459,8 @@ public struct AppLocalIndexer: Sendable {
         status.pendingFiles = pending.count
         progress(status)
 
+        // Files whose stamp on the Mac disagreed with the one the reader gave.
+        var stampMismatches = 0
         for file in pending {
             try Task.checkCancellation()
             while shouldPause() {
@@ -407,13 +472,24 @@ public struct AppLocalIndexer: Sendable {
                 guard AppLocalSearchIndex.isInside(file.path, folder: folder),
                       let stamp = AppLocalSearchIndex.fileStamp(file.path),
                       stamp.size == file.size, abs(stamp.mtime - file.mtime) < 0.001 else {
+                    stampMismatches += 1
                     continue
                 }
-                passages = try Self.passages(for: URL(fileURLWithPath: file.path),
-                                             size: file.size, limits: limits)
+                if let reader {
+                    passages = try await reader.passages(for: file, in: folder, limits: limits)
+                } else {
+                    passages = try Self.passages(for: URL(fileURLWithPath: file.path),
+                                                 size: file.size, limits: limits)
+                }
+            } catch is AppLocalFileChanged {
+                continue
             } catch {
+                // A problem with the sandbox itself says nothing about the
+                // file: it stops the update instead of marking files skipped.
+                if reader != nil, !(error is AppLocalFileSkip) { throw error }
+                let reason = (error as? AppLocalFileSkip)?.reason ?? "\(error)"
                 try await index.skip(path: file.path, folder: folder.id, size: file.size,
-                                     mtime: file.mtime, reason: "\(error)")
+                                     mtime: file.mtime, reason: reason)
                 status.skippedFiles += 1
                 status.pendingFiles -= 1
                 progress(status)
@@ -430,6 +506,12 @@ public struct AppLocalIndexer: Sendable {
             status.indexedFiles += 1
             status.pendingFiles -= 1
             if status.pendingFiles % 20 == 0 { progress(status) }
+        }
+        // A reader whose modification times never match the Mac's (a file
+        // system that rounds them) would index nothing and say nothing.
+        if reader != nil, pending.count >= 2, stampMismatches == pending.count {
+            status.lastError = "The files' modification times as the sandbox reports them do not match the Mac's, "
+                + "so nothing could be indexed."
         }
         let counts = try await index.counts(folder: folder.id)
         status.indexedFiles = counts.indexed

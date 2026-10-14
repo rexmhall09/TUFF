@@ -1,0 +1,40 @@
+# Firewall for the files sandbox VM (the `files` profile), loaded by
+# entrypoint.sh as root before the server drops its privileges. The VM reads the
+# folders the user picked, read-only, and must not be able to send what it reads
+# anywhere, even if code in it were taken over. So it has no network at all:
+# outbound, only loopback and replies on connections the Mac opened to the
+# published port are accepted. No DNS, no public addresses, no Mac, no local
+# network. (The app also starts this VM with --no-dns.)
+#
+# Inbound, the VM accepts new connections on one port only: 9100, the server's
+# port, and only from the VM's default gateway, the address that
+# `container run --publish` connects from (which is why the server binds
+# 0.0.0.0). Whatever can send from the gateway address, such as processes on the
+# Mac, can still reach 9100; the server's Host check and its signature check
+# cover that. Same rule as firewall-web.nft.
+#
+# $gateway is not defined here: entrypoint.sh reads the default gateway from
+# /proc/net/route, validates it as an IPv4 address and passes it with
+# `nft -D gateway=ADDRESS -f`. Loaded without it, nft fails on the unknown
+# variable, so the file never opens 9100 to everyone. IPv6: `ip saddr` matches
+# IPv4 packets only, so over IPv6 nothing but loopback is accepted inbound.
+
+table inet tuff_sandbox_files
+delete table inet tuff_sandbox_files
+
+table inet tuff_sandbox_files {
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oifname "lo" accept
+        ct state established,related accept
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept
+        ct state established,related accept
+        # Keep in step with PORT in server.py and with --publish in
+        # Scripts/sandbox_selftest.sh.
+        ip saddr $gateway tcp dport 9100 accept
+    }
+}

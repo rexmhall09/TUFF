@@ -1,4 +1,4 @@
-# Web sandbox for TUFF. Built and run with Apple `container`: by
+# Sandbox for TUFF (web and files profiles). Built and run with Apple `container`: by
 # Scripts/sandbox_selftest.sh for development, and by the GitHub Actions
 # workflow .github/workflows/sandbox-image.yml for the published image.
 #
@@ -46,9 +46,10 @@ RUN set -eux; \
     useradd --uid 10001 --no-create-home --home-dir /nonexistent \
        --shell /usr/sbin/nologin sandbox
 
-COPY server.py firewall-web.nft entrypoint.sh default_gateway.py /app/
+COPY server.py firewall-web.nft firewall-files.nft entrypoint.sh default_gateway.py /app/
 
-# Starts as root only to load firewall-web.nft and read the secret; server.py
+# One image for both profiles (SANDBOX_PROFILE=web or files, see server.py).
+# Starts as root only to load the profile's firewall and read the secret; server.py
 # then switches to user 10001 and drops every capability before it serves a
 # request. The app mounts the secret read-only at /run/tuff-sandbox/secret.
 EXPOSE 9100

@@ -232,6 +232,10 @@ struct ContainerTool: Sendable {
         }
         if result.timedOut { throw SandboxError.timedOut(action: action) }
         guard result.status == 0 else {
+            // Only a failed start is logged whole: stopping what is not there fails all the time.
+            if arguments.first == "run" {
+                SandboxLog.commandFailed(action: action, status: result.status, output: result.output)
+            }
             throw SandboxError.containerCommandFailed(action: action, detail: result.tail())
         }
         return result

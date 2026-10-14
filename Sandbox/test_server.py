@@ -9,6 +9,8 @@ and PDFs need this file to be importable as the main script). Tests that need
 trafilatura or pypdf skip without them."""
 
 import base64
+import errno
+import gc
 import gzip
 import io
 import ipaddress
@@ -16,9 +18,11 @@ import json
 import os
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -283,6 +287,14 @@ class AddressPolicyTests(unittest.TestCase):
         for address in ["127.0.0.1", "10.0.0.1", "192.168.64.1", "172.16.0.1",
                         "169.254.169.254", "100.64.0.1", "::1", "fd00::1",
                         "::ffff:192.168.64.1", "0.0.0.0", "224.0.0.1", "not-an-ip", ""]:
+            self.assertFalse(server.is_public_address(address), address)
+
+    def test_the_ranges_of_addresses_a_mac_gains_after_the_start_are_refused(self):
+        # The block list holds the Mac's addresses at the start; the bridge's
+        # link-local and unique-local addresses can appear later (fdcc:: was
+        # seen on a Mac), so the private ranges themselves must refuse them.
+        for address in ["fc00::1", "fdcc::1", "fdcc:1234:5678::a", "fe80::1", "fe80::a1b2:c3ff:fed4:e5f6",
+                        "febf::1", "192.168.64.1", "169.254.1.1"]:
             self.assertFalse(server.is_public_address(address), address)
 
     def test_public_addresses_are_allowed(self):
@@ -2983,6 +2995,1440 @@ class EndToEndTests(SiteTestCase):
         with self.assertRaises(ToolError) as caught:
             self.tools().http(TAVILY + "/dup-location", "GET")
         self.assertEqual(caught.exception.code, "fetch_failed")
+
+
+# --- the files profile --------------------------------------------------------
+
+FOLDER = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+OTHER_FOLDER = "ffffffff-0000-4000-8000-000000000001"
+
+
+def stuck_pdf_reader(data):
+    time.sleep(30)
+    return {}
+
+
+def oversized_pdf_reader(data):
+    raise server.PdfRefused("oversized")
+
+
+def mistyped_pages_reader(data):
+    return {"pages": 1, "pages_read": 1, "pages_failed": 0, "texts": [["one", "text"]]}
+
+
+def good_pages_reader(data):
+    return {"pages": 3, "pages_read": 3, "pages_failed": 1, "texts": [[1, "a"], [3, "b"]]}
+
+
+def open_descriptors() -> int:
+    """How many file descriptors this process has open, or skip the test."""
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(directory))
+        except OSError:
+            continue
+    raise unittest.SkipTest("this system cannot list the open file descriptors")
+
+
+class FilesTestCase(unittest.TestCase):
+    """A temporary /files with one folder (FOLDER) in it."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)  # (TestCase.enterContext needs Python 3.11)
+        self.base = directory.name
+        self.root = os.path.join(self.base, FOLDER)
+        os.mkdir(self.root)
+        self.tools = server.FilesTools(root=self.base)
+        # APFS and other case-insensitive file systems cannot hold "a" and "A".
+        probe = os.path.join(self.base, "case-probe")
+        open(probe, "w").close()
+        self.case_insensitive = os.path.exists(os.path.join(self.base, "CASE-PROBE"))
+        os.unlink(probe)
+
+    def write(self, relative, content=b"text", folder=None):
+        path = os.path.join(folder or self.root, relative)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(content.encode() if isinstance(content, str) else content)
+        except OSError as error:
+            if error.errno == errno.ENAMETOOLONG:  # macOS: 255 bytes a name, 1024 a path
+                self.skipTest("this file system refuses names or paths this long")
+            raise
+        return path
+
+    def write_raw_name(self, name: bytes, content=b"x"):
+        """A file in the folder whose name is not UTF-8, or skip: APFS refuses it."""
+        try:
+            with open(os.path.join(os.fsencode(self.root), name), "wb") as handle:
+                handle.write(content)
+        except OSError as error:
+            if error.errno in (errno.EILSEQ, errno.EINVAL):
+                self.skipTest("this file system refuses file names that are not UTF-8")
+            raise
+
+    def failing_listdir(self, *directories, error=None):
+        """os.listdir that fails for these directories (paths below the folder,
+        "" for the folder itself), found by their device and inode so that no
+        /proc is needed. The mode of a directory means nothing to root, so
+        the failure is made."""
+        found = set()
+        for relative in directories:
+            info = os.stat(os.path.join(self.root, relative) if relative else self.root)
+            found.add((info.st_dev, info.st_ino))
+        real = os.listdir
+        error = error or PermissionError(errno.EACCES, "denied")
+
+        def listdir(target):
+            if isinstance(target, int):
+                info = os.fstat(target)
+                if (info.st_dev, info.st_ino) in found:
+                    raise error
+            return real(target)
+
+        return mock.patch.object(server.os, "listdir", listdir)
+
+    def listing(self, **arguments):
+        return self.tools.list_files(FOLDER, **arguments)
+
+    def paths(self, **arguments):
+        return [entry["path"] for entry in self.listing(**arguments)["entries"]]
+
+    def all_paths(self, limit=2000):
+        found, cursor = [], None
+        while True:
+            page = self.listing(cursor=cursor, limit=limit)
+            found += [entry["path"] for entry in page["entries"]]
+            cursor = page["next_cursor"]
+            if cursor is None:
+                return found
+
+    def refused(self, call, *arguments, **keywords):
+        with self.assertRaises(ToolError) as caught:
+            call(*arguments, **keywords)
+        return caught.exception
+
+    def assertRefused(self, status, code, call, *arguments, **keywords):
+        error = self.refused(call, *arguments, **keywords)
+        self.assertEqual((error.status, error.code), (status, code), error.message)
+        return error
+
+    def passages(self, relative):
+        return self.tools.passages(FOLDER, relative)
+
+
+class ChunkerTests(unittest.TestCase):
+    """server.chunk_text: the algorithm of AppLocalIndexer.passages."""
+
+    def test_a_short_text_is_one_passage_with_its_line_range(self):
+        self.assertEqual(server.chunk_text("one\ntwo\nthree"), [(1, 3, "one\ntwo\nthree")])
+
+    def test_a_trailing_line_break_counts_as_one_more_line(self):
+        self.assertEqual(server.chunk_text("one\ntwo\n"), [(1, 3, "one\ntwo")])
+
+    def test_a_passage_ends_once_1200_characters_are_buffered(self):
+        lines = ["a" * 499, "b" * 499, "c" * 499, "d" * 10]
+        # 500 + 500 + 500 >= 1200 flushes after the third line.
+        self.assertEqual(server.chunk_text("\n".join(lines)), [
+            (1, 3, "\n".join(lines[:3])), (4, 4, "d" * 10)])
+
+    def test_the_count_of_a_line_includes_its_line_break(self):
+        # 119 lines of 9 characters count 10 each: 1190 < 1200, the 120th reaches 1200.
+        text = "\n".join(["x" * 9] * 121)
+        passages = server.chunk_text(text)
+        self.assertEqual([(a, b) for a, b, _ in passages], [(1, 120), (121, 121)])
+
+    def test_a_line_longer_than_1200_characters_is_cut_in_pieces_on_one_line_number(self):
+        passages = server.chunk_text("z" * 2500)
+        self.assertEqual([(a, b, len(t)) for a, b, t in passages],
+                         [(1, 1, 1200), (1, 1, 1200), (1, 1, 100)])
+
+    def test_a_long_line_after_other_lines_starts_a_passage_with_the_buffered_lines(self):
+        text = "first\n" + "y" * 1300 + "\nlast"
+        passages = server.chunk_text(text)
+        self.assertEqual([(a, b) for a, b, _ in passages], [(1, 2), (2, 3)])
+        self.assertEqual(passages[0][2], "first\n" + "y" * 1200)
+        self.assertEqual(passages[1][2], "y" * 100 + "\nlast")
+
+    def test_a_line_of_exactly_1200_characters_is_not_cut(self):
+        self.assertEqual([(a, b, len(t)) for a, b, t in server.chunk_text("w" * 1200)],
+                         [(1, 1, 1200)])
+
+    def test_just_under_1200_characters_of_short_lines_then_a_1200_character_line(self):
+        # The buffer is under 1200 when the long line arrives and the line is not
+        # cut, so the passage holds both: the longest the algorithm produces.
+        short = ["s" * 99] * 11 + ["t" * 98]  # counts 100 each, then 99: 1199
+        text = "\n".join(short + ["L" * 1200])
+        passages = server.chunk_text(text)
+        self.assertEqual(len(passages), 1)
+        first, last, body = passages[0]
+        self.assertEqual((first, last), (1, 13))
+        self.assertGreater(len(body), 1300)
+        self.assertLessEqual(len(body), server.MAX_PASSAGE_TEXT_CHARS)
+        self.assertEqual(len(body), 11 * 99 + 98 + 1200 + 12)
+        self.assertEqual(server.MAX_PASSAGE_TEXT_CHARS, 2500)
+
+    def test_the_longest_possible_passage_fits_the_cap(self):
+        text = "\n".join(["q" * 1198, "r" * 1200])  # 1199 counted, then a whole line
+        (_, _, body), = server.chunk_text(text)
+        self.assertEqual(len(body), 2399)
+        self.assertLessEqual(len(body), server.MAX_PASSAGE_TEXT_CHARS)
+
+    def test_the_first_line_number_of_a_passage_may_be_a_blank_line(self):
+        # As in the app: the passage is trimmed, its range is not.
+        self.assertEqual(server.chunk_text("\n\nhello\nworld"), [(1, 4, "hello\nworld")])
+
+    def test_blank_stretches_make_no_passage_but_move_the_start(self):
+        text = "a" * 1250 + "\n\n\n\nb"
+        self.assertEqual(server.chunk_text(text), [(1, 1, "a" * 1200), (1, 5, "a" * 50 + "\n\n\n\nb")])
+
+    def test_a_crlf_ends_a_line_and_leaves_no_carriage_return(self):
+        passages = server.chunk_text("one\r\ntwo\r\n\r\nthree")
+        self.assertEqual(passages, [(1, 4, "one\ntwo\n\nthree")])
+
+    def test_whitespace_is_trimmed_as_the_app_does(self):
+        self.assertEqual(server.chunk_text("\u3000 hello \xa0\t"), [(1, 1, "hello")])
+        # U+001F is whitespace for Python's strip() and not for Foundation's.
+        self.assertEqual(server.chunk_text("\x1fhello"), [(1, 1, "\x1fhello")])
+
+    def test_text_without_content_has_no_passage(self):
+        self.assertEqual(server.chunk_text(""), [])
+        self.assertEqual(server.chunk_text(" \n\t\n  "), [])
+
+    def test_passages_are_counted_by_code_points(self):
+        # The app counts grapheme clusters; a combining accent is one character
+        # there and two here (a documented difference).
+        text = "e\u0301" * 700
+        self.assertEqual([len(t) for _, _, t in server.chunk_text(text)], [1200, 200])
+
+    def test_the_passage_limit_stops_a_huge_text_early(self):
+        with mock.patch.object(server, "MAX_PASSAGES", 3):
+            self.assertEqual(len(server.chunk_text("x" * 100_000)), 4)
+
+    def test_clean_passage(self):
+        ls, ps = chr(0x2028), chr(0x2029)
+        self.assertEqual(server.clean_passage(f"a{ls}b{ps}c"), "a\nb\nc")
+        self.assertEqual(server.clean_passage("a\x1b[2Jb\x7fc\td\ntab"), "a[2Jbc\td\ntab")
+        self.assertEqual(server.clean_passage("\x00\x1b \n"), "")
+        self.assertEqual(server.clean_passage("keep" + chr(0x200b) + " this"), "keep" + chr(0x200b) + " this")
+
+    def test_clean_passage_turns_cr_vt_ff_and_nel_into_one_space(self):
+        self.assertEqual(server.clean_passage("one\rtwo\x0bthree\x0cfour\x85five"), "one two three four five")
+        self.assertEqual(server.clean_passage("a\r\nb"), "a \nb")  # tab and newline are not touched
+        self.assertEqual(server.clean_passage("a\tb\nc"), "a\tb\nc")
+        self.assertEqual(server.clean_passage("x\r\x0b\x0c\x85y"), "x    y")
+        self.assertEqual(server.clean_passage("\r\x0bhello\x0c\x85"), "hello")
+        # the other controls are still removed, not turned into spaces
+        self.assertEqual(server.clean_passage("a\x01b\x1bc\x7fd\x9fe"), "abcde")
+
+
+class FilesPathTests(unittest.TestCase):
+    def test_valid_paths_become_their_components(self):
+        for value, parts in (("a", ["a"]), ("a/b.txt", ["a", "b.txt"]), ("a b/\xe9.md", ["a b", "\xe9.md"]),
+                             ("...", ["..."]), (".hidden/x", [".hidden", "x"]), ("a" * 1024, ["a" * 1024])):
+            self.assertEqual(server.check_relative_path(value), parts)
+
+    def test_invalid_paths(self):
+        invalid = ["", "/", "/etc/passwd", "a//b", "a/", "/a", ".", "..", "a/./b", "a/../b",
+                   "../a", "a/..", "a\x00b", "a\nb", "a\tb", "a\x1fb", "a\x7fb", "\x00",
+                   "a" * 1025, "a/\ud800", 5, None, ["a"], {"a": 1}, True, 1.5]
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(ToolError) as caught:
+                    server.check_relative_path(value)
+                self.assertEqual((caught.exception.status, caught.exception.code), (400, "invalid_path"))
+
+    def test_c1_controls_are_not_refused_in_a_path(self):
+        self.assertEqual(server.check_relative_path("a\x85b"), ["a\x85b"])
+
+    def test_folder_ids(self):
+        self.assertEqual(server.check_folder_id(FOLDER), FOLDER)
+        for value in ("", FOLDER.upper(), FOLDER[:-1], FOLDER + "0", FOLDER.replace("-", ""),
+                      "../" + FOLDER, FOLDER + "/", " " + FOLDER, "zzzzzzzz-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                      FOLDER + "\n", None, 5, [FOLDER]):
+            with self.subTest(value=value):
+                with self.assertRaises(ToolError) as caught:
+                    server.check_folder_id(value)
+                self.assertEqual((caught.exception.status, caught.exception.code), (400, "invalid_folder"))
+
+
+class FilesListTests(FilesTestCase):
+    def test_entries_have_path_size_and_mtime_of_the_file(self):
+        path = self.write("a/b.txt", "hello")
+        os.utime(path, (1_700_000_000, 1_700_000_123.5))
+        self.assertEqual(self.listing(), {
+            "entries": [{"path": "a/b.txt", "size": 5, "mtime": 1_700_000_123.5}],
+            "next_cursor": None, "unreadable": 0})
+
+    def test_an_empty_folder_lists_nothing(self):
+        self.assertEqual(self.listing(), {"entries": [], "next_cursor": None, "unreadable": 0})
+
+    def test_the_walk_is_depth_first_by_name_with_files_and_directories_interleaved(self):
+        for name in ("a.txt", "a/z.txt", "a/b/c.txt", "a-b.txt", "B.txt", "b/x.txt", "a/a.txt",
+                     "\xe9.txt", "z.txt", "a b.txt", "a/b.txt"):
+            self.write(name)
+        # The directory "a" comes before "a b.txt", "a-b.txt" and "a.txt" (its name is the
+        # shorter prefix), and "b" before "b.txt" inside it.
+        self.assertEqual(self.paths(), [
+            "B.txt", "a/a.txt", "a/b/c.txt", "a/b.txt", "a/z.txt", "a b.txt", "a-b.txt", "a.txt",
+            "b/x.txt", "z.txt", "\u00e9.txt"])
+        self.assertEqual(self.paths(), sorted_walk(self.paths()))
+
+    def test_hidden_files_and_directories_are_skipped(self):
+        self.write(".hidden.txt")
+        self.write(".secret/inside.txt")
+        self.write("dir/.dotfile.md")
+        self.write("dir/shown.md")
+        self.assertEqual(self.paths(), ["dir/shown.md"])
+
+    def test_the_named_directories_are_not_entered(self):
+        for name in (".git", ".hg", ".svn", "node_modules", ".build", "DerivedData", "Pods", "build",
+                     "dist", ".venv", "venv", "__pycache__", ".tox", ".gradle", "target", ".next"):
+            self.write(f"{name}/inside.txt")
+            self.write(f"sub/{name}/inside.txt")
+        self.write("kept/inside.txt")
+        self.write("builder/inside.txt")
+        expected = ["builder/inside.txt", "kept/inside.txt"]
+        if not self.case_insensitive:  # "Build" and "build" are one name on APFS
+            self.write("Build/inside.txt")  # the names are case sensitive, as in the app
+            expected.insert(0, "Build/inside.txt")
+        self.assertEqual(self.paths(), expected)
+
+    def test_a_file_named_like_a_skipped_directory_is_listed(self):
+        self.write("build.txt")
+        self.write("dist", "x")  # a file: no extension, not README, skipped by that rule
+        self.assertEqual(self.paths(), ["build.txt"])
+
+    def test_files_without_an_extension_are_listed_only_when_named_readme(self):
+        names = ["Makefile", "LICENSE", "README", "Readme.first", "README.md",
+                 "notes.", "ReadMeNot", "a/readme", "a/other"]
+        expected = ["README", "README.md", "ReadMeNot", "Readme.first", "a/readme", "data.txt"]
+        if not self.case_insensitive:  # "readme" and "README" are one name on APFS
+            names.append("readme")
+            expected.append("readme")
+        for name in names:
+            self.write(name)
+        self.write("data.txt")
+        self.assertEqual(self.paths(), expected)
+
+    def test_the_depth_limit(self):
+        parts = [f"d{i}" for i in range(1, 25)]  # d1 ... d24
+        self.write("/".join(parts + ["at24.txt"]))      # in the directory at level 24
+        self.write("/".join(parts + ["d25", "at25.txt"]))  # in a directory at level 25
+        self.write("/".join(parts[:23] + ["at23.txt"]))
+        self.assertEqual(self.paths(), sorted_walk(["/".join(parts + ["at24.txt"]),
+                                                    "/".join(parts[:23] + ["at23.txt"])]))
+        self.assertNotIn("at25.txt", " ".join(self.paths()))
+
+    def test_symbolic_links_are_neither_listed_nor_entered(self):
+        outside = os.path.join(self.base, "outside")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "secret.txt"), "w") as handle:
+            handle.write("secret")
+        self.write("real/file.txt")
+        self.write("plain.txt")
+        os.symlink(os.path.join(self.root, "plain.txt"), os.path.join(self.root, "link-to-file.txt"))
+        os.symlink("real", os.path.join(self.root, "link-to-dir"))
+        os.symlink(outside, os.path.join(self.root, "link-outside"))
+        os.symlink(os.path.join(outside, "secret.txt"), os.path.join(self.root, "link-secret.txt"))
+        os.symlink("/etc/passwd", os.path.join(self.root, "passwd.txt"))
+        os.symlink("nowhere", os.path.join(self.root, "dangling.txt"))
+        os.symlink("..", os.path.join(self.root, "real", "up"))
+        self.assertEqual(self.paths(), ["plain.txt", "real/file.txt"])
+
+    def test_special_files_are_not_listed(self):
+        self.write("ok.txt")
+        os.mkfifo(os.path.join(self.root, "pipe.txt"))
+        self.assertEqual(self.paths(), ["ok.txt"])
+
+    def test_a_directory_that_cannot_be_read_is_skipped(self):
+        self.write("a/x.txt")
+        self.write("b/y.txt")
+        with self.failing_listdir("a"):
+            self.assertEqual(self.paths(), ["b/y.txt"])
+
+    def test_names_that_are_not_valid_utf8_or_hold_control_characters_are_not_listed(self):
+        self.write("fine.txt")
+        self.write_raw_name(b"bad-\xff.txt")
+        try:
+            self.write("line\nbreak.txt")
+        except OSError:
+            pass
+        self.assertEqual(self.paths(), ["fine.txt"])
+
+    def test_paths_over_the_path_limit_are_not_listed(self):
+        parts = ["n" * 200] * 6
+        self.write("/".join(parts + ["x.txt"]))  # over 1200 characters: too long
+        self.write("/".join(parts[:4] + ["x.txt"]))
+        self.assertEqual(self.paths(), ["/".join(parts[:4] + ["x.txt"])])
+
+    # -- paging -----------------------------------------------------------
+
+    def make_tree(self):
+        names = ["a.txt", "a-b.txt", "a/b/c.txt", "a/b/d.txt", "a/b.txt", "a/z/z.txt", "b/x.txt",
+                 "b/y/1.txt", "b/y/2.txt", "B.txt", "c d/e f.txt", "c.txt", "\xe9/\xe9.txt",
+                 "m/a.txt", "m/a/a.txt", "m/a-a.txt", "m/a.b/c.txt", "z.txt"]
+        for name in names:
+            self.write(name)
+        return names
+
+    def test_pages_chain_through_next_cursor_without_gaps_or_repeats(self):
+        self.make_tree()
+        everything = self.paths()
+        self.assertEqual(len(everything), 18)
+        for limit in (1, 2, 3, 4, 5, 7, 17, 18, 19):
+            with self.subTest(limit=limit):
+                self.assertEqual(self.all_paths(limit), everything)
+
+    def test_next_cursor_is_the_last_entry_and_null_at_the_end(self):
+        self.make_tree()
+        everything = self.paths()
+        page = self.listing(limit=5)
+        self.assertEqual([e["path"] for e in page["entries"]], everything[:5])
+        self.assertEqual(page["next_cursor"], everything[4])
+        last = self.listing(limit=18)
+        self.assertEqual(len(last["entries"]), 18)
+        self.assertIsNone(last["next_cursor"])  # exactly full, nothing more
+        self.assertIsNone(self.listing(cursor=everything[-1])["next_cursor"])
+        self.assertEqual(self.listing(cursor=everything[-1])["entries"], [])
+
+    def test_a_cursor_resumes_after_each_entry_including_inside_nested_directories(self):
+        self.make_tree()
+        everything = self.paths()
+        for index, path in enumerate(everything):
+            with self.subTest(cursor=path):
+                self.assertEqual(self.paths(cursor=path), everything[index + 1:])
+
+    def test_a_cursor_that_no_longer_exists_resumes_at_its_place_in_the_order(self):
+        self.make_tree()
+        everything = self.paths()
+        for cursor in ("a/b/cc.txt", "a/b/c.txt0", "a0", "a/zz/x.txt", "a/b", "m/a", "zz/deep/file.txt",
+                       "A", "", "a-b.txt/inside"):
+            if cursor == "":
+                continue
+            expected = [p for p in everything if p.split("/") > cursor.split("/")]
+            with self.subTest(cursor=cursor):
+                self.assertEqual(self.paths(cursor=cursor), expected)
+
+    def test_a_cursor_naming_a_directory_resumes_inside_it(self):
+        self.make_tree()
+        everything = self.paths()
+        # "m/a" is a directory now; the entries inside it sort after the cursor.
+        expected = [p for p in everything if p.split("/") > ["m", "a"]]
+        self.assertEqual(self.paths(cursor="m/a"), expected)
+        self.assertIn("m/a/a.txt", expected)
+
+    def test_a_cursor_names_the_same_order_as_comparing_path_components(self):
+        self.make_tree()
+        everything = self.paths()
+        self.assertEqual(everything, sorted(everything, key=lambda p: p.split("/")))
+
+    def test_resuming_does_not_walk_the_directories_before_the_cursor(self):
+        for index in range(30):
+            self.write(f"d{index:02d}/one.txt")
+            self.write(f"d{index:02d}/sub/two.txt")
+        listed = []
+        real = os.listdir
+
+        def counting(target):
+            listed.append(target)
+            return real(target)
+
+        with mock.patch.object(server.os, "listdir", counting):
+            self.assertEqual(self.paths(cursor="d28/sub/two.txt"), ["d29/one.txt", "d29/sub/two.txt"])
+        # The folder, d28 (to find "sub"), d28/sub, then d29 and d29/sub.
+        self.assertLessEqual(len(listed), 6)
+
+    def test_one_page_costs_about_its_size_not_the_whole_tree(self):
+        for index in range(30):
+            self.write(f"d{index:02d}/one.txt")
+        opened = []
+        real = os.listdir
+
+        def counting(target):
+            opened.append(target)
+            return real(target)
+
+        with mock.patch.object(server.os, "listdir", counting):
+            self.assertEqual(len(self.paths(limit=2)), 2)
+        self.assertLessEqual(len(opened), 4)  # the folder, d00, d01 and d02 (the lookahead)
+
+    def test_the_listing_does_not_leak_descriptors(self):
+        self.make_tree()
+        self.paths()  # warm up: lazily opened descriptors (imports, caches) are not leaks
+        gc.collect()
+        before = open_descriptors()
+        for _ in range(5):
+            self.paths(limit=3)
+            self.paths()
+            self.paths(cursor="a/b/c.txt", limit=1)
+        gc.collect()
+        # A leak would add at least one descriptor per call shape and round (5); a
+        # slack of 2 absorbs what the platform's own descriptor listing and
+        # garbage collection do (macOS with Python 3.9 was off by one once).
+        self.assertLessEqual(open_descriptors(), before + 2)
+
+    # -- arguments --------------------------------------------------------
+
+    def test_limit_arguments(self):
+        self.write("a.txt")
+        self.assertEqual(len(self.listing(limit=1)["entries"]), 1)
+        self.assertEqual(len(self.listing(limit=2000)["entries"]), 1)
+        for limit in (0, -1, 2001, 1.5, "10", True, [1]):
+            with self.subTest(limit=limit):
+                self.assertRefused(400, "invalid_argument", self.tools.list_files, FOLDER, limit=limit)
+
+    def test_the_default_limit_is_1000(self):
+        self.assertEqual(server.LIST_DEFAULT_LIMIT, 1000)
+        for index in range(1002):
+            self.write(f"f{index:04d}.txt", "")
+        page = self.listing()
+        self.assertEqual(len(page["entries"]), 1000)
+        self.assertEqual(page["next_cursor"], "f0999.txt")
+
+    def test_cursor_arguments(self):
+        self.write("a.txt")
+        for cursor in ("", "/a", "a//b", "../a", "a\x00", 5, ["a"], "a" * 9000, "a/", "a/./b"):
+            with self.subTest(cursor=cursor[:20] if isinstance(cursor, str) else cursor):
+                self.assertRefused(400, "invalid_path", self.tools.list_files, FOLDER, cursor=cursor)
+        self.assertEqual(self.paths(cursor=None), ["a.txt"])
+
+    def test_a_cursor_may_be_a_path_that_cannot_be_asked_for(self):
+        # The last entry a page examined, listed or not, so it may be long or hold controls.
+        self.write("a.txt")
+        for cursor in ("a" * 2000, "line\nbreak/x", "tab\there", "z" * 1025 + "/q"):
+            self.assertEqual(self.paths(cursor=cursor), [] if cursor > "a.txt" else ["a.txt"])
+
+    def test_folder_arguments(self):
+        self.assertRefused(400, "invalid_folder", self.tools.list_files, "not-an-id")
+        self.assertRefused(400, "invalid_folder", self.tools.list_files, None)
+        self.assertRefused(404, "not_found", self.tools.list_files, OTHER_FOLDER)
+
+    def test_a_folder_that_is_a_file_or_a_symbolic_link_is_not_mounted(self):
+        with open(os.path.join(self.base, OTHER_FOLDER), "w") as handle:
+            handle.write("x")
+        self.assertRefused(404, "not_found", self.tools.list_files, OTHER_FOLDER)
+        os.unlink(os.path.join(self.base, OTHER_FOLDER))
+        os.symlink(self.root, os.path.join(self.base, OTHER_FOLDER))
+        self.assertRefused(404, "not_found", self.tools.list_files, OTHER_FOLDER)
+        self.assertRefused(404, "not_found", self.tools.passages, OTHER_FOLDER, "a.txt")
+        self.assertEqual(self.tools.folders(), [FOLDER])
+
+    def test_folders_lists_the_ids_found_sorted(self):
+        os.mkdir(os.path.join(self.base, OTHER_FOLDER))
+        os.mkdir(os.path.join(self.base, "not-an-id"))
+        if not self.case_insensitive:  # on APFS this is the folder itself
+            os.mkdir(os.path.join(self.base, FOLDER.upper()))
+        with open(os.path.join(self.base, "11111111-1111-4111-8111-111111111111"), "w") as handle:
+            handle.write("a file")
+        self.assertEqual(self.tools.folders(), sorted([FOLDER, OTHER_FOLDER]))
+        self.assertEqual(server.FilesTools(root=os.path.join(self.base, "missing")).folders(), [])
+
+    def test_two_folders_are_separate(self):
+        os.mkdir(os.path.join(self.base, OTHER_FOLDER))
+        self.write("mine.txt")
+        self.write("theirs.txt", folder=os.path.join(self.base, OTHER_FOLDER))
+        self.assertEqual(self.paths(), ["mine.txt"])
+        self.assertEqual([e["path"] for e in self.tools.list_files(OTHER_FOLDER)["entries"]], ["theirs.txt"])
+
+
+def sorted_walk(paths):
+    """Paths in the order of the walk: by component list."""
+    return sorted(paths, key=lambda path: path.split("/"))
+
+
+class FilesTextTests(FilesTestCase):
+    def test_a_text_file_gives_passages_with_line_numbers_and_the_files_size_and_mtime(self):
+        path = self.write("notes.txt", "alpha\nbeta\ngamma\n")
+        os.utime(path, (1_700_000_000, 1_700_000_456.25))
+        self.assertEqual(self.passages("notes.txt"), {
+            "size": 17, "mtime": 1_700_000_456.25,
+            "passages": [{"page": None, "line_start": 1, "line_end": 4, "text": "alpha\nbeta\ngamma"}]})
+
+    def test_the_size_and_mtime_are_those_the_listing_gives(self):
+        self.write("d/notes.md", "# title\n")
+        entry = self.listing()["entries"][0]
+        answer = self.passages("d/notes.md")
+        self.assertEqual((answer["size"], answer["mtime"]), (entry["size"], entry["mtime"]))
+
+    def test_a_long_file_is_cut_into_passages_of_about_1200_characters(self):
+        self.write("long.txt", "\n".join(f"line {n:04d} " + "x" * 90 for n in range(100)))
+        passages = self.passages("long.txt")["passages"]
+        self.assertGreater(len(passages), 5)
+        self.assertEqual(passages[0]["line_start"], 1)
+        self.assertEqual(passages[-1]["line_end"], 100)
+        for before, after in zip(passages, passages[1:]):
+            self.assertEqual(after["line_start"], before["line_end"] + 1)
+        for passage in passages:
+            self.assertLess(len(passage["text"]), 1300)
+            self.assertIsNone(passage["page"])
+
+    def test_crlf_line_endings_keep_the_line_numbers_of_the_file(self):
+        self.write("windows.txt", b"first\r\nsecond\r\n" + b"x" * 1300 + b"\r\nlast\r\n")
+        passages = self.passages("windows.txt")["passages"]
+        self.assertEqual([(p["line_start"], p["line_end"]) for p in passages], [(1, 3), (3, 5)])
+        for passage in passages:
+            self.assertNotIn("\r", passage["text"])
+        self.assertTrue(passages[0]["text"].startswith("first\nsecond\n"))
+
+    def test_a_single_long_line_is_cut_into_pieces(self):
+        self.write("minified.js.txt", "a" * 3000)
+        passages = self.passages("minified.js.txt")["passages"]
+        self.assertEqual([(p["line_start"], p["line_end"], len(p["text"])) for p in passages],
+                         [(1, 1, 1200), (1, 1, 1200), (1, 1, 600)])
+
+    def test_just_under_1200_characters_of_short_lines_then_a_1200_character_line(self):
+        short = ["s" * 99] * 11 + ["t" * 98]
+        self.write("edge.txt", "\n".join(short + ["L" * 1200]))
+        passages = self.passages("edge.txt")["passages"]
+        self.assertEqual(len(passages), 1)
+        self.assertGreater(len(passages[0]["text"]), 1300)
+        self.assertLessEqual(len(passages[0]["text"]), server.MAX_PASSAGE_TEXT_CHARS)
+
+    def test_an_empty_file_or_one_of_blanks_is_empty(self):
+        self.write("empty.txt", b"")
+        self.write("blank.txt", "  \n\t\n\u3000\n")
+        for name in ("empty.txt", "blank.txt"):
+            self.assertRefused(422, "empty", self.tools.passages, FOLDER, name)
+
+    def test_invalid_utf8_is_unreadable(self):
+        self.write("latin1.txt", b"caf\xe9")
+        self.write("cut.txt", "caf\xe9".encode()[:-1])
+        for name in ("latin1.txt", "cut.txt"):
+            error = self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, name)
+            self.assertIn("UTF-8", error.message)
+
+    def test_a_nul_byte_is_unreadable(self):
+        self.write("binary.txt", b"text\x00more")
+        self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "binary.txt")
+
+    def test_utf16_is_not_utf8(self):
+        self.write("utf16.txt", "hello".encode("utf-16"))
+        self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "utf16.txt")
+
+    def test_text_is_cleaned_after_the_split(self):
+        self.write("odd.txt", "one\u2028two\x1b[0m\x07\n\x00".replace("\x00", "") + "\u2029tail\x7f")
+        (passage,) = self.passages("odd.txt")["passages"]
+        self.assertEqual(passage["text"], "one\ntwo[0m\n\ntail")
+        self.assertEqual((passage["line_start"], passage["line_end"]), (1, 2))
+
+    def test_a_passage_with_only_control_characters_is_dropped(self):
+        self.write("ctrl.txt", "\x1b\x07\x7f\n" + "a" * 1300 + "\nreal")
+        passages = self.passages("ctrl.txt")["passages"]
+        self.assertNotIn("", [p["text"] for p in passages])
+
+    def test_a_text_file_with_nothing_left_after_cleaning_is_empty(self):
+        self.write("onlyctrl.txt", "\x1b\x07\x7f")
+        self.assertRefused(422, "empty", self.tools.passages, FOLDER, "onlyctrl.txt")
+        self.write("ctrlblank.txt", "\x01 \x02\n\x1b")
+        self.assertRefused(422, "empty", self.tools.passages, FOLDER, "ctrlblank.txt")
+
+    def test_a_read_error_is_unreadable_not_a_crash(self):
+        self.write("io.txt", "text")
+        with mock.patch.object(server.os, "read", side_effect=OSError(errno.EIO, "input/output error")):
+            error = self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "io.txt")
+        self.assertEqual(error.message, "the file could not be read")
+
+    def test_a_failing_second_fstat_is_unreadable_and_closes_the_descriptor(self):
+        self.write("io.txt", "text")
+        real = os.fstat
+        calls = []
+
+        def fstat(descriptor):
+            calls.append(descriptor)
+            if len(calls) >= 3:  # the opens look at the file twice; this is the check after reading
+                raise OSError(errno.EIO, "input/output error")
+            return real(descriptor)
+
+        before = open_descriptors()
+        with mock.patch.object(server.os, "fstat", fstat):
+            self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "io.txt")
+        self.assertEqual(open_descriptors(), before)
+
+    def test_the_two_mebibyte_boundary(self):
+        limit = 2 * 1024 * 1024
+        self.assertEqual(server.MAX_TEXT_FILE_BYTES, limit)
+        line = b"x" * 1023 + b"\n"
+        self.write("exact.txt", line * (limit // len(line)))
+        self.assertEqual(os.path.getsize(os.path.join(self.root, "exact.txt")), limit)
+        answer = self.passages("exact.txt")
+        self.assertEqual(answer["size"], limit)
+        self.assertGreater(len(answer["passages"]), 1000)
+        self.write("over.txt", line * (limit // len(line)) + b"x")
+        error = self.assertRefused(422, "oversized", self.tools.passages, FOLDER, "over.txt")
+        self.assertNotIn("xxx", error.message)
+
+    def test_more_than_the_passage_limit_is_refused(self):
+        self.write("many.txt", "\n".join("x" * 1199 for _ in range(10)))
+        with mock.patch.object(server, "MAX_PASSAGES", 9):
+            self.assertRefused(422, "too_many_passages", self.tools.passages, FOLDER, "many.txt")
+        with mock.patch.object(server, "MAX_PASSAGES", 10):
+            self.assertEqual(len(self.passages("many.txt")["passages"]), 10)
+
+    def test_a_passage_over_the_cap_is_refused(self):
+        self.write("wide.txt", "\n".join(["a" * 1198, "b" * 1200]))
+        with mock.patch.object(server, "MAX_PASSAGE_TEXT_CHARS", 2398):
+            self.assertRefused(422, "oversized", self.tools.passages, FOLDER, "wide.txt")
+        with mock.patch.object(server, "MAX_PASSAGE_TEXT_CHARS", 2399):
+            self.assertEqual(len(self.passages("wide.txt")["passages"]), 1)
+
+    def test_the_kind_follows_the_extension_and_every_other_file_is_text(self):
+        for name in ("code.swift", "data.csv", "README", "weird.xyz", "UPPER.TXT"):
+            self.write(name, "some text")
+            self.assertEqual(self.passages(name)["passages"][0]["text"], "some text")
+        self.write("fake.pdf", "this is text, not a PDF")
+        self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "fake.pdf")
+
+    def test_a_file_that_grows_while_it_is_read_is_refused(self):
+        path = self.write("grow.txt", "before")
+        real = server.read_descriptor
+
+        def reading(descriptor, limit):
+            data = real(descriptor, limit)
+            with open(path, "ab") as handle:
+                handle.write(b" and after")
+            return data
+
+        with mock.patch.object(server, "read_descriptor", reading):
+            self.assertRefused(409, "changed_while_reading", self.tools.passages, FOLDER, "grow.txt")
+
+    def test_a_file_that_is_rewritten_or_touched_while_it_is_read_is_refused(self):
+        path = self.write("same.txt", "12345")
+        real = server.read_descriptor
+        for change in (lambda: self.write("same.txt", "abcde"),
+                       lambda: os.utime(path, (1_600_000_000, 1_600_000_000))):
+            os.utime(path, (1_500_000_000, 1_500_000_000))
+
+            def reading(descriptor, limit, change=change):
+                data = real(descriptor, limit)
+                change()
+                return data
+
+            with mock.patch.object(server, "read_descriptor", reading):
+                self.assertRefused(409, "changed_while_reading", self.tools.passages, FOLDER, "same.txt")
+
+    def test_a_file_that_is_shorter_than_its_size_is_refused(self):
+        self.write("short.txt", "twelve chars")
+        real = server.read_descriptor
+        with mock.patch.object(server, "read_descriptor", lambda d, limit: real(d, limit)[:5]):
+            self.assertRefused(409, "changed_while_reading", self.tools.passages, FOLDER, "short.txt")
+
+    def test_an_unchanged_file_is_not_refused(self):
+        self.write("calm.txt", "calm")
+        self.assertEqual(self.passages("calm.txt")["passages"][0]["text"], "calm")
+
+    def test_descriptors_are_closed(self):
+        self.write("a.txt", "text")
+        self.write("bad.txt", b"\xff")
+        before = open_descriptors()
+        for _ in range(5):
+            self.passages("a.txt")
+            for name in ("bad.txt", "missing.txt", ".", "a.txt/x"):
+                with self.assertRaises(ToolError):
+                    self.tools.passages(FOLDER, name)
+        self.assertEqual(open_descriptors(), before)
+
+    def test_error_messages_do_not_contain_the_contents(self):
+        self.write("secret.txt", b"password=hunter2\xff")
+        error = self.refused(self.tools.passages, FOLDER, "secret.txt")
+        self.assertNotIn("hunter2", error.message)
+
+    def test_messages_are_clean_and_short(self):
+        error = self.refused(self.tools.passages, FOLDER, "a\x1b[2J")
+        self.assertTrue(error.message.isprintable())
+        self.assertLessEqual(len(error.message), server.MAX_MESSAGE_CHARS)
+
+
+class FilesAccessTests(FilesTestCase):
+    def setUp(self):
+        super().setUp()
+        self.outside = os.path.join(self.base, "outside")
+        os.makedirs(self.outside)
+        with open(os.path.join(self.outside, "secret.txt"), "w") as handle:
+            handle.write("secret")
+        self.write("real/file.txt", "real")
+
+    def test_a_missing_file_or_directory_is_not_found(self):
+        for name in ("nope.txt", "real/nope.txt", "nope/file.txt"):
+            self.assertRefused(404, "not_found", self.tools.passages, FOLDER, name)
+
+    def test_a_directory_is_not_a_file(self):
+        self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, "real")
+
+    def test_a_symbolic_link_to_a_file_is_not_followed(self):
+        os.symlink(os.path.join(self.root, "real", "file.txt"), os.path.join(self.root, "link.txt"))
+        os.symlink("real/file.txt", os.path.join(self.root, "relative.txt"))
+        for name in ("link.txt", "relative.txt"):
+            self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, name)
+
+    def test_a_symbolic_link_outside_the_folder_is_not_followed(self):
+        os.symlink(os.path.join(self.outside, "secret.txt"), os.path.join(self.root, "out.txt"))
+        os.symlink("/etc/passwd", os.path.join(self.root, "passwd.txt"))
+        for name in ("out.txt", "passwd.txt"):
+            self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, name)
+
+    def test_a_symbolic_link_to_a_directory_in_the_middle_of_the_path_is_refused(self):
+        os.symlink("real", os.path.join(self.root, "alias"))
+        os.symlink(self.outside, os.path.join(self.root, "escape"))
+        os.symlink("..", os.path.join(self.root, "real", "up"))
+        for name in ("alias/file.txt", "escape/secret.txt", "real/up/real/file.txt"):
+            self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, name)
+
+    def test_a_dangling_symbolic_link_is_not_a_file(self):
+        os.symlink("nowhere", os.path.join(self.root, "dangling.txt"))
+        self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, "dangling.txt")
+
+    def test_a_pipe_is_not_read_and_does_not_block(self):
+        os.mkfifo(os.path.join(self.root, "pipe.txt"))
+        started = time.monotonic()
+        self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, "pipe.txt")
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_a_hard_link_is_read_like_any_file(self):
+        os.link(os.path.join(self.root, "real", "file.txt"), os.path.join(self.root, "hard.txt"))
+        self.assertEqual(self.passages("hard.txt")["passages"][0]["text"], "real")
+
+    def test_the_path_checks_run_before_the_disk_is_touched(self):
+        for name, code in (("", "invalid_path"), ("/etc/passwd", "invalid_path"),
+                           ("real//file.txt", "invalid_path"), ("real/../real/file.txt", "invalid_path"),
+                           ("./real/file.txt", "invalid_path"), ("real/file.txt/", "invalid_path"),
+                           ("real/fi\x00le.txt", "invalid_path"), ("real/fi\nle.txt", "invalid_path"),
+                           ("a" * 1025, "invalid_path")):
+            with self.subTest(name=name):
+                self.assertRefused(400, code, self.tools.passages, FOLDER, name)
+        self.assertRefused(400, "invalid_path", self.tools.passages, FOLDER, None)
+        self.assertRefused(400, "invalid_folder", self.tools.passages, "../" + FOLDER, "real/file.txt")
+        self.assertRefused(400, "invalid_folder", self.tools.passages, FOLDER.upper(), "real/file.txt")
+        self.assertRefused(400, "invalid_folder", self.tools.passages, None, "real/file.txt")
+
+    def test_a_name_of_the_maximum_length_for_a_file_name_is_not_found_not_an_error(self):
+        self.assertRefused(404, "not_found", self.tools.passages, FOLDER, "n" * 300)
+
+    def test_a_file_that_cannot_be_opened_is_unreadable(self):
+        os.chmod(os.path.join(self.root, "real", "file.txt"), 0)
+        if os.geteuid() == 0:
+            self.skipTest("root can open any file")
+        self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "real/file.txt")
+
+
+class FilesListBudgetTests(FilesTestCase):
+    """The size of a page and the work one page may do."""
+
+    def noisy_tree(self):
+        for name in (".h1", ".h2", "a/.h3", "a/noext", "a/x.txt", "b/.git/obj", "b/y.txt",
+                     "c/d/e/.f", "c/d/e/g.txt", "c/d/e/h.txt", "c/zz", "node_modules/m.js", "z.txt"):
+            self.write(name)
+        return ["a/x.txt", "b/y.txt", "c/d/e/g.txt", "c/d/e/h.txt", "z.txt"]
+
+    def chain(self, **arguments):
+        pages, cursor = [], None
+        while True:
+            page = self.listing(cursor=cursor, **arguments)
+            pages.append(page)
+            self.assertLess(len(pages), 200, "the pages do not end")
+            if page["next_cursor"] is None:
+                return pages
+            self.assertNotEqual(page["next_cursor"], cursor, "a page made no progress")
+            cursor = page["next_cursor"]
+
+    def test_a_page_ends_after_the_examined_entries_budget_and_resumes_from_the_last_one(self):
+        expected = self.noisy_tree()
+        # Names examined in order: .h1 .h2 a (.h3 noext x.txt) b ...
+        with mock.patch.object(server, "LIST_MAX_EXAMINED", 2):
+            first = self.listing()
+        self.assertEqual(first, {"entries": [], "next_cursor": ".h2", "unreadable": 0})  # a cursor that is no listed file
+        with mock.patch.object(server, "LIST_MAX_EXAMINED", 2):
+            second = self.listing(cursor=first["next_cursor"])
+        self.assertEqual(second["entries"], [])
+        self.assertEqual(second["next_cursor"], "a/.h3")  # inside a directory
+        self.assertEqual(self.paths(cursor="a/.h3"), expected)
+
+    def test_every_budget_reaches_every_file_once_in_order(self):
+        expected = self.noisy_tree()
+        for budget in list(range(1, 30)) + [1000]:
+            with self.subTest(budget=budget), mock.patch.object(server, "LIST_MAX_EXAMINED", budget):
+                found = [e["path"] for page in self.chain() for e in page["entries"]]
+                self.assertEqual(found, expected)
+
+    def test_pages_may_be_short_or_empty_with_a_cursor(self):
+        self.noisy_tree()
+        with mock.patch.object(server, "LIST_MAX_EXAMINED", 1):
+            pages = self.chain()
+        self.assertTrue(any(page["entries"] == [] and page["next_cursor"] for page in pages))
+        self.assertIsNone(pages[-1]["next_cursor"])
+        self.assertEqual(sum(len(page["entries"]) for page in pages), 5)
+
+    def test_a_budget_with_a_limit_and_a_cursor_inside_nested_directories(self):
+        expected = self.noisy_tree()
+        for budget, limit in ((2, 1), (3, 2), (4, 1), (5, 3), (50, 1)):
+            with self.subTest(budget=budget, limit=limit), \
+                    mock.patch.object(server, "LIST_MAX_EXAMINED", budget):
+                found = [e["path"] for page in self.chain(limit=limit) for e in page["entries"]]
+                self.assertEqual(found, expected)
+        # Resuming from every path the walk can examine, listed or not.
+        for cursor in (".h1", "a", "a/.h3", "a/noext", "b/.git", "b/.git/obj", "c", "c/d", "c/d/e",
+                       "c/d/e/.f", "c/zz", "node_modules", "node_modules/m.js", "zzz"):
+            with self.subTest(cursor=cursor), mock.patch.object(server, "LIST_MAX_EXAMINED", 2):
+                found = [e["path"] for page in self.chain_from(cursor) for e in page["entries"]]
+                self.assertEqual(found, [p for p in expected if p.split("/") > cursor.split("/")])
+
+    def chain_from(self, cursor):
+        pages = []
+        while True:
+            page = self.listing(cursor=cursor)
+            pages.append(page)
+            if page["next_cursor"] is None:
+                return pages
+            self.assertNotEqual(page["next_cursor"], cursor)
+            cursor = page["next_cursor"]
+
+    def test_the_cursors_resuming_costs_nothing_and_the_budget_is_per_request(self):
+        self.noisy_tree()
+        with mock.patch.object(server, "LIST_MAX_EXAMINED", 1):
+            # The directories on the way to the cursor are not part of the budget.
+            page = self.listing(cursor="c/d/e/.f")
+        self.assertEqual([e["path"] for e in page["entries"]], ["c/d/e/g.txt"])
+        self.assertEqual(page["next_cursor"], "c/d/e/g.txt")
+
+    def test_the_budget_also_ends_a_page_by_time(self):
+        expected = self.noisy_tree()
+        ticks = iter(range(10_000))
+        tools = server.FilesTools(root=self.base, clock=lambda: float(next(ticks)))
+        with mock.patch.object(server, "LIST_SECONDS", 3.5):
+            pages, cursor = [], None
+            while True:
+                page = tools.list_files(FOLDER, cursor=cursor)
+                pages.append(page)
+                if page["next_cursor"] is None:
+                    break
+                self.assertNotEqual(page["next_cursor"], cursor)
+                cursor = page["next_cursor"]
+        self.assertGreater(len(pages), 2)
+        self.assertEqual([e["path"] for page in pages for e in page["entries"]], expected)
+
+    def test_a_page_always_examines_one_new_name_even_when_the_time_is_up(self):
+        for index in range(30):
+            self.write(f"big/f{index:02d}.txt")
+        self.write("z.txt")
+        late = server.FilesTools(root=self.base, clock=iter(range(1_000, 10**6)).__next__)
+        with mock.patch.object(server, "LIST_SECONDS", -1.0):  # past the deadline from the start
+            cursor, seen = "big/f10.txt", []
+            while cursor is not None:
+                page = late.list_files(FOLDER, cursor=cursor)
+                self.assertNotEqual(page["next_cursor"], cursor, "a page made no progress")
+                seen += [e["path"] for e in page["entries"]]
+                cursor = page["next_cursor"]
+        self.assertEqual(seen, [f"big/f{i:02d}.txt" for i in range(11, 30)] + ["z.txt"])
+
+    def test_one_new_name_is_examined_per_page_at_least(self):
+        self.write("a.txt")
+        self.write("b.txt")
+        late = server.FilesTools(root=self.base, clock=lambda: 10**9)
+        with mock.patch.object(server, "LIST_SECONDS", -1.0):
+            page = late.list_files(FOLDER)
+            self.assertEqual(([e["path"] for e in page["entries"]], page["next_cursor"]), (["a.txt"], "a.txt"))
+            page = late.list_files(FOLDER, cursor="a.txt")
+            self.assertEqual(([e["path"] for e in page["entries"]], page["next_cursor"]), (["b.txt"], None))
+
+    def test_the_defaults(self):
+        self.assertEqual((server.LIST_MAX_EXAMINED, server.LIST_SECONDS, server.LIST_MAX_BYTES),
+                         (50_000, 15.0, 1024 * 1024))
+
+    def test_a_finished_walk_has_no_cursor_even_when_the_budget_is_exactly_used(self):
+        self.write("a.txt")
+        self.write("b.txt")
+        with mock.patch.object(server, "LIST_MAX_EXAMINED", 2):
+            page = self.listing()
+        self.assertEqual([e["path"] for e in page["entries"]], ["a.txt", "b.txt"])
+        self.assertIsNone(page["next_cursor"])
+        with mock.patch.object(server, "LIST_MAX_EXAMINED", 1):
+            page = self.listing()
+        self.assertEqual([e["path"] for e in page["entries"]], ["a.txt"])
+        self.assertEqual(page["next_cursor"], "a.txt")
+
+    def test_an_unexamined_name_that_is_not_utf8_does_not_end_a_page_with_a_bad_cursor(self):
+        self.write("a.txt")
+        self.write_raw_name(b"b-\xff.txt")
+        self.write("c.txt")
+        with mock.patch.object(server, "LIST_MAX_EXAMINED", 1):
+            found = [e["path"] for page in self.chain() for e in page["entries"]]
+        self.assertEqual(found, ["a.txt", "c.txt"])
+
+    # -- the size of a page -------------------------------------------------
+
+    def cjk_files(self, count):
+        directory = "/".join([chr(0x6f22) * 80] * 10)
+        for index in range(count):
+            self.write(f"{directory}/{index:03d}" + chr(0x5b57) * 70 + ".txt", "x")
+
+    def encoded_size(self, page):
+        return len(json.dumps(page).encode())
+
+    def test_a_page_of_long_non_ascii_paths_stays_under_the_size_limit(self):
+        self.cjk_files(260)  # about 5.4 KB each once escaped: some 1.4 MB in all
+        pages, cursor = [], None
+        while True:
+            page = self.listing(cursor=cursor)
+            pages.append(page)
+            if page["next_cursor"] is None:
+                break
+            cursor = page["next_cursor"]
+        self.assertGreater(len(pages), 1)
+        for page in pages:
+            # the entries stay under the limit; next_cursor (one more path, up to 12 KB escaped) is extra
+            self.assertLessEqual(self.encoded_size(page), server.LIST_MAX_BYTES + 16 * 1024)
+            self.assertLess(self.encoded_size(page), 2 * 1024 * 1024)
+        found = [e["path"] for page in pages for e in page["entries"]]
+        self.assertEqual(len(found), 260)
+        self.assertEqual(found, sorted(found, key=lambda p: p.split("/")))
+
+    def test_the_size_limit_in_a_small_form(self):
+        self.cjk_files(60)
+        with mock.patch.object(server, "LIST_MAX_BYTES", 20_000):
+            pages, cursor = [], None
+            while True:
+                page = self.listing(cursor=cursor)
+                pages.append(page)
+                self.assertLessEqual(len(page["entries"]), 3)
+                self.assertLessEqual(self.encoded_size(page), 20_000 + 6_000)  # plus the cursor
+                if page["next_cursor"] is None:
+                    break
+                self.assertEqual(page["next_cursor"], page["entries"][-1]["path"])
+                cursor = page["next_cursor"]
+        self.assertEqual(sum(len(page["entries"]) for page in pages), 60)
+
+    def test_one_entry_over_the_limit_is_still_listed(self):
+        self.cjk_files(2)
+        with mock.patch.object(server, "LIST_MAX_BYTES", 100):
+            page = self.listing()
+        self.assertEqual(len(page["entries"]), 1)
+        self.assertEqual(page["next_cursor"], page["entries"][0]["path"])
+
+
+class FilesUnreadableTests(FilesTestCase):
+    """What could not be read is said, not hidden."""
+
+    def test_directories_that_cannot_be_listed_are_counted_once_each(self):
+        for name in ("a/x.txt", "b/y.txt", "c/z.txt", "c/sub/w.txt"):
+            self.write(name)
+        with self.failing_listdir("a", "c"):
+            page = self.listing()
+        self.assertEqual([e["path"] for e in page["entries"]], ["b/y.txt"])
+        self.assertEqual(page["unreadable"], 2)
+        self.assertIsNone(page["next_cursor"])
+
+    def test_another_error_counts_as_well(self):
+        self.write("a/x.txt")
+        self.write("b/y.txt")
+        with self.failing_listdir("a", error=OSError(errno.EIO, "input/output error")):
+            page = self.listing()
+        self.assertEqual((page["unreadable"], [e["path"] for e in page["entries"]]), (1, ["b/y.txt"]))
+
+    def test_a_directory_that_cannot_be_opened_is_counted(self):
+        self.write("a/x.txt")
+        self.write("b/y.txt")
+        real = os.open
+
+        def opening(name, *arguments, **keywords):
+            if name == "a" and "dir_fd" in keywords:
+                raise PermissionError(errno.EACCES, "denied")
+            return real(name, *arguments, **keywords)
+
+        with mock.patch.object(server.os, "open", opening):
+            page = self.listing()
+        self.assertEqual((page["unreadable"], [e["path"] for e in page["entries"]]), (1, ["b/y.txt"]))
+
+    def test_nothing_unreadable_is_zero(self):
+        self.write("a/x.txt")
+        self.assertEqual(self.listing()["unreadable"], 0)
+
+    def test_the_pages_counts_add_up_to_the_total_without_counting_a_directory_twice(self):
+        for name in ("a/x.txt", "b/y.txt", "c/z.txt", "d/w.txt"):
+            self.write(name)
+        with self.failing_listdir("a", "c"):
+            first = self.listing(limit=1)
+            second = self.listing(cursor=first["next_cursor"], limit=1)
+        # The first page walked a (unreadable) and b, then looked ahead into c and d.
+        # c is walked again by the second page and counted there only.
+        self.assertEqual((first["entries"][0]["path"], first["unreadable"]), ("b/y.txt", 1))
+        self.assertEqual((second["entries"][0]["path"], second["unreadable"]), ("d/w.txt", 1))
+        self.assertIsNone(second["next_cursor"])
+
+    def test_a_folder_whose_top_level_cannot_be_listed_is_403(self):
+        self.write("a/x.txt")
+        with self.failing_listdir(""):
+            error = self.assertRefused(403, "folder_unreadable", self.tools.list_files, FOLDER)
+        self.assertEqual(error.message, "the folder cannot be read")
+        with self.failing_listdir("", error=PermissionError(errno.EPERM, "not permitted")):
+            self.assertRefused(403, "folder_unreadable", self.tools.list_files, FOLDER)
+
+    def test_a_folder_that_cannot_be_opened_is_403_and_a_missing_one_is_404(self):
+        real = os.open
+
+        def opening(name, *arguments, **keywords):
+            if name.endswith(FOLDER):
+                raise PermissionError(errno.EACCES, "denied")
+            return real(name, *arguments, **keywords)
+
+        with mock.patch.object(server.os, "open", opening):
+            self.assertRefused(403, "folder_unreadable", self.tools.list_files, FOLDER)
+            self.assertRefused(403, "folder_unreadable", self.tools.passages, FOLDER, "a.txt")
+        self.assertRefused(404, "not_found", self.tools.list_files, OTHER_FOLDER)
+
+    def test_another_error_listing_the_top_level_is_counted_not_403(self):
+        self.write("a.txt")
+        with self.failing_listdir("", error=OSError(errno.EIO, "input/output error")):
+            page = self.listing()
+        self.assertEqual((page["entries"], page["unreadable"]), ([], 1))
+
+
+class FilesOpenTests(FilesTestCase):
+    def test_a_file_swapped_for_another_between_the_check_and_the_open_is_refused(self):
+        path = self.write("swap.txt", "old")
+        real = os.open
+
+        def opening(name, flags, *arguments, **keywords):
+            if name == "swap.txt":
+                # The new file exists before the old one goes, so the inode differs.
+                replacement = path + ".new"
+                with open(replacement, "w") as handle:
+                    handle.write("new")
+                os.rename(replacement, path)
+            return real(name, flags, *arguments, **keywords)
+
+        before = open_descriptors()
+        with mock.patch.object(server.os, "open", opening):
+            self.assertRefused(409, "changed_while_reading", self.tools.passages, FOLDER, "swap.txt")
+        self.assertEqual(open_descriptors(), before)
+
+    def test_a_directory_swapped_for_a_link_on_the_way_is_refused(self):
+        self.write("d/file.txt", "inside")
+        os.makedirs(os.path.join(self.base, "elsewhere"))
+        real = os.open
+
+        def opening(name, flags, *arguments, **keywords):
+            if name == "d":
+                os.rename(os.path.join(self.root, "d"), os.path.join(self.base, "moved"))
+                os.symlink(os.path.join(self.base, "elsewhere"), os.path.join(self.root, "d"))
+            return real(name, flags, *arguments, **keywords)
+
+        with mock.patch.object(server.os, "open", opening):
+            self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, "d/file.txt")
+
+    def test_a_pipe_or_a_device_is_looked_at_before_it_is_opened(self):
+        os.mkfifo(os.path.join(self.root, "pipe.txt"))
+        try:
+            os.mknod(os.path.join(self.root, "null.txt"), 0o600 | stat.S_IFCHR,
+                     os.makedev(1, 3))
+        except OSError:
+            device = False
+        else:
+            device = True
+        real = os.open
+        opened = []
+
+        def opening(name, *arguments, **keywords):
+            opened.append(name)
+            return real(name, *arguments, **keywords)
+
+        with mock.patch.object(server.os, "open", opening):
+            self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, "pipe.txt")
+            if device:
+                self.assertRefused(422, "not_a_file", self.tools.passages, FOLDER, "null.txt")
+        self.assertNotIn("pipe.txt", opened)
+        self.assertNotIn("null.txt", opened)
+
+    def test_a_missing_name_is_not_found_before_any_open(self):
+        self.assertRefused(404, "not_found", self.tools.passages, FOLDER, "nothing/here.txt")
+        self.write("d/x.txt")
+        self.assertRefused(404, "not_found", self.tools.passages, FOLDER, "d/nothing.txt")
+
+
+class FilesPdfSlotTests(FilesTestCase):
+    """In the files profile the PDF slot is taken before the file is read."""
+
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(server, "PdfReader", object())  # no pypdf needed to get as far
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.write("doc.pdf", b"%PDF-1.4 not really")
+
+    def test_the_wait_is_the_pdf_timeout_plus_ten_seconds_and_the_web_wait_is_unchanged(self):
+        self.assertEqual(server.FILE_PDF_TIMEOUT + server.FILE_PDF_SLOT_EXTRA, 70.0)
+        self.assertEqual(server.PDF_BUSY_WAIT, 20.0)
+
+    def test_a_busy_slot_is_pdf_busy_and_the_file_is_not_read(self):
+        self.assertTrue(server._PDF_SLOT.acquire(timeout=1))
+        try:
+            with mock.patch.object(server, "FILE_PDF_TIMEOUT", 0.2), \
+                    mock.patch.object(server, "FILE_PDF_SLOT_EXTRA", 0.1), \
+                    mock.patch.object(server, "read_descriptor",
+                                      side_effect=AssertionError("read the file")):
+                started = time.monotonic()
+                self.assertRefused(503, "pdf_busy", self.tools.passages, FOLDER, "doc.pdf")
+                self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        finally:
+            server._PDF_SLOT.release()
+
+    def test_the_wait_ends_when_the_slot_is_freed(self):
+        self.assertTrue(server._PDF_SLOT.acquire(timeout=1))
+        threading.Timer(0.3, server._PDF_SLOT.release).start()
+        held_during_read = []
+        real = server.read_descriptor
+
+        def reading(descriptor, limit):
+            held_during_read.append(not server._PDF_SLOT.acquire(blocking=False))
+            return real(descriptor, limit)
+
+        with mock.patch.object(server, "read_descriptor", reading):
+            error = self.refused(self.tools.passages, FOLDER, "doc.pdf")
+        self.assertEqual(held_during_read, [True])  # the slot was already held when the file was read
+        self.assertNotEqual(error.code, "pdf_busy")
+
+    def test_the_slot_is_released_after_every_outcome(self):
+        self.write("big.pdf", b"x" * 100)
+        with mock.patch.object(server, "MAX_FILE_PDF_BYTES", 10):
+            self.assertRefused(422, "oversized", self.tools.passages, FOLDER, "big.pdf")
+        self.assertTrue(server._PDF_SLOT.acquire(blocking=False))
+        server._PDF_SLOT.release()
+        with mock.patch.object(server, "read_pdf_pages_bounded", side_effect=ToolError("x", "unreadable")):
+            self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "doc.pdf")
+        self.assertTrue(server._PDF_SLOT.acquire(blocking=False))
+        server._PDF_SLOT.release()
+        with mock.patch.object(server.os, "read", side_effect=OSError(errno.EIO, "io")):
+            self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "doc.pdf")
+        self.assertTrue(server._PDF_SLOT.acquire(blocking=False))
+        server._PDF_SLOT.release()
+
+    def test_the_bounded_reader_does_not_take_the_slot_again_when_it_is_held(self):
+        self.assertTrue(server._PDF_SLOT.acquire(timeout=1))
+        try:
+            result = server.read_pdf_pages_bounded(b"x", timeout=10, reader=good_pages_reader,
+                                                   slot_held=True)
+            self.assertEqual(result["pages"], 3)
+            self.assertFalse(server._PDF_SLOT.acquire(blocking=False))  # still held by us
+        finally:
+            server._PDF_SLOT.release()
+
+    def test_a_non_pdf_never_takes_the_slot(self):
+        self.write("a.txt", "text")
+        self.assertTrue(server._PDF_SLOT.acquire(timeout=1))
+        try:
+            self.assertEqual(self.passages("a.txt")["passages"][0]["text"], "text")
+        finally:
+            server._PDF_SLOT.release()
+
+
+@unittest.skipIf(server.PdfReader is None or not hasattr(server.pypdf, "overwrite_configuration"),
+                 "needs pypdf 6.20")
+class FilesPdfTests(FilesTestCase):
+    def test_every_page_with_text_is_read_with_its_real_page_number(self):
+        self.write("doc.pdf", make_pdf(["first page text", "", "third page text"]))
+        answer = self.passages("doc.pdf")
+        self.assertEqual([(p["page"], p["line_start"], p["line_end"]) for p in answer["passages"]],
+                         [(1, None, None), (3, None, None)])
+        self.assertEqual([p["text"] for p in answer["passages"]], ["first page text", "third page text"])
+        self.assertEqual(answer["size"], os.path.getsize(os.path.join(self.root, "doc.pdf")))
+
+    def test_the_extension_is_decided_in_lower_case(self):
+        self.write("UPPER.PDF", make_pdf(["upper case name"]))
+        self.assertEqual(self.passages("UPPER.PDF")["passages"][0]["page"], 1)
+
+    def test_a_page_with_a_lot_of_text_gives_several_passages_on_one_page(self):
+        self.write("wide.pdf", make_pdf(["word " * 100]))  # one line of about 500 characters
+        self.assertEqual(len(self.passages("wide.pdf")["passages"]), 1)
+        self.write("wider.pdf", make_pdf(["w" * 1000]))
+        self.assertEqual([p["page"] for p in self.passages("wider.pdf")["passages"]], [1])
+
+    def test_control_characters_in_a_pages_text_are_removed(self):
+        self.write("ctl.pdf", make_pdf(["a\x01b\x02c"], special={1: "\x1b", 2: "\u2028"}))
+        (passage,) = self.passages("ctl.pdf")["passages"]
+        self.assertTrue(passage["text"].startswith("a"))
+        self.assertNotIn("\x1b", passage["text"])
+        self.assertNotIn("\u2028", passage["text"])
+
+    def test_a_pdf_without_any_text_is_empty(self):
+        self.write("blank.pdf", make_pdf(["", ""]))
+        self.assertRefused(422, "empty", self.tools.passages, FOLDER, "blank.pdf")
+
+    def test_an_encrypted_pdf_is_unreadable(self):
+        self.write("locked.pdf", make_pdf(["secret"], encrypt=True))
+        error = self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "locked.pdf")
+        self.assertIn("encrypted", error.message)
+
+    def test_a_damaged_pdf_is_unreadable(self):
+        self.write("junk.pdf", b"%PDF-1.4\nthis is not a pdf at all")
+        self.write("random.pdf", os.urandom(2000))
+        for name in ("junk.pdf", "random.pdf"):
+            self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, name)
+
+    def test_a_pdf_bomb_stays_inside_the_child_limits(self):
+        self.write("bomb.pdf", flate_bomb_pdf(100))  # 100 MB of zeros, some 100 KB of PDF
+        started = time.monotonic()
+        error = self.refused(self.tools.passages, FOLDER, "bomb.pdf")
+        self.assertIn(error.code, ("unreadable", "empty"))
+        self.assertLess(time.monotonic() - started, server.FILE_PDF_TIMEOUT + 6)
+        # The slot is free and the next PDF is read.
+        self.write("after.pdf", make_pdf(["still working"]))
+        self.assertEqual(self.passages("after.pdf")["passages"][0]["text"], "still working")
+
+    def test_a_pdf_over_the_size_limit_is_oversized_without_being_read(self):
+        data = make_pdf(["text"])
+        self.write("big.pdf", data)
+        with mock.patch.object(server, "MAX_FILE_PDF_BYTES", len(data) - 1):
+            self.assertRefused(422, "oversized", self.tools.passages, FOLDER, "big.pdf")
+        with mock.patch.object(server, "MAX_FILE_PDF_BYTES", len(data)):
+            self.assertEqual(len(self.passages("big.pdf")["passages"]), 1)
+
+    def test_only_the_first_500_pages_are_read(self):
+        self.assertEqual(server.MAX_FILE_PDF_PAGES, 500)
+        self.write("book.pdf", make_pdf([f"page number {n}" for n in range(1, 503)]))
+        passages = self.passages("book.pdf")["passages"]
+        self.assertEqual([p["page"] for p in passages], list(range(1, 501)))
+        self.assertEqual(passages[-1]["text"], "page number 500")
+
+    def test_a_pdf_with_too_many_passages_is_refused(self):
+        self.write("pages.pdf", make_pdf(["one", "two", "three"]))
+        with mock.patch.object(server, "MAX_PASSAGES", 2):
+            self.assertRefused(422, "too_many_passages", self.tools.passages, FOLDER, "pages.pdf")
+
+    def test_a_pdf_that_changes_while_it_is_read_is_refused(self):
+        path = self.write("moving.pdf", make_pdf(["text"]))
+        real = server.read_descriptor
+
+        def reading(descriptor, limit):
+            data = real(descriptor, limit)
+            with open(path, "ab") as handle:
+                handle.write(b"\n%%trailing")
+            return data
+
+        with mock.patch.object(server, "read_descriptor", reading):
+            self.assertRefused(409, "changed_while_reading", self.tools.passages, FOLDER, "moving.pdf")
+
+    def test_without_pypdf_a_pdf_is_unreadable(self):
+        self.write("doc.pdf", make_pdf(["text"]))
+        with mock.patch.object(server, "PdfReader", None):
+            self.assertRefused(422, "unreadable", self.tools.passages, FOLDER, "doc.pdf")
+
+    def test_the_web_reader_still_returns_what_it_did(self):
+        result = server.read_pdf_bounded(make_pdf(["alpha", "beta"]))
+        self.assertEqual(result["text"], "alpha\n\nbeta")
+        self.assertEqual((result["pages"], result["pages_read"]), (2, 2))
+
+
+class FilesPdfChildTests(unittest.TestCase):
+    """The child-process side of reading a PDF page by page, with stand-in
+    readers: needs no pypdf."""
+
+    def test_a_reader_that_takes_too_long_is_unreadable(self):
+        started = time.monotonic()
+        with self.assertRaises(ToolError) as caught:
+            server.read_pdf_pages_bounded(b"x", timeout=1, reader=stuck_pdf_reader)
+        self.assertEqual((caught.exception.code, caught.exception.status), ("unreadable", 422))
+        self.assertLess(time.monotonic() - started, 8)
+
+    def test_the_default_limit_is_60_seconds(self):
+        self.assertEqual(server.FILE_PDF_TIMEOUT, 60.0)
+        self.assertEqual(server.PDF_TIMEOUT, 15.0)  # the web endpoints keep their 15 s
+
+    def test_a_reader_that_crashes_dies_or_answers_wrongly_is_unreadable(self):
+        for reader in (crashing_pdf_reader, dying_pdf_reader, mistyped_pages_reader, refusing_pdf_reader):
+            with self.assertRaises(ToolError, msg=reader.__name__) as caught:
+                server.read_pdf_pages_bounded(b"x", timeout=10, reader=reader)
+            self.assertEqual((caught.exception.code, caught.exception.status), ("unreadable", 422))
+
+    def test_encryption_and_too_much_text_have_their_own_messages(self):
+        with self.assertRaises(ToolError) as caught:
+            server.read_pdf_pages_bounded(b"x", timeout=10, reader=encrypted_pdf_reader)
+        self.assertEqual(caught.exception.code, "unreadable")
+        self.assertIn("encrypted", caught.exception.message)
+        with self.assertRaises(ToolError) as caught:
+            server.read_pdf_pages_bounded(b"x", timeout=10, reader=oversized_pdf_reader)
+        self.assertEqual(caught.exception.code, "oversized")
+
+    def test_a_good_answer_is_returned_as_pairs(self):
+        self.assertEqual(server.read_pdf_pages_bounded(b"x", timeout=10, reader=good_pages_reader), {
+            "pages": 3, "pages_read": 3, "pages_failed": 1, "texts": [(1, "a"), (3, "b")]})
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "macOS cannot set RLIMIT_AS")
+    def test_the_child_has_the_memory_limit(self):
+        message = server._child_message(server._pdf_in_child, (address_space_pdf_reader, b"x"), 10, 10_000)
+        self.assertIn(str(server.PDF_MEMORY_LIMIT).encode(), message)
+
+    def test_a_busy_slot_answers_503(self):
+        self.assertTrue(server._PDF_SLOT.acquire(timeout=1))
+        try:
+            with self.assertRaises(ToolError) as caught:
+                server.read_pdf_pages_bounded(b"x", timeout=1, reader=good_pages_reader, busy_wait=0.1)
+        finally:
+            server._PDF_SLOT.release()
+        self.assertEqual((caught.exception.code, caught.exception.status), ("pdf_busy", 503))
+
+    def test_the_slot_is_shared_with_the_web_reader_and_released_after_an_error(self):
+        with self.assertRaises(ToolError):
+            server.read_pdf_pages_bounded(b"x", timeout=5, reader=dying_pdf_reader)
+        self.assertTrue(server._PDF_SLOT.acquire(timeout=1))
+        server._PDF_SLOT.release()
+
+    def test_read_pdf_pages_needs_pypdf(self):
+        with mock.patch.object(server, "PdfReader", None):
+            with self.assertRaises(server.PdfRefused):
+                server.read_pdf_pages(b"x")
+
+
+@unittest.skipIf(server.PdfReader is None or not hasattr(server.pypdf, "overwrite_configuration"),
+                 "needs pypdf 6.20")
+class ReadPdfPagesTests(unittest.TestCase):
+    def test_pages_with_text_keep_their_numbers_and_the_rest_are_left_out(self):
+        result = server.read_pdf_pages(make_pdf(["one", "", "three", "  "]))
+        self.assertEqual(result["texts"], [[1, "one"], [3, "three"]])
+        self.assertEqual((result["pages"], result["pages_read"], result["pages_failed"]), (4, 4, 0))
+
+    def test_encrypted_is_refused(self):
+        with self.assertRaises(server.PdfRefused) as caught:
+            server.read_pdf_pages(make_pdf(["x"], encrypt=True))
+        self.assertEqual(caught.exception.code, "pdf_encrypted")
+
+    def test_the_total_text_is_capped(self):
+        with mock.patch.object(server, "MAX_FILE_PDF_CHARS", 10):
+            with self.assertRaises(server.PdfRefused) as caught:
+                server.read_pdf_pages(make_pdf(["0123456", "0123456"]))
+        self.assertEqual(caught.exception.code, "oversized")
+
+    def test_the_page_limit(self):
+        with mock.patch.object(server, "MAX_FILE_PDF_PAGES", 2):
+            result = server.read_pdf_pages(make_pdf(["a", "b", "c"]))
+        self.assertEqual((result["pages"], result["pages_read"]), (3, 2))
+        self.assertEqual(result["texts"], [[1, "a"], [2, "b"]])
+
+    def test_a_page_that_fails_costs_only_itself(self):
+        class Page:
+            def __init__(self, text):
+                self.text = text
+
+            def extract_text(self):
+                if self.text is None:
+                    raise ValueError("broken")
+                return self.text
+
+        class Reader:
+            is_encrypted = False
+            pages = [Page("a"), Page(None), Page("c")]
+
+            def __init__(self, *arguments, **keywords):
+                pass
+
+        with mock.patch.object(server, "PdfReader", Reader):
+            result = server.read_pdf_pages(b"x")
+        self.assertEqual(result["texts"], [[1, "a"], [3, "c"]])
+        self.assertEqual(result["pages_failed"], 1)
+
+    def test_read_pdf_is_unchanged_for_the_web(self):
+        result = server.read_pdf(make_pdf(["alpha", "beta"], title="Title"))
+        self.assertEqual((result["title"], result["text"], result["pages_read"]), ("Title", "alpha\n\nbeta", 2))
+
 
 
 if __name__ == "__main__":

@@ -2,13 +2,14 @@
 import Foundation
 
 /// Checks, from outside the VM, that the sandbox that answered is protected
-/// the way `Sandbox/` builds it: the firewall is loaded with the Mac's
-/// addresses blocked, and the web server runs as an unprivileged user with
-/// no capabilities. The signed `/health` answer already shows that the server
+/// the way `Sandbox/` builds it: for the web sandbox the firewall is loaded
+/// with the Mac's addresses blocked; for the files sandbox it allows nothing
+/// outbound at all and the folders are mounted read-only; and the server
+/// runs as an unprivileged user with no capabilities. The signed `/health` answer already shows that the server
 /// is this version's sandbox; these checks show that what surrounds it still
 /// holds. They run before the sandbox is used, and again on request.
 enum SandboxProtection {
-    static let tableName = "tuff_sandbox_web"
+    static let tableName = SandboxProfile.web.tableName
 
     /// Ranges the sandbox must never reach (the private4 set of
     /// `Sandbox/firewall-web.nft` holds more).
@@ -39,7 +40,12 @@ enum SandboxProtection {
     /// `blocked` is the list the sandbox was started with, already
     /// normalized (see `HostAddresses.normalized`).
     static func verify(tool: ContainerTool, container: String, blocked: [String],
-                       health: SandboxHealth) async throws {
+                       health: SandboxHealth, profile: SandboxProfile = .web,
+                       mounts: [SandboxFolderMount] = []) async throws {
+        if profile == .files {
+            try await verifyFiles(tool: tool, container: container, health: health, mounts: mounts)
+            return
+        }
         guard health.blockedAddresses == blocked.count else {
             throw SandboxError.protectionNotVerified(
                 "it blocks \(health.blockedAddresses) addresses, but \(blocked.count) were given")
@@ -64,12 +70,103 @@ enum SandboxProtection {
         }
     }
 
+    /// Prints, for each folder mounted under /files, whether it is read-only.
+    static let mountCheck = """
+    for line in open("/proc/mounts"):
+        fields = line.split()
+        if len(fields) >= 4 and fields[1].startswith("/files/"):
+            print(fields[1], "ro" if "ro" in fields[3].split(",") else "rw")
+    """
+
+    /// The files sandbox: the server reports exactly the folders given, its
+    /// firewall allows nothing outbound, every mount is read-only, and the
+    /// server runs without privileges.
+    private static func verifyFiles(tool: ContainerTool, container: String, health: SandboxHealth,
+                                    mounts: [SandboxFolderMount]) async throws {
+        guard health.blockedAddresses == 0 else {
+            throw SandboxError.protectionNotVerified("it reports blocked addresses, which a files sandbox has none of")
+        }
+        guard health.folders == mounts.map(\.id).sorted() else {
+            throw SandboxError.protectionNotVerified("it sees other folders than the ones it was given")
+        }
+        let name = SandboxProfile.files.tableName
+        let listing: SandboxProcessResult
+        let privileges: SandboxProcessResult
+        let mountList: SandboxProcessResult
+        do {
+            listing = try await tool.exec(container, ["nft", "list", "table", "inet", name])
+            privileges = try await tool.exec(container, ["python3", "-c", privilegeCheck])
+            mountList = try await tool.exec(container, ["python3", "-c", mountCheck])
+        } catch {
+            throw SandboxError.protectionNotVerified(
+                "the checks could not run (\(SandboxText.oneLine(error.localizedDescription)))")
+        }
+        guard listing.status == 0, !listing.timedOut else {
+            throw SandboxError.protectionNotVerified("the firewall is not loaded")
+        }
+        if let problem = filesFirewallProblem(listing.output) {
+            throw SandboxError.protectionNotVerified("the firewall \(problem)")
+        }
+        if let problem = privilegeProblem(privileges.output, status: privileges.status, profile: .files) {
+            throw SandboxError.protectionNotVerified(problem)
+        }
+        if let problem = mountProblem(mountList.output, status: mountList.status, mounts: mounts) {
+            throw SandboxError.protectionNotVerified(problem)
+        }
+    }
+
+    /// `nil` when `/proc/mounts` lists exactly the given folders, each
+    /// read-only.
+    static func mountProblem(_ output: String, status: Int32, mounts: [SandboxFolderMount]) -> String? {
+        guard status == 0 else { return "the folder mounts could not be read" }
+        let found = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        let wanted = mounts.map { "\($0.targetPath) ro" }
+        if let writable = found.first(where: { $0.hasSuffix(" rw") }) {
+            return "a folder is mounted writable (\(SandboxText.oneLine(writable, limit: 60)))"
+        }
+        guard Set(found) == Set(wanted), found.count == wanted.count else {
+            return "the mounted folders are not the ones it was given"
+        }
+        return nil
+    }
+
+    /// Reads `nft list table inet tuff_sandbox_files` and says what is wrong,
+    /// or nil when it has the shape `Sandbox/firewall-files.nft` gives it:
+    /// both hooks drop by default, and the only accepts are loopback, replies
+    /// to connections that exist, and the server's port from the gateway.
+    static func filesFirewallProblem(_ listing: String) -> String? {
+        let name = SandboxProfile.files.tableName
+        guard listing.contains("table inet \(name)") else { return "is not the sandbox's table" }
+        guard let output = block(named: "chain output", in: listing),
+              let input = block(named: "chain input", in: listing) else {
+            return "has no output or input rules"
+        }
+        let outputLines = lines(of: output)
+        let inputLines = lines(of: input)
+        guard outputLines.contains(where: { $0.contains("hook output") && $0.contains("policy drop") }) else {
+            return "does not drop outbound traffic by default"
+        }
+        guard inputLines.contains(where: { $0.contains("hook input") && $0.contains("policy drop") }) else {
+            return "does not drop inbound traffic by default"
+        }
+        if outputLines.contains(where: { $0.contains("jump ") || $0.contains("goto ") || $0.contains("queue") }) {
+            return "sends traffic to other rules or to a program"
+        }
+        for line in outputLines where line.contains("accept") {
+            let plain = line.replacingOccurrences(of: "meta nfproto ipv4 ", with: "")
+            if plain == "oifname \"lo\" accept" || plain == "ct state established,related accept" { continue }
+            return "lets traffic out (\(SandboxText.oneLine(line, limit: 80)))"
+        }
+        return inputProblem(inputLines)
+    }
+
     /// `nil` when the server runs as user 10001 with no capability set.
-    static func privilegeProblem(_ output: String, status: Int32) -> String? {
+    static func privilegeProblem(_ output: String, status: Int32, profile: SandboxProfile = .web) -> String? {
         let found = output.trimmingCharacters(in: .whitespacesAndNewlines)
         if status == 0, found == "10001 none" { return nil }
         let shown = found.isEmpty ? "nothing" : SandboxText.oneLine(found, limit: 80)
-        return "the web server does not run as the unprivileged user without capabilities (found: \(shown))"
+        return "the \(profile == .web ? "web" : "file") server does not run as the unprivileged user "
+            + "without capabilities (found: \(shown))"
     }
 
     /// Reads `nft list table inet tuff_sandbox_web` and says what is

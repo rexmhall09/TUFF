@@ -44,6 +44,9 @@ struct SearchSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section("Files") {
+                if model.isSandboxSupported || model.runFilesInSandbox {
+                    filesSandboxRows
+                }
                 FolderAccessPanel(model: model)
                 if !model.toolStore.folders.isEmpty {
                     Button("Remove All Folders and Delete Index…", role: .destructive) {
@@ -94,10 +97,46 @@ struct SearchSettingsView: View {
                     .appFont(.caption)
             }
         }
-        Text("The sandbox is a small virtual machine run by Apple's container tool. Web searches are sent from inside it, and the pages the model reads are fetched and turned into text inside it, so a harmful page or file never reaches TUFF directly. TUFF starts it when you turn this on or open the app, and stops it when it has been idle or when TUFF quits. If it is not ready, web search fails; it never falls back to a direct request. It does not apply to file search. Off by default; needs macOS 26 and Apple container.")
+        Text("The sandbox is a small virtual machine run by Apple's container tool. Web searches are sent from inside it, and the pages the model reads are fetched and turned into text inside it, so a harmful page or file never reaches TUFF directly. TUFF starts it when you turn this on or open the app, and stops it when it has been idle or when TUFF quits. If it is not ready, web search fails; it never falls back to a direct request. File search has its own switch under Files. Off by default; needs macOS 26 and Apple container.")
             .appFont(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private var filesSandboxRows: some View {
+        Toggle("Read my search folders in a sandbox too", isOn: $model.runFilesInSandbox)
+        if model.runFilesInSandbox || filesSandboxFailed {
+            let status = filesSandboxStatus(model.filesSandbox.state)
+            HStack(spacing: 6) {
+                if status.busy { ProgressView().controlSize(.small) }
+                Text(status.text)
+                    .appFont(.caption)
+                    .foregroundStyle(status.isProblem ? Color.red : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        Text("A second sandbox with no network at all reads the folders you add, read-only, and turns the files into text, so a harmful file or PDF is never opened by TUFF itself. It runs while TUFF indexes your folders and stops when it has been idle or when TUFF quits. If it cannot start, indexing stops with a message; it never falls back to reading the files in TUFF. macOS may ask whether \u{201C}container-runtime-linux\u{201D} may read a folder such as Documents; allow it, or file search cannot read that folder. Folder names with a comma cannot be used. Off by default; needs macOS 26 and Apple container.")
+            .appFont(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var filesSandboxFailed: Bool {
+        if case .failed = model.filesSandbox.state { return true }
+        return false
+    }
+
+    private func filesSandboxStatus(_ state: SandboxController.State)
+        -> (text: String, busy: Bool, isProblem: Bool) {
+        switch state {
+        case .off:
+            ("Stopped. It starts when TUFF indexes your folders.", false, false)
+        case .preparing(let step): ("\(step)…", true, false)
+        case .starting: ("Starting the sandbox…", true, false)
+        case .ready: ("Ready", false, false)
+        case .stopping: ("Stopping…", true, false)
+        case .failed(let message): (message, false, true)
+        }
     }
 
     private var sandboxFailed: Bool {

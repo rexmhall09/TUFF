@@ -154,6 +154,9 @@ import Testing
         .stoppedWhileStarting,
         .notReady,
         .stillStarting,
+        .noFoldersToMount,
+        .folderAccessDenied,
+        .unmountableFolder,
     ]
 
     @Test func everyCaseHasANonEmptySingleLineDescription() {

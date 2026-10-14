@@ -66,7 +66,10 @@ func documentPromptBlock(displayName: String, text: String) -> String {
         .replacingOccurrences(of: "\n", with: "&#10;")
         .replacingOccurrences(of: "\r", with: "&#13;")
         .replacingOccurrences(of: "\t", with: "&#9;")
-    return "<document name=\"\(escapedName)\">\n\(text)\n</document>"
+    // Direction and other invisible characters are written out, so the name
+    // cannot pass for another file type.
+    let safeName = AppFileNameText.safe(escapedName)
+    return "<document name=\"\(safeName)\">\n\(text)\n</document>"
 }
 
 public extension Array where Element == AppDocumentAttachment {

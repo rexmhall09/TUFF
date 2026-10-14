@@ -40,16 +40,16 @@ def without_comments(text):
 
 # --- firewall-web.nft -------------------------------------------------------
 
-def nft_check(arguments, extra_text=None):
+def nft_check(arguments, extra_text=None, name="firewall-web.nft"):
     """Runs `nft -c` on the firewall file (plus `extra_text`, appended). Returns
     the finished process, or skips the test when nft cannot check rules here."""
     if shutil.which("nft") is None:
         raise unittest.SkipTest("nft is not installed")
-    path = os.path.join(HERE, "firewall-web.nft")
+    path = os.path.join(HERE, name)
     cleanup = None
     if extra_text is not None:
         handle = tempfile.NamedTemporaryFile("w", suffix=".nft", delete=False)
-        handle.write(read("firewall-web.nft") + "\n" + extra_text)
+        handle.write(read(name) + "\n" + extra_text)
         handle.close()
         path = cleanup = handle.name
     try:
@@ -252,6 +252,106 @@ class FirewallFileTests(unittest.TestCase):
         self.assertIn("192.168.64.1", result.stdout.split("set blocked4")[1])
 
 
+# --- firewall-files.nft -----------------------------------------------------
+
+LOOPBACK_UP = """
+import fcntl, socket, struct
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    fcntl.ioctl(s, 0x8914, struct.pack("16sH", b"lo", 0x1 | 0x40))  # SIOCSIFFLAGS: UP, RUNNING
+listener = socket.socket()
+listener.bind(("127.0.0.1", 9100))
+listener.listen(1)
+socket.create_connection(("127.0.0.1", 9100), timeout=3).close()
+print("loopback works")
+"""
+
+
+class FilesFirewallFileTests(unittest.TestCase):
+    def setUp(self):
+        self.text = read("firewall-files.nft")
+        self.code = without_comments(self.text)
+
+    def chain(self, name):
+        start = self.code.index(f"chain {name} {{")
+        end = self.code.index("\n    }", start)
+        return [line.strip() for line in self.code[start:end].splitlines()[1:] if line.strip()]
+
+    def test_the_table_is_replaced_not_added_to_and_is_not_the_web_table(self):
+        lines = [line.strip() for line in self.code.splitlines()]
+        first = lines.index("table inet tuff_sandbox_files")
+        delete = lines.index("delete table inet tuff_sandbox_files")
+        define = lines.index("table inet tuff_sandbox_files {")
+        self.assertLess(first, delete)
+        self.assertLess(delete, define)
+        self.assertEqual(self.code.count("table inet"), 3)
+        self.assertEqual(self.code.count("tuff_sandbox_files"), 3)
+        self.assertNotIn("tuff_sandbox_web", self.code)
+
+    def test_outbound_allows_loopback_and_replies_and_nothing_else(self):
+        self.assertEqual(self.chain("output"), [
+            "type filter hook output priority filter; policy drop;",
+            'oifname "lo" accept',
+            "ct state established,related accept",
+        ])
+
+    def test_inbound_is_the_web_rule(self):
+        self.assertEqual(self.chain("input"), [
+            "type filter hook input priority filter; policy drop;",
+            'iifname "lo" accept',
+            "ct state established,related accept",
+            "ip saddr $gateway tcp dport 9100 accept",
+        ])
+        self.assertEqual(self.code.count("$gateway"), 1)
+        self.assertNotIn("define gateway", self.code)
+        self.assertNotIn("ip6", self.code)
+
+    def test_no_dns_no_sets_no_addresses_no_forwarding(self):
+        for word in ("53", "daddr", "set ", "elements", "forward", "reject", "private4", "blocked"):
+            self.assertNotIn(word, self.code, word)
+        self.assertEqual(self.code.count("hook output"), 1)
+        self.assertEqual(self.code.count("hook input"), 1)
+        self.assertEqual(self.code.count("accept"), 5)
+        self.assertEqual(self.code.count("policy drop"), 2)
+
+    def test_the_port_is_the_servers(self):
+        self.assertIn(f"tcp dport {server.PORT} accept", self.chain("input")[-1])
+
+    def test_the_file_loads_with_a_gateway_and_not_without(self):
+        ok = nft_check(["-D", "gateway=192.168.64.1"], name="firewall-files.nft")
+        if nft_unavailable(ok.stderr):
+            self.skipTest("nft cannot check rules here: " + ok.stderr.strip())
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        missing = nft_check([], name="firewall-files.nft")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("gateway", missing.stderr)
+
+    def test_loaded_for_real_in_a_throwaway_network_namespace(self):
+        if shutil.which("unshare") is None or shutil.which("nft") is None:
+            self.skipTest("unshare or nft is not installed")
+        path = os.path.join(HERE, "firewall-files.nft")
+        script = (f"nft -D gateway=192.168.64.1 -f {shlex.quote(path)} && "
+                  "nft -nn list ruleset && "
+                  f"{shlex.quote(sys.executable)} -c {shlex.quote(LOOPBACK_UP)}")
+        result = subprocess.run(["unshare", "-n", "sh", "-c", script], capture_output=True,
+                                text=True, timeout=60)
+        if result.returncode != 0 and (nft_unavailable(result.stderr) or "unshare" in result.stderr):
+            self.skipTest("cannot use a network namespace here: " + result.stderr.strip())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [line.strip() for line in result.stdout.splitlines()]
+        # The only table is this one: nothing from the web firewall is loaded.
+        self.assertEqual([line for line in lines if line.startswith("table ")],
+                         ["table inet tuff_sandbox_files {"])
+        self.assertEqual(sum("policy drop" in line for line in lines), 2)
+        # Loopback is accepted both ways; nothing else leaves the VM.
+        self.assertEqual(sum(line.startswith('oifname "lo"') for line in lines), 1)
+        self.assertEqual(sum(line.startswith('iifname "lo"') for line in lines), 1)
+        self.assertEqual([line for line in lines if "daddr" in line or "dport 53" in line], [])
+        # New inbound connections: port 9100 from the gateway only.
+        inbound = [line for line in lines if "dport" in line]
+        self.assertEqual(inbound, ["ip saddr 192.168.64.1 tcp dport 9100 accept"])
+        self.assertIn("loopback works", result.stdout)
+
+
 # --- default_gateway.py -----------------------------------------------------
 
 SAMPLE_ROUTE = (
@@ -406,10 +506,11 @@ class EntrypointTests(unittest.TestCase):
     GATEWAY = "#!/bin/sh\necho 192.168.64.1\n"
 
     def run_entrypoint(self, helper_body=GATEWAY, nft_exit=0, nft_fail_on=None, blocked=None,
-                       resolv=""):
+                       resolv="", profile=None):
         script = read("entrypoint.sh")
         self.assertIn("/etc/resolv.conf", script)
         self.assertIn("/app/firewall-web.nft", script)
+        self.assertIn("/app/firewall-files.nft", script)
         with tempfile.TemporaryDirectory() as directory:
             def write(name, body):
                 path = os.path.join(directory, name)
@@ -436,11 +537,14 @@ class EntrypointTests(unittest.TestCase):
             write("sleep", "#!/bin/sh\nexit 0\n")
             resolv_path = write("resolv.conf", resolv)
             patched = script.replace("/etc/resolv.conf", resolv_path).replace(
-                "/app/firewall-web.nft", "FIREWALL")
+                "/app/firewall-web.nft", "FIREWALL").replace(
+                "/app/firewall-files.nft", "FIREWALL_FILES")
             entry = write("entrypoint.sh", patched)
             env = {"PATH": directory + ":/usr/bin:/bin"}
             if blocked is not None:
                 env["SANDBOX_BLOCKED_ADDRESSES"] = blocked
+            if profile is not None:
+                env["SANDBOX_PROFILE"] = profile
             result = subprocess.run(["/bin/sh", entry], env=env, capture_output=True, text=True,
                                     timeout=60)
             calls, server_env = [], None
@@ -610,6 +714,52 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(script.count("python3 /app/server.py"), 1)
         self.assertTrue(os.access(os.path.join(HERE, "entrypoint.sh"), os.X_OK))
 
+    # -- profiles -----------------------------------------------------------
+
+    def test_the_default_profile_is_web(self):
+        self.assertIn('profile="${SANDBOX_PROFILE-web}"', read("entrypoint.sh"))
+        for profile in (None, "web"):
+            run = self.run_entrypoint(profile=profile, blocked="10.0.0.1",
+                                      resolv="nameserver 192.168.64.1\n")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(run.calls[0], "nft -D gateway=192.168.64.1 -f FIREWALL")
+            self.assertEqual(len(run.elements), 1)
+            self.assertEqual(len(run.inserts), 2)
+
+    def test_the_files_profile_loads_its_own_firewall_and_nothing_else(self):
+        run = self.run_entrypoint(profile="files")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.calls, ["nft -D gateway=192.168.64.1 -f FIREWALL_FILES",
+                                     "python3 /app/server.py"])
+        self.assertIn("192.168.64.1", run.stderr)
+
+    def test_the_files_profile_adds_no_blocked_addresses_and_no_dns_rules(self):
+        run = self.run_entrypoint(profile="files", blocked="10.0.0.1,fe80::1,not an address",
+                                  resolv="nameserver 192.168.64.1\nnameserver fd00::53\n")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.elements, [])
+        self.assertEqual(run.inserts, [])
+        self.assertEqual(run.calls, ["nft -D gateway=192.168.64.1 -f FIREWALL_FILES",
+                                     "python3 /app/server.py"])
+        self.assertNotIn("tuff_sandbox_web", "\n".join(run.calls))
+
+    def test_the_files_profile_refuses_to_start_without_a_gateway_or_its_firewall(self):
+        run = self.run_entrypoint("#!/bin/sh\nexit 1\n", profile="files")
+        self.assertEqual(run.returncode, 1)
+        self.assertIn("refusing to start", run.stderr)
+        self.assertEqual(run.calls, [])
+        run = self.run_entrypoint(profile="files", nft_exit=1)
+        self.assertEqual(run.returncode, 1)
+        self.assertIn("could not load the sandbox firewall", run.stderr)
+        self.assertFalse(run.server_started)
+
+    def test_an_unknown_profile_refuses_to_start_before_anything_is_loaded(self):
+        for profile in ("", "Files", "web ", "both", "files;"):
+            run = self.run_entrypoint(profile=profile)
+            self.assertEqual(run.returncode, 1, repr(profile))
+            self.assertIn("refusing to start", run.stderr)
+            self.assertEqual(run.calls, [], repr(profile))
+
     # -- the calls are valid nft ------------------------------------------
 
     def test_the_calls_are_valid_nft(self):
@@ -709,13 +859,14 @@ class ContainerfileTests(unittest.TestCase):
         self.assertIn("security.debian.org", run[sed:check])
         self.assertIn("nftables", run)
 
-    def test_the_copy_list_has_the_four_runtime_files_and_no_tests(self):
+    def test_the_copy_list_has_the_five_runtime_files_and_no_tests(self):
         sources = []
         for instruction in self.instructions:
             if instruction.startswith("COPY "):
                 parts = [p for p in instruction.split()[1:] if not p.startswith("--")]
                 sources += parts[:-1]
-        for needed in ("server.py", "firewall-web.nft", "entrypoint.sh", "default_gateway.py"):
+        for needed in ("server.py", "firewall-web.nft", "firewall-files.nft", "entrypoint.sh",
+                       "default_gateway.py"):
             self.assertIn(needed, sources)
         for source in sources:
             self.assertNotIn("test", source.lower(), source)
@@ -725,20 +876,20 @@ class ContainerfileTests(unittest.TestCase):
         self.assertEqual(sorted(set(sources)), sorted(sources))
         self.assertNotRegex(self.text, r"(?m)^(ADD|VOLUME)\b")
         self.assertEqual(sorted(sources), sorted(
-            ["requirements.txt", "server.py", "firewall-web.nft", "entrypoint.sh",
-             "default_gateway.py"]))
+            ["requirements.txt", "server.py", "firewall-web.nft", "firewall-files.nft",
+             "entrypoint.sh", "default_gateway.py"]))
 
     def test_every_copied_file_exists(self):
-        for name in ("requirements.txt", "server.py", "firewall-web.nft", "entrypoint.sh",
-                     "default_gateway.py"):
+        for name in ("requirements.txt", "server.py", "firewall-web.nft", "firewall-files.nft",
+                     "entrypoint.sh", "default_gateway.py"):
             self.assertTrue(os.path.isfile(os.path.join(HERE, name)), name)
 
     def test_the_entrypoint_is_the_script_and_the_image_does_not_start_as_the_sandbox_user(self):
         self.assertRegex(self.text, r'(?m)^ENTRYPOINT \["/app/entrypoint\.sh"\]$')
         self.assertEqual(self.text.count("ENTRYPOINT"), 1)
         self.assertNotRegex(self.text, r"(?m)^(USER|CMD)\b")
-        self.assertIn("COPY server.py firewall-web.nft entrypoint.sh default_gateway.py /app/",
-                      self.text)
+        self.assertIn("COPY server.py firewall-web.nft firewall-files.nft entrypoint.sh "
+                      "default_gateway.py /app/", self.text)
         self.assertTrue(os.access(os.path.join(HERE, "entrypoint.sh"), os.X_OK))
 
     def test_the_user_and_port_match_server_py(self):

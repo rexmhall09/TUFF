@@ -66,6 +66,14 @@ struct DocumentTextExtractorTests {
         #expect(block.components(separatedBy: "</document>").count == 2)
     }
 
+    @Test("direction characters in the filename are written out")
+    func promptBlockWritesOutDirectionCharacters() {
+        let document = ExtractedDocument(displayName: "report\u{202E}fdp.exe", text: "hello")
+        let block = DocumentTextExtractor.promptBlock(for: document)
+        #expect(block.hasPrefix("<document name=\"report\\u{202E}fdp.exe\">"))
+        #expect(!block.unicodeScalars.contains("\u{202E}"))
+    }
+
     @Test("the token estimate scales with length and is never zero")
     func estimatesTokens() {
         #expect(ExtractedDocument(displayName: "a", text: "x").estimatedTokens == 1)

@@ -30,21 +30,23 @@ struct SandboxDependencies: Sendable {
     var healthInterval: Duration
     /// Seconds between the looks at a container when quitting during a start.
     var quitRetryDelay: TimeInterval = 1
+    /// Which sandbox this controller runs.
+    var profile: SandboxProfile = .web
     /// How long a signed answer from the sandbox (or the start's health check)
     /// counts as proof that the port is still the sandbox's. A request after
     /// a longer quiet time is preceded by a signed health check.
     var proofValidity: Duration = .seconds(5)
     var clock: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
 
-    static func live() -> SandboxDependencies {
+    static func live(profile: SandboxProfile = .web) -> SandboxDependencies {
         SandboxDependencies(
             tool: ContainerTool(requiredTeamIdentifier: ContainerTool.appleTeamIdentifier),
-            probe: SandboxHealthProbe(),
+            probe: SandboxHealthProbe(profile: profile),
             pin: SandboxImagePin.fromEnvironment() ?? .release,
             stateDirectory: SandboxLocations.defaultStateDirectory(),
             addresses: { HostAddresses.current() },
             freePort: { try LoopbackPort.findFree() },
-            makeName: { SandboxController.containerNamePrefix + String(UUID().uuidString.prefix(8)).lowercased() },
+            makeName: { profile.namePrefix + String(UUID().uuidString.prefix(8)).lowercased() },
             osSupported: {
                 ProcessInfo.processInfo.isOperatingSystemAtLeast(
                     OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0))
@@ -52,15 +54,19 @@ struct SandboxDependencies: Sendable {
             sleep: { try await Task.sleep(for: $0) },
             idleTimeout: .seconds(600),
             healthAttempts: 60,
-            healthInterval: .milliseconds(500))
+            healthInterval: .milliseconds(500),
+            profile: profile)
     }
 }
 
-/// The arguments of `container run` for the web sandbox. The flags are the
-/// ones `Scripts/sandbox_selftest.sh start` uses and checks: a read-only
-/// root, no capabilities except the four the entrypoint needs to load the
-/// firewall and drop privileges, limits, the secret folder mounted read-only,
-/// and the one published port bound to loopback.
+/// The arguments of `container run` for a sandbox. The flags are the ones
+/// `Scripts/sandbox_selftest.sh start` uses and checks: a read-only root, no
+/// capabilities except the four the entrypoint needs to load the firewall and
+/// drop privileges, limits, the secret folder mounted read-only, and the one
+/// published port bound to loopback. The web sandbox is told the Mac's
+/// addresses to refuse; the files sandbox has no network at all (`--no-dns`,
+/// and its firewall drops everything) and gets the chosen folders mounted
+/// read-only.
 struct SandboxLaunch: Equatable, Sendable {
     static let serverPort = 9100
     static let secretMount = "/run/tuff-sandbox"
@@ -70,25 +76,36 @@ struct SandboxLaunch: Equatable, Sendable {
     let secretFolder: URL
     let blockedAddresses: [String]
     let port: Int
+    var profile: SandboxProfile = .web
+    var mounts: [SandboxFolderMount] = []
 
     var arguments: [String] {
-        [
+        var arguments = [
             "--detach", "--name", name,
             "--read-only", "--tmpfs", "/tmp",
             "--cap-drop", "ALL",
             "--cap-add", "NET_ADMIN", "--cap-add", "SETUID",
             "--cap-add", "SETGID", "--cap-add", "SETPCAP",
             "--ulimit", "nproc=512", "--cpus", "2", "--memory", "1G",
-            "--mount", "type=bind,source=\(secretFolder.path),target=\(Self.secretMount),readonly",
-            "--env", "SANDBOX_BLOCKED_ADDRESSES=\(blockedAddresses.joined(separator: ","))",
-            "--publish", "127.0.0.1:\(port):\(Self.serverPort)",
-            image,
         ]
+        if profile == .files { arguments += ["--no-dns"] }
+        arguments += ["--mount", "type=bind,source=\(secretFolder.path),target=\(Self.secretMount),readonly"]
+        switch profile {
+        case .web:
+            arguments += ["--env", "SANDBOX_BLOCKED_ADDRESSES=\(blockedAddresses.joined(separator: ","))"]
+        case .files:
+            for mount in mounts { arguments += ["--mount", mount.argument] }
+            arguments += ["--env", "SANDBOX_PROFILE=files"]
+        }
+        arguments += ["--publish", "127.0.0.1:\(port):\(Self.serverPort)", image]
+        return arguments
     }
 }
 
-/// Starts, checks and stops the web sandbox, a small Linux VM made by Apple's
-/// `container` tool that fetches web pages and search results for TUFF.
+/// Starts, checks and stops a sandbox, a small Linux VM made by Apple's
+/// `container` tool. The web sandbox fetches web pages and search results for
+/// TUFF; the files sandbox reads the folders the person chose for file search
+/// (see `SandboxProfile`).
 ///
 /// The app owns one (`AppModel.sandbox`). It is started when the person turns
 /// on "Run web search and page reads in a sandbox", at app launch if that is
@@ -125,7 +142,7 @@ public final class SandboxController {
         }
     }
 
-    nonisolated public static let containerNamePrefix = "tuff-sandbox-web-"
+    nonisolated public static let containerNamePrefix = SandboxProfile.web.namePrefix
 
     public private(set) var state: State = .off
     /// Increases at every start and every stop, so work that started under
@@ -148,6 +165,14 @@ public final class SandboxController {
     @ObservationIgnored private var containerName: String?
     @ObservationIgnored private var activePort = 0
     @ObservationIgnored private var activeKey = Data()
+
+    /// The folders the next start mounts (files profile only). Set before
+    /// `start()`; a change needs a stop and a new start to take effect.
+    @ObservationIgnored var folderMounts: [SandboxFolderMount] = []
+    /// What the running sandbox was started with; empty unless it is ready.
+    public private(set) var activeMountIDs: [String] = []
+
+    var profile: SandboxProfile { dependencies.profile }
 
     public convenience init() {
         self.init(dependencies: .live())
@@ -198,7 +223,7 @@ public final class SandboxController {
             // lock; a second try then uses it instead of failing against it.
             if lock == nil {
                 guard let acquired = SandboxInstanceLock.acquire(
-                    at: SandboxLocations.lockFile(in: dependencies.stateDirectory)) else {
+                    at: SandboxLocations.lockFile(in: dependencies.stateDirectory, profile: profile)) else {
                     throw SandboxError.anotherInstanceRunning
                 }
                 lock = acquired
@@ -222,11 +247,24 @@ public final class SandboxController {
             try ensureCurrent(mine)
 
             state = .starting
-            let blocked = HostAddresses.normalized(dependencies.addresses())
-            guard !blocked.isEmpty else { throw SandboxError.hostAddressesUnknown }
-            guard blocked.count <= HostAddresses.maximumCount else { throw SandboxError.tooManyAddresses }
+            // The web sandbox is told which of the Mac's addresses to refuse;
+            // the files sandbox has no network and needs none.
+            var blocked: [String] = []
+            var mounts: [SandboxFolderMount] = []
+            switch profile {
+            case .web:
+                blocked = HostAddresses.normalized(dependencies.addresses())
+                guard !blocked.isEmpty else { throw SandboxError.hostAddressesUnknown }
+                guard blocked.count <= HostAddresses.maximumCount else { throw SandboxError.tooManyAddresses }
+            case .files:
+                mounts = folderMounts
+                guard !mounts.isEmpty else { throw SandboxError.noFoldersToMount }
+                guard mounts.allSatisfy({ SandboxFolderMount.isMountable($0.path) }) else {
+                    throw SandboxError.unmountableFolder
+                }
+            }
             let made = try SandboxSecret.create(
-                under: SandboxLocations.secretsDirectory(in: dependencies.stateDirectory))
+                under: SandboxLocations.secretsDirectory(in: dependencies.stateDirectory, profile: profile))
             createdSecret = made
             secret = made
             guard made.isMountable else { throw SandboxError.unsafeMountPath }
@@ -235,19 +273,26 @@ public final class SandboxController {
             createdName = name
             containerName = name
             let launch = SandboxLaunch(name: name, image: dependencies.pin.runReference,
-                                       secretFolder: made.folder, blockedAddresses: blocked, port: port)
-            try await tool.runDetached(arguments: launch.arguments)
+                                       secretFolder: made.folder, blockedAddresses: blocked, port: port,
+                                       profile: profile, mounts: mounts)
+            do {
+                try await tool.runDetached(arguments: launch.arguments)
+            } catch let error as SandboxError {
+                throw Self.folderAccessProblem(in: error, mounts: mounts) ?? error
+            }
             try ensureCurrent(mine)
 
             let health = try await waitUntilHealthy(port: port, key: made.key, name: name, generation: mine)
             // The signed health answer is the proof; the checks below take time.
             let provedAt = dependencies.clock()
             try ensureCurrent(mine)
-            try await SandboxProtection.verify(tool: tool, container: name, blocked: blocked, health: health)
+            try await SandboxProtection.verify(tool: tool, container: name, blocked: blocked, health: health,
+                                               profile: profile, mounts: mounts)
             try ensureCurrent(mine)
 
             activePort = port
             activeKey = made.key
+            activeMountIDs = mounts.map(\.id)
             lastProof = provedAt
             state = .ready
             scheduleIdleStop()
@@ -266,7 +311,7 @@ public final class SandboxController {
                     containerName = name
                     if lock == nil {
                         lock = SandboxInstanceLock.acquire(
-                            at: SandboxLocations.lockFile(in: dependencies.stateDirectory))
+                            at: SandboxLocations.lockFile(in: dependencies.stateDirectory, profile: profile))
                     }
                     state = .failed(leftover)
                 }
@@ -315,10 +360,11 @@ public final class SandboxController {
     /// Removes containers an earlier run of TUFF left behind. Only called
     /// while this process holds the instance lock, so none has an owner.
     private func removeLeftovers(tool: ContainerTool) async throws {
-        for id in try await tool.containerIDs(all: true) where Self.isOurContainer(id) {
+        for id in try await tool.containerIDs(all: true) where Self.isOurContainer(id, profile: profile) {
             await tool.stopAndDelete(id)
         }
-        SandboxSecret.removeAll(under: SandboxLocations.secretsDirectory(in: dependencies.stateDirectory))
+        SandboxSecret.removeAll(
+            under: SandboxLocations.secretsDirectory(in: dependencies.stateDirectory, profile: profile))
     }
 
     /// Removes containers and secret folders a crashed run of TUFF left
@@ -338,7 +384,7 @@ public final class SandboxController {
     private func performCleanUp() async {
         try? Self.prepare(directory: dependencies.stateDirectory)
         guard let held = SandboxInstanceLock.acquire(
-            at: SandboxLocations.lockFile(in: dependencies.stateDirectory)) else { return }
+            at: SandboxLocations.lockFile(in: dependencies.stateDirectory, profile: profile)) else { return }
         defer { held.release() }
         let tool = dependencies.tool
         guard (try? await tool.verify()) != nil, await tool.systemIsRunning() else { return }
@@ -348,8 +394,26 @@ public final class SandboxController {
     /// Only containers TUFF named itself: the prefix and 8 hexadecimal
     /// digits. A container someone started by hand with a similar name, such
     /// as the self-test's, is left alone.
-    nonisolated static func isOurContainer(_ id: String) -> Bool {
-        id.wholeMatch(of: #/tuff-sandbox-web-[0-9a-f]{8}/#) != nil
+    nonisolated static func isOurContainer(_ id: String, profile: SandboxProfile = .web) -> Bool {
+        guard id.hasPrefix(profile.namePrefix) else { return false }
+        return id.dropFirst(profile.namePrefix.count).wholeMatch(of: #/[0-9a-f]{8}/#) != nil
+    }
+
+    /// When `container run` fails for a controller that mounts folders and
+    /// the failure reads like a refusal by macOS, the sentence that tells the
+    /// person where to allow it. The command's output keeps only its last
+    /// lines, so this goes by the words that appear in them.
+    nonisolated static func folderAccessProblem(in error: SandboxError,
+                                                mounts: [SandboxFolderMount]) -> SandboxError? {
+        guard !mounts.isEmpty, case .containerCommandFailed(_, let detail) = error else { return nil }
+        let lowered = detail.lowercased()
+        // "A directory sharing device configuration is invalid" is what the
+        // virtual machine framework says when macOS refused the share
+        // (underlying "Operation not permitted").
+        guard ["not permitted", "permission denied", "operation not allowed", "not authorized",
+               "directory sharing"]
+            .contains(where: { lowered.contains($0) }) else { return nil }
+        return .folderAccessDenied
     }
 
     // MARK: Stop
@@ -392,6 +456,7 @@ public final class SandboxController {
         idleTask = nil
         activePort = 0
         activeKey = Data()
+        activeMountIDs = []
         let wasStarting = startTask != nil
         let began = ProcessInfo.processInfo.systemUptime
         var gone = containerName.map { dependencies.tool.stopAndDeleteBlocking($0) } ?? true
@@ -444,6 +509,7 @@ public final class SandboxController {
         secret = nil
         activeKey = Data()
         activePort = 0
+        activeMountIDs = []
         if problem == nil {
             containerName = nil
             lock?.release()

@@ -94,6 +94,9 @@ struct SandboxHealth: Equatable, Sendable {
     let api: Int
     /// How many Mac addresses the server was told to refuse.
     let blockedAddresses: Int
+    /// The folder ids the server found under `/files` (files profile; the
+    /// web profile does not report any).
+    var folders: [String] = []
 }
 
 /// Asks a running sandbox whether it answers, with a signed request. Tests
@@ -109,7 +112,11 @@ struct SandboxHealthProbe: SandboxHealthProbing {
     /// the sandbox.
     static let maximumBytes = 64 * 1_024
 
-    init() {}
+    /// The profile the answer must name: the probe of a files sandbox does
+    /// not accept a web sandbox's answer, nor the other way round.
+    let profile: SandboxProfile
+
+    init(profile: SandboxProfile = .web) { self.profile = profile }
 
     func health(port: Int, key: Data) async throws -> SandboxHealth {
         guard let url = URL(string: "http://127.0.0.1:\(port)/health") else {
@@ -157,13 +164,13 @@ struct SandboxHealthProbe: SandboxHealthProbing {
         }
         return try Self.check(status: http.statusCode,
                               signature: http.value(forHTTPHeaderField: "X-Sandbox-Auth"),
-                              body: data, nonce: nonce, key: key)
+                              body: data, nonce: nonce, key: key, profile: profile)
     }
 
     /// The signature first, then the content: nothing in an unsigned answer
     /// is read.
     static func check(status: Int, signature: String?, body: Data, nonce: String,
-                      key: Data) throws -> SandboxHealth {
+                      key: Data, profile: SandboxProfile = .web) throws -> SandboxHealth {
         guard let signature, SandboxSigning.isValidResponse(
             signature, key: key, method: "GET", path: "/health", nonce: nonce,
             status: status, body: body) else {
@@ -177,17 +184,24 @@ struct SandboxHealthProbe: SandboxHealthProbing {
             let profile: String
             let api: Int
             let blocked_addresses: Int
+            let folders: [String]?
         }
         guard let answer = try? JSONDecoder().decode(Answer.self, from: body),
               answer.status == "ok" else {
             throw SandboxError.notHealthy("unexpected content")
         }
-        guard answer.profile == "web", answer.api == 1 else {
+        guard answer.profile == profile.healthName, answer.api == 1 else {
             throw SandboxError.notHealthy(
                 "a different kind of sandbox (\(SandboxText.oneLine(answer.profile, limit: 20)), API \(answer.api))")
         }
+        let folders = answer.folders ?? []
+        // Only the files profile lists folders, and each is a lowercase UUID.
+        guard folders.count <= SandboxFolderMount.maximumCount, folders.allSatisfy({ SandboxFolderMount.isFolderID($0) }),
+              profile == .files || folders.isEmpty else {
+            throw SandboxError.notHealthy("unexpected content")
+        }
         return SandboxHealth(profile: answer.profile, api: answer.api,
-                             blockedAddresses: answer.blocked_addresses)
+                             blockedAddresses: answer.blocked_addresses, folders: folders)
     }
 }
 #endif

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Web sandbox server for TUFF (the `web` profile).
+"""Sandbox server for TUFF: the `web` profile (this docstring) and the `files`
+profile (see "The files profile" below).
 
 This process runs inside an Apple `container` Linux VM and is published only
 on the Mac's loopback address. It is the part of TUFF that touches the
@@ -71,6 +72,33 @@ every user in it (see the mount test in the #38 issue), so a program that
 takes over the server's extraction child could read it. It protects the app
 against other programs on the Mac, not against code running in the VM. Sandbox/test-vectors/signing.json holds fixed examples
 that both this code and the app's tests must reproduce.
+
+The files profile. The same image and this same file, started with
+SANDBOX_PROFILE=files (the default and the only other value is web; anything
+else refuses to start), is a second VM that reads the folders the user picked
+for local search. It has no network at all (firewall-files.nft; the app starts
+it with --no-dns) and the folders are mounted read-only at /files/<folder id>,
+a lower-case UUID. It lists files and turns files into passages; the index
+stays on the Mac. /health answers {"status", "profile": "files", "api",
+"pdf", "blocked_addresses": 0, "folders": [ids found under /files]}, and the
+only other paths are
+  POST /v1/files/list      {"folder": id, "cursor": path?, "limit": int?}
+  POST /v1/files/passages  {"folder": id, "path": path}
+(the web paths are unknown here, and these are unknown in the web profile). A
+list page ends after LIST_MAX_BYTES of entries, LIST_MAX_EXAMINED directory
+entries or LIST_SECONDS, whichever comes first, and next_cursor is then the last
+entry examined, listed or not (a page may be short or empty). A page always
+examines at least one new name, so its cursor moves on. The list answer is
+{"entries", "next_cursor", "unreadable"}: "unreadable" counts the directories on
+that page that could not be listed or opened (each counted once; a directory the next
+page walks again is counted there). A folder whose top level cannot be
+listed or opened for lack of permission is 403 `folder_unreadable`.
+Signing, the request limits and the dropped privileges are the same as above;
+privileges are dropped before any file is read. A path is relative, `/`
+separated, without empty, `.` or `..` components. Every component is opened
+with O_NOFOLLOW relative to the folder's descriptor, so a symbolic link anywhere
+on the path is refused (`not_a_file`). A hard link to a file elsewhere in the
+folder tree cannot be told from the file itself and is read like any file.
 """
 
 from __future__ import annotations
@@ -204,6 +232,47 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 # text to make the search slow.
 TITLE_SEARCH_CHARS = 32 * 1024
 SANDBOX_UID = 10001
+# The files profile (see the docstring). The folders are mounted at
+# FILES_ROOT/<folder id>; the limits are the app's own, repeated here so that
+# the VM does not read what the app would refuse.
+PROFILES = ("web", "files")
+PROFILE_ENV = "SANDBOX_PROFILE"
+FILES_ROOT = "/files"
+FOLDER_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+MAX_PATH_CHARS = 1024
+LIST_DEFAULT_LIMIT = 1000
+LIST_MAX_LIMIT = 2000
+# Directories that are never entered, and how deep the walk goes (the folder's
+# children are level 1; a directory at level MAX_DIRECTORY_DEPTH is walked, its
+# subdirectories are not).
+SKIPPED_DIRECTORIES = frozenset((
+    ".git", ".hg", ".svn", "node_modules", ".build", "DerivedData", "Pods", "build", "dist",
+    ".venv", "venv", "__pycache__", ".tox", ".gradle", "target", ".next"))
+MAX_DIRECTORY_DEPTH = 24
+MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
+MAX_FILE_PDF_BYTES = 64 * 1024 * 1024
+MAX_FILE_PDF_PAGES = 500
+# The text of all pages together; a PDF with more is refused (`oversized`).
+MAX_FILE_PDF_CHARS = 4_000_000
+FILE_PDF_TIMEOUT = 60.0
+# One page of /v1/files/list stops after this many bytes of JSON-encoded entries
+# (the app reads at most 2 MiB; a non-ASCII path takes up to 12 bytes a
+# character once escaped), after this many directory entries examined, or after
+# this many seconds, and carries on through next_cursor.
+LIST_MAX_BYTES = 1024 * 1024
+LIST_MAX_EXAMINED = 50_000
+LIST_SECONDS = 15.0
+# A cursor is any path the walk could have examined, so it may be longer than a
+# path that can be asked for, and may hold control characters.
+MAX_CURSOR_CHARS = 8192
+# Extra seconds a files request waits for the PDF slot beyond FILE_PDF_TIMEOUT.
+FILE_PDF_SLOT_EXTRA = 10.0
+MAX_PASSAGES = 5000
+PASSAGE_CHARACTERS = 1200
+# A passage is cut near PASSAGE_CHARACTERS but can reach almost twice that (a
+# buffer of just under 1200 characters plus one more line of up to 1200), so the
+# cap on its text is 2500.
+MAX_PASSAGE_TEXT_CHARS = 2500
 # Names Python decodes as text. Anything else (idna, rot13, base64...) falls
 # back to UTF-8 instead of failing or decoding into something odd.
 TEXT_CHARSETS = {
@@ -794,12 +863,8 @@ class PdfRefused(Exception):
         self.code = code
 
 
-def read_pdf(data: bytes) -> dict:
-    """Runs in the child. The text of at most MAX_PDF_PAGES pages, each cleaned
-    like HTML text, plus the document title and the page counts. Never
-    decrypts: an encrypted PDF is refused, whatever its password."""
-    if PdfReader is None:
-        raise PdfRefused("pdf_unreadable")
+def _limit_pypdf() -> None:
+    """Runs in the child, before a PDF is opened."""
     logging.getLogger("pypdf").setLevel(logging.CRITICAL)
     pypdf.overwrite_configuration(
         maximum_declared_stream_length=PDF_STREAM_LIMIT,
@@ -813,6 +878,15 @@ def read_pdf(data: bytes) -> dict:
         stream_decoding_work_maximum_length=4 * PDF_STREAM_LIMIT,
         jbig2dec_binary=None,  # never start an external program
     )
+
+
+def read_pdf(data: bytes) -> dict:
+    """Runs in the child. The text of at most MAX_PDF_PAGES pages, each cleaned
+    like HTML text, plus the document title and the page counts. Never
+    decrypts: an encrypted PDF is refused, whatever its password."""
+    if PdfReader is None:
+        raise PdfRefused("pdf_unreadable")
+    _limit_pypdf()
     reader = PdfReader(io.BytesIO(data), strict=False)
     if reader.is_encrypted:
         raise PdfRefused("pdf_encrypted")
@@ -841,6 +915,37 @@ def read_pdf(data: bytes) -> dict:
             break
     return {"title": title, "text": "\n\n".join(parts), "pages": total,
             "pages_read": pages_read, "pages_failed": pages_failed, "cut": cut}
+
+
+def read_pdf_pages(data: bytes) -> dict:
+    """Runs in the child (the files profile). The text of each of at most
+    MAX_FILE_PDF_PAGES pages as [page number from 1, text], pages without text
+    left out, with the page counts. Never decrypts, like read_pdf. More than
+    MAX_FILE_PDF_CHARS characters in all is refused (`oversized`)."""
+    if PdfReader is None:
+        raise PdfRefused("pdf_unreadable")
+    _limit_pypdf()
+    reader = PdfReader(io.BytesIO(data), strict=False)
+    if reader.is_encrypted:
+        raise PdfRefused("pdf_encrypted")
+    total = len(reader.pages)
+    texts: list[list] = []
+    chars = pages_read = pages_failed = 0
+    for number in range(min(total, MAX_FILE_PDF_PAGES)):
+        pages_read += 1
+        try:
+            text = reader.pages[number].extract_text() or ""
+        except Exception:
+            pages_failed += 1  # one odd page does not cost the rest
+            continue
+        if not text.strip():
+            continue
+        chars += len(text)
+        if chars > MAX_FILE_PDF_CHARS:
+            raise PdfRefused("oversized")
+        texts.append([number + 1, text])
+    return {"pages": total, "pages_read": pages_read, "pages_failed": pages_failed,
+            "texts": texts}
 
 
 def _pdf_in_child(sender, reader, data: bytes) -> None:
@@ -909,6 +1014,51 @@ def read_pdf_bounded(data: bytes, timeout: float | None = None,
     result["title"] = clean_title(title)
     result["text"] = collapse_whitespace(clean_text(text[:MAX_EXTRACT_CHARS]))
     return result
+
+
+def read_pdf_pages_bounded(data: bytes, timeout: float | None = None,
+                           reader: Callable[[bytes], dict] = read_pdf_pages,
+                           busy_wait: float | None = None, slot_held: bool = False) -> dict:
+    """`reader(data)` (read_pdf_pages) in a child process that is killed after
+    `timeout` seconds (FILE_PDF_TIMEOUT), one PDF at a time like
+    read_pdf_bounded. With `slot_held` the caller already holds the PDF slot
+    (and releases it). Returns {"pages", "pages_read", "pages_failed", "texts"}
+    or raises ToolError: `oversized`, `unreadable` (damaged, encrypted or not
+    read in time) or `pdf_busy` (503)."""
+    limit = FILE_PDF_TIMEOUT if timeout is None else timeout
+    unreadable = ToolError("the PDF could not be read: it is damaged, or reading it took longer "
+                           f"than {limit:g} s", "unreadable")
+    if not slot_held and not _PDF_SLOT.acquire(
+            timeout=PDF_BUSY_WAIT if busy_wait is None else busy_wait):
+        raise ToolError("another PDF is being read; try again in a moment", "pdf_busy", 503)
+    try:
+        message = _child_message(_pdf_in_child, (reader, data), limit,
+                                 4 * MAX_FILE_PDF_CHARS + 65536)
+    finally:
+        if not slot_held:
+            _PDF_SLOT.release()
+    if message is None:
+        raise unreadable
+    if message.startswith(b"\x02"):
+        code = message[1:].decode("ascii", "replace")
+        if code == "pdf_encrypted":
+            raise ToolError("the PDF is encrypted; encrypted PDFs are not read", "unreadable")
+        if code == "oversized":
+            raise ToolError("the PDF has more text than can be indexed", "oversized")
+        raise unreadable
+    try:
+        result = json.loads(message[1:]) if message.startswith(b"\x01") else None
+        counts = [result[key] for key in ("pages", "pages_read", "pages_failed")]
+        texts = result["texts"]
+        if (not all(type(n) is int and n >= 0 for n in counts) or not isinstance(texts, list)
+                or len(texts) > MAX_FILE_PDF_PAGES
+                or not all(isinstance(t, list) and len(t) == 2 and type(t[0]) is int
+                           and t[0] >= 1 and isinstance(t[1], str) for t in texts)):
+            raise ValueError("unexpected types")
+    except Exception:
+        raise unreadable from None
+    return {"pages": counts[0], "pages_read": counts[1], "pages_failed": counts[2],
+            "texts": [(t[0], t[1]) for t in texts]}
 
 
 def last_path_segment(url: str) -> str:
@@ -1276,6 +1426,404 @@ class WebTools:
         return sent
 
 
+# --- Files (the files profile) ----------------------------------------------
+
+# What Foundation's trimmingCharacters(in: .whitespacesAndNewlines) removes: the
+# blanks (Unicode category Zs and tab) and the line breaks (U+000A to U+000D,
+# U+0085, U+2028, U+2029). Python's own strip() also removes U+001C to U+001F.
+SWIFT_WHITESPACE = ("\t\n\x0b\x0c\r\x85\u2028\u2029"
+                    " \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+                    "\u200a\u202f\u205f\u3000")
+PATH_CONTROL_CHARACTERS = re.compile("[\x00-\x1f\x7f]")
+# Every control character (category Cc) but tab and newline.
+TEXT_CONTROL_CHARACTERS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+SPACE_CONTROL_CHARACTERS = re.compile("[\r\x0b\x0c\x85]")
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def check_folder_id(folder) -> str:
+    if not isinstance(folder, str) or not FOLDER_ID.fullmatch(folder):
+        raise ToolError("folder must be a lower-case UUID", "invalid_folder", 400)
+    return folder
+
+
+def check_relative_path(value, what: str = "path", cursor: bool = False) -> list[str]:
+    """The components of a relative path, or `invalid_path` (400): 1 to
+    MAX_PATH_CHARS characters, `/` separated, not starting with `/`, no empty,
+    `.` or `..` component, no control character, valid UTF-8. A cursor may be
+    up to MAX_CURSOR_CHARS long and hold control characters (but no NUL): it is
+    the path of the last entry examined, listed or not."""
+    invalid = ToolError(f"{what} must be a relative path of 1 to {MAX_PATH_CHARS} characters "
+                        "without empty, . or .. parts or control characters", "invalid_path", 400)
+    if not isinstance(value, str) or not 1 <= len(value) <= (MAX_CURSOR_CHARS if cursor else MAX_PATH_CHARS):
+        raise invalid
+    if ("\x00" in value) if cursor else PATH_CONTROL_CHARACTERS.search(value):
+        raise invalid
+    try:
+        value.encode("utf-8")  # a lone surrogate would name a file that is not UTF-8
+    except UnicodeEncodeError:
+        raise invalid from None
+    parts = value.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise invalid
+    return parts
+
+
+def has_extension(name: str) -> bool:
+    return os.path.splitext(name)[1] not in ("", ".")
+
+
+def chunk_text(text: str) -> list[tuple[int, int, str]]:
+    """(first line, last line, text) of each passage of `text`: the same
+    algorithm as AppLocalIndexer.passages in the app, so both sides cut a file
+    in the same places. Passages of about PASSAGE_CHARACTERS characters are cut
+    on line boundaries; a single longer line is cut into pieces; line numbers
+    count from 1 in the original text. The app's Swift counts grapheme
+    clusters where this counts code points, and a CRLF there is one character
+    that "\\n" does not split; here a CRLF ends a line, so line numbers stay
+    those of the file."""
+    passages: list[tuple[int, int, str]] = []
+    buffer: list[str] = []
+    count = line = 0
+    start = 1
+
+    def flush():
+        nonlocal count, start
+        joined = "\n".join(buffer).strip(SWIFT_WHITESPACE)
+        if joined:
+            passages.append((start, line, joined))
+        buffer.clear()
+        count = 0
+        start = line + 1
+
+    for piece in text.replace("\r\n", "\n").split("\n"):
+        line += 1
+        while len(piece) > PASSAGE_CHARACTERS:
+            buffer.append(piece[:PASSAGE_CHARACTERS])
+            piece = piece[PASSAGE_CHARACTERS:]
+            flush()
+            start = line
+            if len(passages) > MAX_PASSAGES:
+                return passages  # the caller refuses it; no need to cut the rest
+        buffer.append(piece)
+        count += len(piece) + 1
+        if count >= PASSAGE_CHARACTERS:
+            flush()
+        if len(passages) > MAX_PASSAGES:
+            return passages
+    flush()
+    return passages
+
+
+def clean_passage(text: str) -> str:
+    """A passage as it leaves the VM: U+2028 and U+2029 become line breaks, CR,
+    VT, FF and U+0085 become one space (so the words they separated stay apart),
+    and the other control characters except tab and newline are removed."""
+    text = text.replace(chr(0x2028), "\n").replace(chr(0x2029), "\n")
+    text = SPACE_CONTROL_CHARACTERS.sub(" ", text)
+    return TEXT_CONTROL_CHARACTERS.sub("", text).strip(SWIFT_WHITESPACE)
+
+
+def read_descriptor(descriptor: int, limit: int) -> bytes:
+    """At most `limit` bytes from the start of an open file."""
+    chunks, size = [], 0
+    while size < limit:
+        chunk = os.read(descriptor, min(1 << 20, limit - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
+class _Budget:
+    """The work one list page may do: LIST_MAX_EXAMINED directory entries, or
+    until `deadline`. `last` is the path (components) of the last entry
+    examined, `spent` is set when the walk stopped for lack of budget, and
+    `unreadable` counts the directories this page could not list or open."""
+
+    def __init__(self, deadline: float):
+        self.deadline = deadline
+        self.examined = 0
+        self.last: list[str] | None = None
+        self.spent = False
+        self.unreadable = 0
+
+
+@dataclass
+class FilesTools:
+    root: str = FILES_ROOT
+    clock: Callable[[], float] = time.monotonic
+
+    # -- shared -------------------------------------------------------------
+
+    def folders(self) -> list[str]:
+        """The folder ids that are mounted (directories named by an id)."""
+        try:
+            names = os.listdir(self.root)
+        except OSError:
+            return []
+        found = []
+        for name in names:
+            if FOLDER_ID.fullmatch(name):
+                try:
+                    if stat.S_ISDIR(os.lstat(os.path.join(self.root, name)).st_mode):
+                        found.append(name)
+                except OSError:
+                    pass
+        return sorted(found)
+
+    def _open_root(self, folder: str) -> int:
+        try:
+            return os.open(os.path.join(self.root, check_folder_id(folder)), DIRECTORY_FLAGS)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EPERM):
+                raise ToolError("the folder cannot be read", "folder_unreadable", 403) from None
+            raise ToolError("folder is not mounted", "not_found", 404) from None
+
+    @staticmethod
+    def _open_at(directory: int, name: str, is_directory: bool) -> int:
+        """`name` inside the open `directory`, never through a symbolic link. It
+        is looked at with lstat first, so a pipe or a device is never opened,
+        and the opened descriptor must be the same file (inode and device)."""
+        flags = DIRECTORY_FLAGS if is_directory else (
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        try:
+            before = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if not (stat.S_ISDIR if is_directory else stat.S_ISREG)(before.st_mode):
+                raise ToolError("not a regular file; symbolic links are not followed",
+                                "not_a_file")
+            descriptor = os.open(name, flags, dir_fd=directory)
+        except OSError as error:
+            if error.errno in (errno.ENOENT, errno.ENAMETOOLONG):
+                raise ToolError("no such file", "not_found", 404) from None
+            if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ToolError("not a regular file; symbolic links are not followed",
+                                "not_a_file") from None
+            raise ToolError("the file could not be opened", "unreadable") from None
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_ino, opened.st_dev) != (before.st_ino, before.st_dev):
+                raise ToolError("the file changed while it was opened", "changed_while_reading", 409)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def _open_file(self, folder: str, parts: list[str]) -> tuple[int, os.stat_result]:
+        """The open descriptor and fstat of a regular file; every component is
+        opened relative to the one before it with O_NOFOLLOW."""
+        current = self._open_root(folder)
+        try:
+            for name in parts[:-1]:
+                following = self._open_at(current, name, True)
+                os.close(current)
+                current = following
+            descriptor = self._open_at(current, parts[-1], False)
+        finally:
+            os.close(current)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise ToolError("not a regular file", "not_a_file")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor, info
+
+    # -- /v1/files/list -----------------------------------------------------
+
+    def list_files(self, folder, cursor=None, limit=None) -> dict:
+        try:
+            return self._list(folder, cursor, limit)
+        except ToolError as error:
+            raise api_error(error) from None
+
+    def _list(self, folder, cursor, limit) -> dict:
+        check_folder_id(folder)
+        resume = None if cursor is None else check_relative_path(cursor, "cursor", cursor=True)
+        if limit is None:
+            limit = LIST_DEFAULT_LIMIT
+        if type(limit) is not int or not 1 <= limit <= LIST_MAX_LIMIT:
+            raise ToolError(f"limit must be between 1 and {LIST_MAX_LIMIT}", "invalid_argument", 400)
+        root = self._open_root(folder)
+        budget = _Budget(self.clock() + LIST_SECONDS)
+        walk = self._walk(root, [], resume, budget)
+        entries: list[dict] = []
+        next_cursor = None
+        size = 0
+        unreadable = 0  # as of the last entry kept: what comes after is walked again by the next page
+        try:
+            for path, info in walk:
+                entry = {"path": path, "size": info.st_size, "mtime": info.st_mtime}
+                weight = len(json.dumps(entry)) + 2
+                if len(entries) == limit or (entries and size + weight > LIST_MAX_BYTES):
+                    next_cursor = entries[-1]["path"]  # one more entry exists
+                    break
+                entries.append(entry)
+                size += weight
+                unreadable = budget.unreadable
+            else:
+                unreadable = budget.unreadable
+                if budget.spent:
+                    # The page ran out of work, not of files. Everything up to the
+                    # last entry examined is done, listed or not.
+                    next_cursor = "/".join(budget.last) if budget.last else cursor
+        finally:
+            walk.close()  # closes the directories the walk holds open
+            os.close(root)
+        return {"entries": entries, "next_cursor": next_cursor, "unreadable": unreadable}
+
+    def _walk(self, directory: int, parts: list[str], resume: list[str] | None, budget: _Budget):
+        """Yields (relative path, lstat) of the regular files below the open
+        `directory`, depth first, by name at each level (see the module
+        docstring). `resume` is the rest of the cursor's components: names
+        before it are skipped without being entered, and the entries up to and
+        including the cursor itself are not yielded. Before it looks at a name it
+        checks `budget`; when that is used up the walk ends (`budget.spent`)."""
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError as error:
+            if not parts and error.errno in (errno.EACCES, errno.EPERM):
+                raise ToolError("the folder cannot be read", "folder_unreadable", 403) from None
+            budget.unreadable += 1  # a directory that cannot be read is skipped, and counted
+            return
+        for name in names:
+            if resume and name < resume[0]:
+                continue
+            on_cursor = bool(resume) and name == resume[0]
+            try:
+                name.encode("utf-8")  # a name that is not UTF-8 cannot be named: not listed, not counted
+            except UnicodeEncodeError:
+                continue
+            # The names on the way to the cursor were counted by the page before.
+            if not on_cursor:
+                if budget.examined >= LIST_MAX_EXAMINED or (
+                        budget.examined and self.clock() > budget.deadline):
+                    budget.spent = True
+                    return
+                budget.examined += 1
+                budget.last = parts + [name]
+            if name.startswith("."):
+                continue
+            try:
+                info = os.lstat(name, dir_fd=directory)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                if name in SKIPPED_DIRECTORIES or len(parts) + 1 > MAX_DIRECTORY_DEPTH:
+                    continue
+                try:
+                    child = os.open(name, DIRECTORY_FLAGS, dir_fd=directory)
+                except OSError:
+                    budget.unreadable += 1
+                    continue
+                try:
+                    yield from self._walk(child, parts + [name],
+                                          resume[1:] if on_cursor and len(resume) > 1 else None,
+                                          budget)
+                finally:
+                    os.close(child)
+                if budget.spent:
+                    return
+            elif stat.S_ISREG(info.st_mode):
+                if on_cursor:
+                    continue  # the cursor's own entry, or a file where its directory was
+                if not has_extension(name) and not name.lower().startswith("readme"):
+                    continue
+                path = "/".join(parts + [name])
+                if len(path) <= MAX_PATH_CHARS and not PATH_CONTROL_CHARACTERS.search(path):
+                    yield path, info
+
+    # -- /v1/files/passages -------------------------------------------------
+
+    def passages(self, folder, path) -> dict:
+        try:
+            return self._passages(folder, path)
+        except ToolError as error:
+            raise api_error(error) from None
+
+    def _passages(self, folder, path) -> dict:
+        check_folder_id(folder)
+        parts = check_relative_path(path)
+        is_pdf = os.path.splitext(parts[-1])[1].lower() == ".pdf"
+        descriptor, before = self._open_file(folder, parts)
+        slot = False
+        try:
+            limit = MAX_FILE_PDF_BYTES if is_pdf else MAX_TEXT_FILE_BYTES
+            if before.st_size > limit:
+                raise ToolError(f"the file is larger than {limit} bytes", "oversized")
+            if is_pdf:
+                if PdfReader is None:
+                    raise ToolError("this sandbox cannot read PDFs", "unreadable")
+                # The slot comes first: a PDF waiting for it is not held in memory.
+                slot = _PDF_SLOT.acquire(timeout=FILE_PDF_TIMEOUT + FILE_PDF_SLOT_EXTRA)
+                if not slot:
+                    raise ToolError("another PDF is being read; try again in a moment",
+                                    "pdf_busy", 503)
+            try:
+                data = read_descriptor(descriptor, before.st_size + 1)
+                after = os.fstat(descriptor)
+            except OSError:
+                raise ToolError("the file could not be read", "unreadable") from None
+            if (len(data) != before.st_size or after.st_size != before.st_size
+                    or after.st_mtime_ns != before.st_mtime_ns):
+                raise ToolError("the file changed while it was read", "changed_while_reading", 409)
+            passages = self._pdf_passages(data) if is_pdf else self._text_passages(data)
+        finally:
+            os.close(descriptor)
+            if slot:
+                _PDF_SLOT.release()
+        if len(passages) > MAX_PASSAGES:
+            raise ToolError(f"the file has more than {MAX_PASSAGES} passages", "too_many_passages")
+        return {"size": before.st_size, "mtime": before.st_mtime, "passages": passages}
+
+    @staticmethod
+    def _passage(page, first, last, text: str) -> dict | None:
+        text = clean_passage(text)
+        if not text:
+            return None
+        if len(text) > MAX_PASSAGE_TEXT_CHARS:
+            raise ToolError(f"a passage is longer than {MAX_PASSAGE_TEXT_CHARS} characters",
+                            "oversized")
+        return {"page": page, "line_start": first, "line_end": last, "text": text}
+
+    def _text_passages(self, data: bytes) -> list[dict]:
+        if b"\x00" in data:
+            raise ToolError("the file contains NUL bytes; it is not text", "unreadable")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ToolError("the file is not valid UTF-8", "unreadable") from None
+        if not text.strip(SWIFT_WHITESPACE):
+            raise ToolError("the file has no text", "empty")
+        found = (self._passage(None, first, last, chunk) for first, last, chunk in chunk_text(text))
+        passages = [passage for passage in found if passage is not None]
+        if not passages:
+            raise ToolError("the file has no text", "empty")
+        return passages
+
+    def _pdf_passages(self, data: bytes) -> list[dict]:
+        if PdfReader is None:
+            raise ToolError("this sandbox cannot read PDFs", "unreadable")
+        result = read_pdf_pages_bounded(data, slot_held=True)
+        passages: list[dict] = []
+        for number, text in result["texts"]:
+            text = text.strip(SWIFT_WHITESPACE)
+            for _, _, chunk in chunk_text(text) if text else ():
+                passage = self._passage(number, None, None, chunk)
+                if passage is not None:
+                    passages.append(passage)
+            if len(passages) > MAX_PASSAGES:
+                break
+        if not passages:
+            if result["pages_failed"] and result["pages_failed"] >= result["pages_read"]:
+                raise ToolError("the PDF's pages could not be read", "unreadable")
+            raise ToolError("the PDF has no text that can be read (scanned pages are not read; "
+                            "there is no OCR)", "empty")
+        return passages
+
+
 # --- Signing ----------------------------------------------------------------
 
 REQUEST_LABEL = "tuff-sandbox-req-v1"
@@ -1377,6 +1925,11 @@ def host_allowed(header: str | None) -> bool:
 
 PAGE_FIELDS = {"url", "max_bytes", "timeout_seconds", "max_characters"}
 HTTP_FIELDS = {"url", "method", "headers", "body_base64", "max_bytes", "timeout_seconds"}
+LIST_FIELDS = {"folder", "cursor", "limit"}
+PASSAGES_FIELDS = {"folder", "path"}
+# The POST paths each profile serves; any other path is unknown.
+PROFILE_PATHS = {"web": ("/v1/page", "/v1/http"),
+                 "files": ("/v1/files/list", "/v1/files/passages")}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1386,7 +1939,9 @@ class Handler(BaseHTTPRequestHandler):
     # connection is closed. It limits waits on the client's socket only, not
     # the fetch a request runs.
     timeout = REQUEST_TIMEOUT
-    tools: WebTools = WebTools()
+    tools: WebTools | FilesTools = WebTools()
+    # The SANDBOX_PROFILE this server runs, set by main() with `tools`.
+    profile: str = "web"
     # Set by main(); tests set their own. Without a secret nothing is served.
     secret: bytes = b""
     nonces: NonceStore = NonceStore()
@@ -1532,13 +2087,17 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET":
                 if self.path != "/health":
                     raise ToolError("not found", "not_found", 404)
+                if self.profile == "files":
+                    return self._send(200, {
+                        "status": "ok", "profile": "files", "api": 1, "pdf": PdfReader is not None,
+                        "blocked_addresses": 0, "folders": self.tools.folders()})
                 return self._send(200, {
                     "status": "ok", "profile": "web", "api": 1, "pdf": PdfReader is not None,
                     "extractor": "trafilatura" if trafilatura is not None else "fallback",
                     "blocked_addresses": len(BLOCKED_ADDRESSES)})
             if method != "POST":
                 raise ToolError("method not allowed", "method_not_allowed", 405)
-            if self.path not in ("/v1/page", "/v1/http"):
+            if self.path not in PROFILE_PATHS[self.profile]:
                 raise ToolError("not found", "not_found", 404)
             # A browser cannot send application/json cross-origin without a
             # preflight, which this server never answers.
@@ -1553,7 +2112,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise ToolError("request body is not JSON", "invalid_request", 400) from None
             if not isinstance(request, dict):
                 raise ToolError("request body must be a JSON object", "invalid_request", 400)
-            if self.path == "/v1/page":
+            if self.path == "/v1/files/list":
+                self._fields(request, LIST_FIELDS)
+                result = self.tools.list_files(
+                    request.get("folder"), request.get("cursor"), request.get("limit"))
+            elif self.path == "/v1/files/passages":
+                self._fields(request, PASSAGES_FIELDS)
+                result = self.tools.passages(request.get("folder"), request.get("path"))
+            elif self.path == "/v1/page":
                 self._fields(request, PAGE_FIELDS)
                 result = self.tools.page(
                     request.get("url"), request.get("max_bytes", DEFAULT_MAX_BYTES),
@@ -1674,25 +2240,34 @@ def stop_on_sigterm(server) -> None:
 
 def main():
     global BLOCKED_ADDRESSES
+    profile = os.environ.get(PROFILE_ENV, "web")
+    if profile not in PROFILES:
+        sys.exit(f"{PROFILE_ENV} must be one of {', '.join(PROFILES)}; refusing to start")
     # The secret is read first, while this process is still root, and only
-    # once. The blocklist is taken out of the environment as well.
+    # once. The blocklist is taken out of the environment as well (the files
+    # profile has no use for it and ignores it).
     Handler.secret = load_secret(os.environ.get("SANDBOX_SECRET_FILE", DEFAULT_SECRET_FILE))
-    try:
-        BLOCKED_ADDRESSES = load_blocked_addresses(os.environ.pop(BLOCKED_ENV, ""))
-    except ValueError as error:
-        sys.exit(f"{BLOCKED_ENV}: {error}; refusing to start")
+    if profile == "files":
+        os.environ.pop(BLOCKED_ENV, None)
+        Handler.profile, Handler.tools = "files", FilesTools()
+    else:
+        try:
+            BLOCKED_ADDRESSES = load_blocked_addresses(os.environ.pop(BLOCKED_ENV, ""))
+        except ValueError as error:
+            sys.exit(f"{BLOCKED_ENV}: {error}; refusing to start")
+    # Before any file is read: the files are read by the unprivileged user.
     drop_privileges()
     # 0.0.0.0, not 127.0.0.1: `container run --publish` forwards the Mac's
     # 127.0.0.1:<port> to this VM's network address, not to its loopback, so a
     # loopback-only server would never be reached. The VM's input firewall
-    # (firewall-web.nft) accepts new connections on this port only, and only
-    # from the VM's default gateway, which entrypoint.sh puts into the rule;
-    # the Mac side is published on 127.0.0.1 only. Anything that can send from
-    # the gateway address (processes on the Mac) can still connect, so the
-    # Host check and the signature check stay.
+    # (firewall-web.nft or firewall-files.nft) accepts new connections on this
+    # port only, and only from the VM's default gateway, which entrypoint.sh
+    # puts into the rule; the Mac side is published on 127.0.0.1 only. Anything
+    # that can send from the gateway address (processes on the Mac) can still
+    # connect, so the Host check and the signature check stay.
     server = BoundedServer(("0.0.0.0", PORT), Handler)
     stop_on_sigterm(server)
-    sys.stderr.write(f"TUFF web sandbox listening on :{PORT}\n")
+    sys.stderr.write(f"TUFF {profile} sandbox listening on :{PORT}\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

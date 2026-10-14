@@ -103,6 +103,11 @@ public final class AppModel {
     /// tool store's sandbox access.
     @ObservationIgnored public private(set) var sandbox: SandboxController
     @ObservationIgnored private var sandboxTask: Task<Void, Never>?
+    /// The files sandbox: a second VM with no network that reads the folders
+    /// chosen for file search. Started when indexing needs it, never for
+    /// anything else.
+    @ObservationIgnored public private(set) var filesSandbox: SandboxController
+    @ObservationIgnored private var filesSandboxTask: Task<Void, Never>?
     #endif
     public let deviceCapabilities: TUFFDeviceCapabilities
     private var runsAfterCurrentLoad = false
@@ -499,6 +504,12 @@ public final class AppModel {
         let liveSettings = self.settingsStore
         tools.sandboxWeb = SandboxWebAccess(
             controller: sandbox, mayRestart: { await liveSettings.runWebInSandbox })
+        let filesSandbox = SandboxController(dependencies: .live(profile: .files))
+        self.filesSandbox = filesSandbox
+        tools.sandboxFiles = SandboxFilesService(
+            controller: filesSandbox,
+            access: SandboxWebAccess(controller: filesSandbox,
+                                     mayRestart: { await liveSettings.runFilesInSandbox }))
         #endif
         self.networkStatus = networkStatus ?? AppNetworkStatus(monitorsConnectivity: settingsPersistenceEnabled)
         self.deviceCapabilities = deviceCapabilities
@@ -554,6 +565,8 @@ public final class AppModel {
         self.settingsStore.webSearchEnabled = settings.webSearchEnabled
         self.settingsStore.pauseWebSearchWhenOffline = settings.pauseWebSearchWhenOffline
         self.settingsStore.runWebInSandbox = settings.runWebInSandbox
+        self.settingsStore.runFilesInSandbox = settings.runFilesInSandbox
+        self.toolStore.indexInSandbox = settings.runFilesInSandbox
         self.settingsStore.fileSearchEnabled = settings.fileSearchEnabled
         self.settingsStore.searchProvider = settings.searchProvider
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
@@ -2594,6 +2607,8 @@ public final class AppModel {
             settingsStore.webSearchEnabled = settings.webSearchEnabled
             settingsStore.pauseWebSearchWhenOffline = settings.pauseWebSearchWhenOffline
             settingsStore.runWebInSandbox = settings.runWebInSandbox
+            settingsStore.runFilesInSandbox = settings.runFilesInSandbox
+            toolStore.indexInSandbox = settings.runFilesInSandbox
             settingsStore.fileSearchEnabled = settings.fileSearchEnabled
             settingsStore.searchProvider = settings.searchProvider
         }
@@ -2733,6 +2748,7 @@ public final class AppModel {
         settings.webSearchEnabled = settingsStore.webSearchEnabled
         settings.pauseWebSearchWhenOffline = settingsStore.pauseWebSearchWhenOffline
         settings.runWebInSandbox = settingsStore.runWebInSandbox
+        settings.runFilesInSandbox = settingsStore.runFilesInSandbox
         settings.fileSearchEnabled = settingsStore.fileSearchEnabled
         settings.searchProvider = settingsStore.searchProvider
         if (try? MacAppSettingsFileStore.save(
@@ -3543,7 +3559,38 @@ public final class AppModel {
         }
     }
 
+    /// Reading the folders chosen for file search happens in a second
+    /// sandbox with no network, so a file the app cannot parse safely is never
+    /// opened in the app. Off by default; turning it on indexes through the
+    /// sandbox from then on, turning it off stops the sandbox.
+    public var runFilesInSandbox: Bool {
+        get { settingsStore.runFilesInSandbox }
+        set {
+            guard settingsStore.runFilesInSandbox != newValue else { return }
+            settingsStore.runFilesInSandbox = newValue
+            toolStore.stopIndexing()
+            toolStore.indexInSandbox = newValue
+            persistSettings()
+            #if os(macOS)
+            filesSandboxTask?.cancel()
+            filesSandboxTask = Task { [weak self] in await self?.applyFilesSandboxSetting() }
+            #endif
+        }
+    }
+
     #if os(macOS)
+    /// Makes the index follow the setting: indexing in progress is stopped,
+    /// a sandbox that is no longer wanted is stopped, and the folders are
+    /// brought up to date by the reader the setting now names.
+    private func applyFilesSandboxSetting() async {
+        toolStore.stopIndexing()
+        if !settingsStore.runFilesInSandbox { await toolStore.sandboxFiles?.stop() }
+        // A file one reader skipped may be fine for the other.
+        toolStore.forgetSkippedFiles()
+        guard !Task.isCancelled else { return }
+        if settingsStore.fileSearchEnabled { toolStore.reindex() }
+    }
+
     /// The sandbox needs macOS 26 or newer; the setting is hidden below it.
     public var isSandboxSupported: Bool { deviceCapabilities.macOSMajorVersion >= 26 }
 
@@ -3575,10 +3622,11 @@ public final class AppModel {
     public func prepareSandboxAtLaunch() {
         let used = FileManager.default.fileExists(
             atPath: SandboxLocations.defaultStateDirectory().path)
-        guard settingsStore.runWebInSandbox || used else { return }
+        guard settingsStore.runWebInSandbox || settingsStore.runFilesInSandbox || used else { return }
         sandboxTask = Task { [weak self] in
             guard let self else { return }
             await self.sandbox.cleanUpLeftovers()
+            await self.filesSandbox.cleanUpLeftovers()
             if self.settingsStore.runWebInSandbox { await self.sandbox.start() }
         }
     }
@@ -3586,10 +3634,16 @@ public final class AppModel {
     /// When the app quits: stops the sandbox, waiting a few seconds.
     public func stopSandboxWhenQuitting() {
         sandboxTask?.cancel()
+        filesSandboxTask?.cancel()
+        toolStore.stopIndexing()
         sandbox.stopWhenQuitting()
+        filesSandbox.stopWhenQuitting()
     }
 
-    func finishSandboxWork() async { await sandboxTask?.value }
+    func finishSandboxWork() async {
+        await sandboxTask?.value
+        await filesSandboxTask?.value
+    }
 
     /// Tests give the model a sandbox with a fake `container`.
     func installSandbox(_ controller: SandboxController,
@@ -3600,6 +3654,17 @@ public final class AppModel {
             controller: controller, mayRestart: { await settings.runWebInSandbox })
         if let makeClient { access.makeClient = makeClient }
         toolStore.sandboxWeb = access
+    }
+
+    /// The same for the files sandbox.
+    func installFilesSandbox(_ controller: SandboxController,
+                             makeClient: (@Sendable (SandboxLease) -> SandboxClient)? = nil) {
+        filesSandbox = controller
+        let settings = settingsStore
+        var access = SandboxWebAccess(
+            controller: controller, mayRestart: { await settings.runFilesInSandbox })
+        if let makeClient { access.makeClient = makeClient }
+        toolStore.sandboxFiles = SandboxFilesService(controller: controller, access: access)
     }
     #endif
 

@@ -1,6 +1,7 @@
 #if os(macOS)
 import Darwin
 import Foundation
+import os
 
 /// What a finished command printed and how it ended.
 struct SandboxProcessResult: Equatable, Sendable {
@@ -24,6 +25,20 @@ struct SandboxProcessResult: Equatable, Sendable {
             .filter { !$0.isEmpty }
             .suffix(lines)
             .joined(separator: " | ")
+    }
+}
+
+/// Where a failed command's whole output goes, so it can be read later: the
+/// message on screen keeps only its last lines. Standard error ends up in
+/// the terminal TUFF was started from; the unified log keeps it too, with
+/// the folder paths in it marked private.
+enum SandboxLog {
+    private static let logger = Logger(subsystem: "TUFF", category: "sandbox")
+
+    static func commandFailed(action: String, status: Int32, output: String) {
+        let text = "sandbox: could not \(action) (exit \(status)):\n\(output)\n"
+        logger.error("\(text, privacy: .private)")
+        FileHandle.standardError.write(Data(text.utf8))
     }
 }
 
