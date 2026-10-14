@@ -3,6 +3,13 @@
 set -euo pipefail
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_directory/.."
+# The sandbox checks are quick; they run first so a failure in the long Swift
+# suite below does not hide them.
+python3 Sandbox/test_server.py
+python3 Sandbox/test_signing.py
+python3 Sandbox/test_infra.py
+bash -n Scripts/sandbox_selftest.sh
+sh -n Sandbox/entrypoint.sh
 Scripts/test.sh
 python3 Scripts/test_calibrate_runtime.py
 python3 Scripts/test_release_harnesses.py

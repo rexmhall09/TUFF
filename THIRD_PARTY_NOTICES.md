@@ -90,3 +90,34 @@ No copyleft or custom non-commercial license was found in this resolved graph.
 The dependency license files remain authoritative. For binary distribution,
 collect their license and NOTICE files from the exact revisions in
 `Package.resolved`; do not treat this summary as a substitute for that bundle.
+
+## Sandbox image
+
+The web sandbox image built from [`Sandbox/`](Sandbox/) is a separate artifact,
+not part of the app bundle. It contains the packages below, pinned by hash in
+[`Sandbox/requirements.txt`](Sandbox/requirements.txt), on top of the pinned
+`python:3.12-slim` base image (Debian and CPython, each under its own terms)
+and Debian's `nftables` package (GPL-2.0-only, installed unmodified from a
+dated snapshot). Licenses are those stated in each package's metadata at the
+pinned version. `tld` offers MPL-1.1, GPL-2.0 or LGPL-2.1 terms and `regex`
+adds the CNRI Python license; both and `certifi` (MPL-2.0) are used unmodified.
+This list was not a legal review. Anyone redistributing the image must
+preserve the license and NOTICE material of its exact contents.
+
+| Package | Version | License |
+| --- | --- | --- |
+| [trafilatura](https://github.com/adbar/trafilatura) | 2.3.0 | Apache-2.0 |
+| [pypdf](https://github.com/py-pdf/pypdf) | 6.20.0 | BSD-3-Clause |
+| [courlan](https://github.com/adbar/courlan) | 1.4.0 | Apache-2.0 |
+| [htmldate](https://github.com/adbar/htmldate) | 1.11.0 | Apache-2.0 |
+| [jusText](https://github.com/miso-belica/jusText) | 3.0.2 | BSD-2-Clause |
+| [lxml](https://github.com/lxml/lxml) and lxml_html_clean | 6.1.3, 0.4.5 | BSD-3-Clause |
+| [dateparser](https://github.com/scrapinghub/dateparser) | 1.4.3 | BSD-3-Clause |
+| [python-dateutil](https://github.com/dateutil/dateutil) | 2.9.0.post0 | BSD-3-Clause or Apache-2.0 |
+| [Babel](https://github.com/python-babel/babel) | 2.18.0 | BSD-3-Clause |
+| [tld](https://github.com/barseghyanartur/tld) | 0.13.2 | MPL-1.1, GPL-2.0-only or LGPL-2.1-or-later |
+| [regex](https://github.com/mrabarnett/mrab-regex) | 2026.9.29 | Apache-2.0 and CNRI-Python |
+| [certifi](https://github.com/certifi/python-certifi) | 2026.7.22 | MPL-2.0 |
+| [charset-normalizer](https://github.com/jawah/charset_normalizer) | 3.5.2 | MIT |
+| [urllib3](https://github.com/urllib3/urllib3) | 2.8.0 | MIT |
+| [pytz](https://github.com/stub42/pytz), [six](https://github.com/benjaminp/six), [tzlocal](https://github.com/regebro/tzlocal) | 2026.4, 1.17.0, 5.4.4 | MIT |

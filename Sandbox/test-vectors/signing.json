@@ -1,0 +1,68 @@
+{
+  "description": "Fixed examples for the web sandbox's request and answer signatures. Both the server (Sandbox/server.py) and the app must reproduce every expected_auth value. The secret is the UTF-8 text below. body_utf8 is the exact request or answer body as UTF-8; time is the X-Sandbox-Time value as sent. Signing strings are the fields joined with LF: tuff-sandbox-req-v1, method, path, nonce, time, hex(SHA256(request body)) for a request; tuff-sandbox-resp-v1, method, path, nonce, status, hex(SHA256(answer body)) for an answer. Values were produced with openssl and checked against Python's hmac.",
+  "secret_utf8": "tuff-sandbox-test-secret-0123456789abcdef",
+  "request": [
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+      "time": "1786000000",
+      "body_utf8": "",
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_auth": "342d889d185a65b25786207d2880685b98f11312544feb2b3bfd2948a90e93ff"
+    },
+    {
+      "name": "page",
+      "method": "POST",
+      "path": "/v1/page",
+      "nonce": "abababababababababababababababababababababababababababababababab",
+      "time": "1786000042",
+      "body_utf8": "{\"url\":\"https://example.com/docs\",\"max_bytes\":2097152,\"timeout_seconds\":15,\"max_characters\":100000}",
+      "body_sha256": "e0b2912927702016242edcfdb978e0066b20866d52d274548a8cba03e57bffc0",
+      "expected_auth": "9276552dc8685c461ede2038bd805e7ae7b97065b1d1d3b36401966a82114d70"
+    },
+    {
+      "name": "http-unicode",
+      "method": "POST",
+      "path": "/v1/http",
+      "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "time": "1786000100",
+      "body_utf8": "{\"url\":\"https://html.duckduckgo.com/html/\",\"method\":\"POST\",\"headers\":{\"Content-Type\":\"application/x-www-form-urlencoded\"},\"body_base64\":\"cT1uYWl2ZSBjYWbDqQ==\"}",
+      "body_sha256": "a26ceb107db9ee50257bd92e18e2e3bef4136c67b72d7fb83d97f6bfb17b6d63",
+      "expected_auth": "a6b712cbdb9a87f99d1431ee07d3d5873db009f5dbf7ea270abb336621dd3083"
+    }
+  ],
+  "response": [
+    {
+      "name": "health-ok",
+      "method": "GET",
+      "path": "/health",
+      "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+      "status": 200,
+      "body_utf8": "{\"status\": \"ok\", \"profile\": \"web\", \"api\": 1}",
+      "body_sha256": "979a741881cbd410215dd5474b642268384dc0abb50796c7f3cc3258c16d4061",
+      "expected_auth": "ee6e45718ab39c2df5e374991c829285f7f6788d9c971b65812548edf05f2e69"
+    },
+    {
+      "name": "page-error",
+      "method": "POST",
+      "path": "/v1/page",
+      "nonce": "abababababababababababababababababababababababababababababababab",
+      "status": 422,
+      "body_utf8": "{\"error\": {\"message\": \"café is not a web page\", \"code\": \"unsupported_content\"}}",
+      "body_sha256": "3cb1ad4dbb5c75211975ffdc91caf2909e3260fed5b2008e47995a40542009c6",
+      "expected_auth": "49f7cb7c6429a8fbf6cc03bf6db0fa85830ff85674d47f9dbe00ed2356b1dce1"
+    },
+    {
+      "name": "empty-body",
+      "method": "POST",
+      "path": "/v1/http",
+      "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "status": 204,
+      "body_utf8": "",
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_auth": "e1275d008ff07735e08da7c1dcffd453cbacc68d7112ad4bd287d1d227d8bbea"
+    }
+  ]
+}

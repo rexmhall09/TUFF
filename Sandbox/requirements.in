@@ -1,0 +1,8 @@
+# Direct dependencies of server.py. requirements.txt is generated from this file
+# with every transitive dependency pinned and hashed:
+#   uv pip compile requirements.in --python-version 3.12 \
+#     --python-platform aarch64-unknown-linux-gnu --generate-hashes -o requirements.txt
+trafilatura==2.3.0
+# pypdf reads PDFs inside the bounded child process (pure Python, BSD-3-Clause;
+# no crypto or image extras, so encrypted PDFs are refused, not decrypted).
+pypdf==6.20.0

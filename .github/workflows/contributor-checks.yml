@@ -51,6 +51,18 @@ jobs:
           python3 Scripts/test_route_issue.py
           python3 Scripts/test_release_recovery.py
           python3 Scripts/test_homebrew.py
+      # The web sandbox's server, signing and image files. This runner has only
+      # the system python3: the tests that need pypdf or trafilatura skip here.
+      # They run in full in a virtual environment with trafilatura and pypdf
+      # installed (see Sandbox/README.md).
+      - name: Sandbox server regressions
+        if: success() || failure()
+        run: |
+          python3 Sandbox/test_server.py
+          python3 Sandbox/test_signing.py
+          python3 Sandbox/test_infra.py
+          bash -n Scripts/sandbox_selftest.sh
+          sh -n Sandbox/entrypoint.sh
       - name: Ruby harness regressions
         if: success() || failure()
         run: |

@@ -1,0 +1,89 @@
+# Firewall for the web sandbox VM (the `web` profile), loaded by entrypoint.sh
+# as root before the server drops its privileges. server.py already refuses
+# these addresses; this table holds even if code in the VM were taken over.
+#
+# The VM may reach public internet addresses, not the Mac (the VM's gateway),
+# the local network, carrier-grade NAT, link-local or cloud metadata addresses.
+# Replies on connections the Mac opened to the published port are allowed.
+# entrypoint.sh fills the sets blocked4 and blocked6 with the addresses the app
+# passed in SANDBOX_BLOCKED_ADDRESSES (the Mac's own interface addresses,
+# including any public IPv4 or global IPv6 one), and inserts DNS (port 53 only)
+# to the VM's configured nameservers above everything else. The nameserver is
+# normally the Mac, so DNS is the one exception to the blocked sets. The blocked
+# rules sit below the rule that allows replies, so the answers to the Mac's own
+# connections to the published port are not refused.
+#
+# Inbound, the VM accepts new connections on one port only: 9100, the server's
+# port, and only from the VM's default gateway, the address that
+# `container run --publish` connects from (which is why the server binds
+# 0.0.0.0). Everything else that is new is dropped, so a program in the VM that
+# listens elsewhere, or another VM on the same bridge scanning for services,
+# finds nothing. The order of the two chains does not matter. Whatever can send
+# from the gateway address, such as processes on the Mac, can still reach 9100;
+# the server's Host check and its signature check cover that.
+#
+# $gateway is not defined here: entrypoint.sh reads the default gateway from
+# /proc/net/route, validates it as an IPv4 address and passes it with
+# `nft -D gateway=ADDRESS -f`. Loaded without it, nft fails on the unknown
+# variable, so the file never opens 9100 to everyone. IPv6: `ip saddr` matches
+# IPv4 packets only, so over IPv6 nothing but loopback is accepted inbound.
+
+table inet tuff_sandbox_web
+delete table inet tuff_sandbox_web
+
+table inet tuff_sandbox_web {
+    set private4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+            0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+            172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24,
+            192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24,
+            224.0.0.0/3
+        }
+    }
+
+    # Filled by entrypoint.sh (`nft add element`); empty when the app passes none.
+    set blocked4 {
+        type ipv4_addr
+    }
+
+    set blocked6 {
+        type ipv6_addr
+    }
+
+    set refused6 {
+        type ipv6_addr
+        flags interval
+        elements = { 2001::/32, 2001:db8::/32, 2002::/16 }
+    }
+
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oifname "lo" accept
+        ct state established,related accept
+        # TCP gets a reset, which fails a connection at once; the kernel
+        # rate-limits the ICMP errors other refusals send.
+        meta nfproto ipv4 ip daddr @blocked4 meta l4proto tcp reject with tcp reset
+        meta nfproto ipv4 ip daddr @blocked4 reject
+        meta nfproto ipv6 ip6 daddr @blocked6 meta l4proto tcp reject with tcp reset
+        meta nfproto ipv6 ip6 daddr @blocked6 reject
+        meta nfproto ipv4 ip daddr @private4 meta l4proto tcp reject with tcp reset
+        meta nfproto ipv4 ip daddr @private4 reject
+        meta nfproto ipv4 accept
+        meta nfproto ipv6 ip6 daddr @refused6 meta l4proto tcp reject with tcp reset
+        meta nfproto ipv6 ip6 daddr @refused6 reject
+        meta nfproto ipv6 ip6 daddr 2000::/3 accept
+        meta l4proto tcp reject with tcp reset
+        reject
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept
+        ct state established,related accept
+        # Keep in step with PORT in server.py and with --publish in
+        # Scripts/sandbox_selftest.sh.
+        ip saddr $gateway tcp dport 9100 accept
+    }
+}
