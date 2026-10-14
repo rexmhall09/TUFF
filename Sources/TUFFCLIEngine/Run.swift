@@ -457,6 +457,7 @@ public func run(args: Args,
             lines += "  logical demand expert reads: \(reads.demandReads), bytes: \(reads.demandBytes), failures: \(reads.demandFailures)\n"
             lines += "  logical prefetch expert reads: \(reads.prefetchReads), bytes: \(reads.prefetchBytes), failures: \(reads.prefetchFailures)\n"
             lines += "  useful prefetched records: \(reads.usefulPrefetchReads), evicted unused: \(reads.unusedPrefetchEvictions)\n"
+            lines += "  demand misses on experts a prediction pushed out: \(reads.pollutedDemandMisses)\n"
             lines += "  logical traffic includes prefill and OS-cache hits; physical SSD traffic is not measured\n"
             lines += "  routed expert cache hits: \(runner.totalRoutedExpertCacheHits)\n"
             lines += "  routed expert cache misses: \(runner.totalRoutedExpertCacheMisses)\n"

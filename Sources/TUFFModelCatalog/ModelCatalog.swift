@@ -1176,7 +1176,23 @@ public enum TUFFModelCatalog {
             expertCacheBytesPerSlot: 0, kvCache: TUFFKVCacheProfile(fullAttentionBytesPerToken: 32768)),
         qualification: .qualified,
         runtimeDefaults: TUFFModelRuntimeDefaults(temperature: 0.7, topK: 20, topP: 0.8),
-        capabilities: [.textGeneration, .reasoning], reasoningControl: .toggleWithPreservation)
+        capabilities: [.textGeneration, .imageInput, .reasoning], reasoningControl: .toggleWithPreservation,
+        // The MLX conversion left the vision tower out, so the pack comes from
+        // Ornith's own BF16 release of the same model.
+        addons: [TUFFModelAddonDescriptor(
+            id: "ornith-9b-image-input",
+            displayName: "Ornith 1.5 9B Image Support",
+            kind: .imageInput,
+            source: TUFFModelSource(repoID: "ornith-ai/Ornith-1.5-9B",
+                revision: "489cb97981b8654bcfcf30ce1f94ed1b62e07b53",
+                sourceIndexSHA256: "d5c7fee99574e9a05f901282aee04fc4fc3dccf094a659df48c6b8e9f39109c3",
+                manifestModelID: "ornith-ai/Ornith-1.5-9B",
+                approximateDownloadBytes: 912_020_960,
+                installedBytes: 912_020_960,
+                reserveBytes: oneGiB),
+            hardware: TUFFModelHardwareRequirements(
+                minimumUnifiedMemoryBytes: 16 * oneGiB,
+                minimumAppleSiliconGeneration: 2))])
 
     public static let ornith15_35B_A3B = TUFFModelDescriptor(
         id: .ornith15_35B_A3B, selector: "ornith-35b", apiModelID: "ornith-35b",
@@ -1191,7 +1207,22 @@ public enum TUFFModelCatalog {
             expertCacheBytesPerSlot: 70778880, kvCache: TUFFKVCacheProfile(fullAttentionBytesPerToken: 20480)),
         qualification: .qualified,
         runtimeDefaults: TUFFModelRuntimeDefaults(temperature: 0.7, topK: 20, topP: 0.8),
-        capabilities: [.textGeneration, .reasoning], reasoningControl: .toggleWithPreservation)
+        capabilities: [.textGeneration, .imageInput, .reasoning], reasoningControl: .toggleWithPreservation,
+        // As with 9B, the vision tower is only in Ornith's BF16 release.
+        addons: [TUFFModelAddonDescriptor(
+            id: "ornith-35b-image-input",
+            displayName: "Ornith 1.5 35B-A3B Image Support",
+            kind: .imageInput,
+            source: TUFFModelSource(repoID: "ornith-ai/Ornith-1.5-35B-A3B",
+                revision: "10fbf86fed7ecee4a061f8b499a618f46001cac1",
+                sourceIndexSHA256: "0ad9fbfbb1a7514773ed881d3c9403019bd7ae9ff4c6af3cfc65ca7da784d78f",
+                manifestModelID: "ornith-ai/Ornith-1.5-35B-A3B",
+                approximateDownloadBytes: 893_142_496,
+                installedBytes: 893_142_496,
+                reserveBytes: oneGiB),
+            hardware: TUFFModelHardwareRequirements(
+                minimumUnifiedMemoryBytes: 16 * oneGiB,
+                minimumAppleSiliconGeneration: 2))])
 
     public static let qwen38_27B = TUFFModelDescriptor(
         id: .qwen38_27B, selector: "qwen38-27b", apiModelID: "qwen38-27b",
@@ -1243,7 +1274,22 @@ public enum TUFFModelCatalog {
         qualification: .qualified,
         runtimeDefaults: TUFFModelRuntimeDefaults(contextTokens: 2_048, expertCacheSlots: 16,
             temperature: 0.7, topK: 20, topP: 0.8),
-        capabilities: [.textGeneration, .reasoning], reasoningControl: .toggleWithPreservation)
+        capabilities: [.textGeneration, .imageInput, .reasoning], reasoningControl: .toggleWithPreservation,
+        // The checkpoint keeps its BF16 vision tower beside the 4-bit weights.
+        addons: [TUFFModelAddonDescriptor(
+            id: "ornith-397b-image-input",
+            displayName: "Ornith 1.5 397B Image Support",
+            kind: .imageInput,
+            source: TUFFModelSource(repoID: "gratex/Ornith-1.5-397B-W4A16-g32-sym",
+                revision: "62fbf868ef177baf41f47c3e0001699a4ec54f02",
+                sourceIndexSHA256: "99e7ee7bbbf6f18184967b4be9a118f63c16c2fcbbe0bb8876088eaa9f03c177",
+                manifestModelID: "gratex/Ornith-1.5-397B-W4A16-g32-sym",
+                approximateDownloadBytes: 912_020_960,
+                installedBytes: 912_020_960,
+                reserveBytes: oneGiB),
+            hardware: TUFFModelHardwareRequirements(
+                minimumUnifiedMemoryBytes: 16 * oneGiB,
+                minimumAppleSiliconGeneration: 2))])
 
     /// Community abliterated derivative. It shares Gemma's architecture and
     /// engine, but never shares a checkpoint identity, install or settings.
@@ -1275,6 +1321,22 @@ public enum TUFFModelCatalog {
                 reserveBytes: oneGiB),
             hardware: TUFFModelHardwareRequirements(minimumUnifiedMemoryBytes: eightGiB,
                 minimumAppleSiliconGeneration: 2))])
+
+    /// Whether an image pack read from the checkpoint whose index hashes to
+    /// `visionSourceIndexSHA256` may serve the text model built from
+    /// `textSourceSnapshotHash` (`sha256:<hex>`). Normally both are one
+    /// checkpoint. A catalog add-on can name another one, pinned by hash, when
+    /// the text conversion dropped the vision tower.
+    public static func imagePackSourceMatches(textSourceSnapshotHash: String,
+                                              visionSourceIndexSHA256: String) -> Bool {
+        if textSourceSnapshotHash == "sha256:\(visionSourceIndexSHA256)" { return true }
+        return all.contains { model in
+            "sha256:\(model.source.sourceIndexSHA256)" == textSourceSnapshotHash
+                && model.addons.contains {
+                    $0.kind == .imageInput && $0.source.sourceIndexSHA256 == visionSourceIndexSHA256
+                }
+        }
+    }
 
     public static let all: [TUFFModelDescriptor] = [
         gemma4_E2B,

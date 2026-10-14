@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Metal
 import TUFFFormat
+import TUFFModelCatalog
 
 /// The text family a companion pack belongs to. Packs are shaped by the tower
 /// they carry, and the tower is chosen by the text model, so this is a
@@ -72,8 +73,9 @@ final class VisionWeightStore {
         }
         guard manifest.compatibleTextSourceSnapshotHash
                 == compatibleTextSourceSnapshotHash,
-              compatibleTextSourceSnapshotHash
-                == "sha256:\(manifest.sourceIndexSha256)",
+              TUFFModelCatalog.imagePackSourceMatches(
+                textSourceSnapshotHash: compatibleTextSourceSnapshotHash,
+                visionSourceIndexSHA256: manifest.sourceIndexSha256),
               manifest.compatibleTextManifestSha256.lowercased()
                 == compatibleTextManifestSha256.lowercased() else {
             throw VisionPackError.incompatibleTextArtifact

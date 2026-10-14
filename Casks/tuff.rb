@@ -1,6 +1,6 @@
 cask "tuff" do
-  version "9.1.2"
-  sha256 "4977c0e95c6e994a55952a474cb8aa170ec95c6fc0fa266ed1977f9956bb3c8b"
+  version "9.2.0"
+  sha256 "7d402a4bfcdd04ef14e81ce37d0ed382e7fb6b22f9f462d106f032cb00ca779d"
 
   url "https://github.com/rexmhall09/TUFF/releases/download/v#{version}/TUFF-v#{version}-macos-arm64.zip"
   name "TUFF"

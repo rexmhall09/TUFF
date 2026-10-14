@@ -300,13 +300,19 @@ private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
         }
     }
 
-    let source: SupportedModelSource
+    let textSource: SupportedModelSource
     do {
-        source = try visionSource(arguments: arguments, textModel: textModel)
+        textSource = try visionSource(arguments: arguments, textModel: textModel)
     } catch {
         printError("could not identify text-model family: \(error)")
         return 2
     }
+    // The catalog's image add-on names where the pack comes from. Usually the
+    // text model's own checkpoint; for Ornith 9B and 35B, Ornith's BF16 release.
+    let addon = TUFFModelCatalog.model(manifestModelID: textSource.modelID)?
+        .addons.first { $0.kind == .imageInput }?.source
+    let source = (repoID: addon?.repoID ?? textSource.repoID,
+                  revision: addon?.revision ?? textSource.revision)
 
     if arguments.activateVisionInstall {
         do {

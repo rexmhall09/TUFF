@@ -23,12 +23,26 @@ import TUFFRepackCore
                         "\(model.selector) has no image input but offers a pack")
                 continue
             }
+            // Ornith 9B and 35B are the exceptions: their MLX conversions
+            // dropped the tower, so the pack comes from Ornith's BF16 release
+            // of the same model, pinned by revision and hash.
+            if let repo = separateImageSources[model.id] {
+                #expect(companion?.repoID == repo)
+                #expect(companion?.revision.count == 40)
+                #expect(companion?.sourceIndexSHA256 != model.source.sourceIndexSHA256)
+                continue
+            }
             #expect(companion?.repoID == model.source.repoID,
                     "\(model.selector) image pack points at \(companion?.repoID ?? "nil")")
             #expect(companion?.revision == model.source.revision)
             #expect(companion?.sourceIndexSHA256 == model.source.sourceIndexSHA256)
         }
     }
+
+    private let separateImageSources: [TUFFModelID: String] = [
+        .ornith15_9B: "ornith-ai/Ornith-1.5-9B",
+        .ornith15_35B_A3B: "ornith-ai/Ornith-1.5-35B-A3B",
+    ]
 
     /// Every image pack's advertised download, pinned to the coalesced range
     /// total measured against the pinned checkpoint's real tensor layout.
@@ -52,6 +66,11 @@ import TUFFRepackCore
             // From the installer's resume checkpoint (`totalSourceBytes`)
             // against this pin.
             .qwen38_27B: 1_929_719_232,
+            // Ornith's towers sit contiguously in their sources, so the range
+            // download is exactly the payload.
+            .ornith15_9B: 912_020_960,
+            .ornith15_35B_A3B: 893_142_496,
+            .ornith15_397B: 912_020_960,
         ]
         for model in TUFFModelCatalog.all {
             guard let addon = model.addons.first(where: { $0.kind == .imageInput })

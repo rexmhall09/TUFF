@@ -45,7 +45,7 @@ public enum VisionPackWriter {
         switch source {
         case .qwen36: visionFamily = .qwen36
         case .qwen38FlashNext: visionFamily = .qwen4Exp
-        case .qwen38_27B: visionFamily = .qwen36
+        case .qwen38_27B, .ornith15_397B: visionFamily = .qwen36
         default: visionFamily = .gemma4
         }
 
@@ -128,6 +128,10 @@ public enum VisionPackWriter {
             }
             try Posix.fsync(weightsFD, path: weightsPath)
             mappings.removeAll()
+            for entry in plan.entries where entry.reordersChannelsLast {
+                try VisionTensorReorder.channelsLastInPlace(
+                    path: weightsPath, offset: entry.fileOffset, sourceShape: entry.source.shape)
+            }
 
             let processorPath = (partial as NSString)
                 .appendingPathComponent(GTurboVisionFormatV1.processorFile)
@@ -143,11 +147,11 @@ public enum VisionPackWriter {
             ]
             let tensors = plan.entries.map { entry in
                 GTurboVisionTensorRegionV1(
-                    name: entry.source.name,
+                    name: entry.name,
                     executionPosition: entry.executionPosition,
                     offset: entry.fileOffset,
                     size: entry.source.sizeBytes,
-                    shape: entry.source.shape,
+                    shape: entry.shape,
                     dtype: entry.source.dtype == .u32 ? .u32 : .bf16,
                     quantization: entry.quantSpec.map { spec in
                         GTurboVisionQuantizationV1(

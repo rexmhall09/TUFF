@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TUFFFormat
+import TUFFModelCatalog
 
 public struct RemoteVisionPackInstallOptions: Sendable {
     public let repoID: String
@@ -467,6 +468,10 @@ public final class RemoteVisionPackInstaller {
 
         let weightsPath = (paths.partialDirectory as NSString)
             .appendingPathComponent(GTurboVisionFormatV1.weightsFile)
+        for entry in visionPlan.entries where entry.reordersChannelsLast {
+            try VisionTensorReorder.channelsLastInPlace(
+                path: weightsPath, offset: entry.fileOffset, sourceShape: entry.source.shape)
+        }
         progress(.hashingOutput(GTurboVisionFormatV1.weightsFile))
         let weightsSHA = try Sha256Stream.hashFile(
             path: weightsPath, noCache: true, noFollow: true)
@@ -582,7 +587,8 @@ public final class RemoteVisionPackInstaller {
         switch options.repoID {
         case SupportedModelSource.qwen36.repoID: visionFamily = .qwen36
         case SupportedModelSource.qwen38FlashNext.repoID: visionFamily = .qwen4Exp
-        case SupportedModelSource.qwen38_27B.repoID: visionFamily = .qwen36
+        case SupportedModelSource.qwen38_27B.repoID, SupportedModelSource.ornith15_397B.repoID,
+             "ornith-ai/Ornith-1.5-9B", "ornith-ai/Ornith-1.5-35B-A3B": visionFamily = .qwen36
         default: visionFamily = .gemma4
         }
         // Qwen 3.6's own width stays implicit, so its packs are unchanged.
@@ -592,7 +598,9 @@ public final class RemoteVisionPackInstaller {
             throw RepackError.configurationInvalid(
                 detail: "\(visionFamily.rawValue) vision source cannot bind to \(textBinding.family) text model")
         }
-        guard textBinding.sourceSnapshotHash == "sha256:\(sourceIndexSha256)" else {
+        guard TUFFModelCatalog.imagePackSourceMatches(
+            textSourceSnapshotHash: textBinding.sourceSnapshotHash,
+            visionSourceIndexSHA256: sourceIndexSha256) else {
             throw RepackError.configurationInvalid(
                 detail: "vision source index does not match the exact text checkpoint")
         }
@@ -604,11 +612,11 @@ public final class RemoteVisionPackInstaller {
         ]
         let tensors = plan.entries.map { entry in
             GTurboVisionTensorRegionV1(
-                name: entry.source.name,
+                name: entry.name,
                 executionPosition: entry.executionPosition,
                 offset: entry.fileOffset,
                 size: entry.source.sizeBytes,
-                shape: entry.source.shape,
+                shape: entry.shape,
                 dtype: entry.source.dtype == .u32 ? .u32 : .bf16,
                 quantization: entry.quantSpec.map { spec in
                     GTurboVisionQuantizationV1(

@@ -26,5 +26,6 @@ extension TUFFInferenceTypes.ExpertReadMetrics {
         prefetchFailures += other.prefetchFailures
         usefulPrefetchReads += other.usefulPrefetchReads
         unusedPrefetchEvictions += other.unusedPrefetchEvictions
+        pollutedDemandMisses += other.pollutedDemandMisses
     }
 }

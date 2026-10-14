@@ -194,6 +194,25 @@ struct VisionPackPlan: Sendable {
         let quantSpec: QuantSpec?
         /// Affine group size, pinned to 64 by `planVisionCompanion`.
         let groupSize: Int
+        /// The pack's name and shape: MLX's, whatever the source called it.
+        let name: String
+        let shape: [UInt64]
+        /// A Transformers Conv3D kernel, `[out, channels, t, h, w]`, that has
+        /// to be reordered channels-last after it is copied.
+        let reordersChannelsLast: Bool
+
+        init(source: SourceTensor, executionPosition: Int, fileOffset: UInt64,
+             quantSpec: QuantSpec?, groupSize: Int, name: String? = nil,
+             shape: [UInt64]? = nil, reordersChannelsLast: Bool = false) {
+            self.source = source
+            self.executionPosition = executionPosition
+            self.fileOffset = fileOffset
+            self.quantSpec = quantSpec
+            self.groupSize = groupSize
+            self.name = name ?? source.name
+            self.shape = shape ?? source.shape
+            self.reordersChannelsLast = reordersChannelsLast
+        }
     }
 
     let entries: [Entry]
@@ -213,9 +232,13 @@ enum RepackPlanner {
         // because its 160-wide PLE rows cannot be grouped at 64, and rejecting
         // it here would have refused a tower that is bit-identical to one
         // already shipping.
-        guard meta.baseBits == 4,
-              meta.baseGroupSize == 64 || meta.baseGroupSize == 32,
-              meta.baseMode.lowercased() == "affine" else {
+        // A BF16 release or the compressed 397B checkpoint qualifies too: the
+        // tower is copied, never dequantized, and every tensor is checked to
+        // be BF16 below.
+        let affine = meta.baseBits == 4
+            && (meta.baseGroupSize == 64 || meta.baseGroupSize == 32)
+            && meta.baseMode.lowercased() == "affine"
+        guard affine || meta.baseMode == "bf16" || meta.baseMode == "compressed-affine" else {
             throw RepackError.configurationInvalid(
                 detail: "vision companion requires MLX affine 4-bit source metadata")
         }
@@ -226,7 +249,7 @@ enum RepackPlanner {
                 path: meta.indexPath, sha256: meta.indexSha256Hex)
         }
         let tensors = shardHeaders.flatMap(\.tensors).filter {
-            isVisionTensorName($0.name)
+            isVisionTensorName(canonicalVisionName($0.name))
         }
         let expected: (count: Int, bytes: UInt64)
         switch modelID {
@@ -242,6 +265,13 @@ enum RepackPlanner {
             // Qwen 3.6's tower again; only the merger widens, to the 5,120-wide
             // residual: (5120 - 2048) * 4608 * 2 + (5120 - 2048) * 2 bytes more.
             expected = (333, 921_460_192)
+        case "ornith-ai/Ornith-1.5-35B-A3B":
+            // Ornith's BF16 release of the 35B: Qwen 3.6's tower and width.
+            expected = (333, 893_142_496)
+        case "ornith-ai/Ornith-1.5-9B", SupportedModelSource.ornith15_397B.modelID:
+            // The same tower into a 4,096-wide residual: (4096 - 2048) * 4608
+            // * 2 + (4096 - 2048) * 2 bytes more than Qwen 3.6.
+            expected = (333, 912_020_960)
         case SupportedModelSource.gemma4E2B.modelID:
             expected = (213, 335_392_768)
         case SupportedModelSource.gemma4E4B.modelID:
@@ -266,7 +296,9 @@ enum RepackPlanner {
                 detail: "expected \(expectedSourceBytes) vision bytes for \(modelID), found \(sourceBytes)")
         }
 
-        let ordered = tensors.sorted { visionExecutionKey($0.name) < visionExecutionKey($1.name) }
+        let ordered = tensors.sorted {
+            visionExecutionKey(canonicalVisionName($0.name)) < visionExecutionKey(canonicalVisionName($1.name))
+        }
         var offset: UInt64 = 0
         var entries: [VisionPackPlan.Entry] = []
         entries.reserveCapacity(ordered.count)
@@ -274,6 +306,10 @@ enum RepackPlanner {
             offset = visionAlignUp(offset, to: GTurboVisionFormatV1.alignmentBytes)
             let quantSpec: QuantSpec?
             if tensor.dtype == .u32 {
+                guard affine else {
+                    throw RepackError.configurationInvalid(
+                        detail: "unsupported vision quantization for \(tensor.name)")
+                }
                 let spec = IndexLoader.quantSpec(forTensor: tensor.name, meta: meta)
                 // Group size is not carried per tensor in this tree; the base
                 // group was already pinned to 64 above.
@@ -289,16 +325,29 @@ enum RepackPlanner {
                 }
                 quantSpec = nil
             }
+            let name = canonicalVisionName(tensor.name)
+            let reorders = name == "vision_tower.patch_embed.proj.weight"
+                && tensor.shape.count == 5 && tensor.shape[1] == 3
+            let shape = reorders
+                ? [tensor.shape[0], tensor.shape[2], tensor.shape[3], tensor.shape[4], tensor.shape[1]]
+                : tensor.shape
             entries.append(.init(source: tensor,
                                  executionPosition: position,
                                  fileOffset: offset,
                                  quantSpec: quantSpec,
-                                 groupSize: meta.baseGroupSize))
+                                 groupSize: meta.baseGroupSize,
+                                 name: name, shape: shape, reordersChannelsLast: reorders))
             offset += tensor.sizeBytes
         }
         return VisionPackPlan(entries: entries,
                               weightsFileSize: offset,
                               sourcePayloadBytes: sourceBytes)
+    }
+
+    /// Transformers names the Qwen tower `model.visual.*`; MLX, and the pack,
+    /// `vision_tower.*`.
+    static func canonicalVisionName(_ name: String) -> String {
+        name.hasPrefix("model.visual.") ? "vision_tower." + name.dropFirst("model.visual.".count) : name
     }
 
     private static func visionExecutionKey(_ name: String) -> String {

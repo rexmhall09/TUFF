@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TUFFFormat
+import TUFFModelCatalog
 
 public struct VisionPackVerification: Sendable, Equatable {
     public let manifestSha256: String
@@ -75,8 +76,10 @@ public enum VisionPackVerifier {
             throw RepackError.installStateIncompatible(
                 detail: "vision companion family does not match the text model")
         }
-        guard textManifest.sourceSnapshotHash
-                == "sha256:\(manifest.sourceIndexSha256)" else {
+        guard let textSnapshot = textManifest.sourceSnapshotHash,
+              TUFFModelCatalog.imagePackSourceMatches(
+                textSourceSnapshotHash: textSnapshot,
+                visionSourceIndexSHA256: manifest.sourceIndexSha256) else {
             throw RepackError.installStateIncompatible(
                 detail: "vision companion source does not match the exact text checkpoint")
         }

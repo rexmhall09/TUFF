@@ -84,6 +84,14 @@ enum IndexLoader {
                     indexSha256Hex: indexSha, weightMap: weightMap, baseBits: 4, baseGroupSize: 32,
                     baseMode: "compressed-affine", bitsOverrides: [:], shardFilenames: stableShardFilenames(weightMap))
             }
+            // An unquantized release is read only for its image pack, and only
+            // when the catalog pins exactly this checkpoint for one.
+            if root["quantization"] == nil, root["quantization_config"] == nil,
+               SourceFingerprint.imagePackSources.contains(where: { $0.sourceIndexSHA256 == indexSha }) {
+                return SourceMetadata(indexPath: indexPath, configPath: configPath,
+                    indexSha256Hex: indexSha, weightMap: weightMap, baseBits: 16, baseGroupSize: 0,
+                    baseMode: "bf16", bitsOverrides: [:], shardFilenames: stableShardFilenames(weightMap))
+            }
             guard let quant = root["quantization"] as? [String: Any] else {
                 throw RepackError.configJsonInvalid(path: configPath, detail: "no quantization slot")
             }

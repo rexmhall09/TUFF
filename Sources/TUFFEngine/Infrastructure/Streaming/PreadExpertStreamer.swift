@@ -80,6 +80,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var slotUnusedPrefetch: [Bool]
     private var expertDemandUseCount: [Int]
     private var expertPredictionUseCount: [Int]
+    /// Whether each expert last left the cache to make room for a prediction.
+    private var evictedForPrediction: [Bool]
     private var useClock = 0
     private let cacheLock = NSLock()
     private let metricsLock = NSLock()
@@ -185,6 +187,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotUnusedPrefetch = [Bool](repeating: false, count: slotCount)
         self.expertDemandUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
         self.expertPredictionUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
+        self.evictedForPrediction = [Bool](repeating: false, count: max(1, layout.expertsPerLayer))
         closeFDOnFailure = false
     }
 
@@ -284,6 +287,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         let misses = experts.indices.filter { assignedSlots[$0] == -1 }
         guard misses.count <= reserved.lazy.filter({ !$0 }).count else { return nil }
+        if purpose == .demand {
+            let polluted = misses.reduce(UInt64(0)) { count, index in
+                let expert = experts[index]
+                return expert >= 0 && expert < evictedForPrediction.count
+                    && evictedForPrediction[expert] ? count + 1 : count
+            }
+            if polluted > 0 {
+                metricsLock.lock()
+                metrics.pollutedDemandMisses += polluted
+                metricsLock.unlock()
+            }
+        }
 
         useClock = clock
         for expert in experts where expert >= 0 && expert < expertDemandUseCount.count {
@@ -330,6 +345,14 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 metricsLock.unlock()
             }
             slotUnusedPrefetch[slot] = false
+            let evicted = slotExpert[slot]
+            if evicted >= 0 && evicted < evictedForPrediction.count {
+                evictedForPrediction[evicted] = purpose == .prefetch
+            }
+            let incoming = experts[index]
+            if incoming >= 0 && incoming < evictedForPrediction.count {
+                evictedForPrediction[incoming] = false
+            }
             slotExpert[slot] = -1
             slotLastUse[slot] = clock
         }

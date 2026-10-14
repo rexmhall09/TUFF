@@ -16,13 +16,16 @@ public struct ExpertReadMetrics: Codable, Sendable, Equatable {
     public var usefulPrefetchReads: UInt64 = 0
     /// Completed speculative records evicted before their first demand hit.
     public var unusedPrefetchEvictions: UInt64 = 0
+    /// Demand misses on an expert whose slot was last taken by a prediction:
+    /// the reads a wrong guess cost by pushing out something needed.
+    public var pollutedDemandMisses: UInt64 = 0
 
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
         case demandRequests, predictionRequests
         case demandReads, demandBytes, demandFailures, prefetchReads, prefetchBytes, prefetchFailures
-        case usefulPrefetchReads, unusedPrefetchEvictions
+        case usefulPrefetchReads, unusedPrefetchEvictions, pollutedDemandMisses
     }
 
     public init(from decoder: Decoder) throws {
@@ -37,6 +40,7 @@ public struct ExpertReadMetrics: Codable, Sendable, Equatable {
         prefetchFailures = try values.decodeIfPresent(UInt64.self, forKey: .prefetchFailures) ?? 0
         usefulPrefetchReads = try values.decodeIfPresent(UInt64.self, forKey: .usefulPrefetchReads) ?? 0
         unusedPrefetchEvictions = try values.decodeIfPresent(UInt64.self, forKey: .unusedPrefetchEvictions) ?? 0
+        pollutedDemandMisses = try values.decodeIfPresent(UInt64.self, forKey: .pollutedDemandMisses) ?? 0
     }
 
     public func subtracting(_ baseline: Self) -> Self {
@@ -51,6 +55,7 @@ public struct ExpertReadMetrics: Codable, Sendable, Equatable {
         delta.prefetchFailures = prefetchFailures &- baseline.prefetchFailures
         delta.usefulPrefetchReads = usefulPrefetchReads &- baseline.usefulPrefetchReads
         delta.unusedPrefetchEvictions = unusedPrefetchEvictions &- baseline.unusedPrefetchEvictions
+        delta.pollutedDemandMisses = pollutedDemandMisses &- baseline.pollutedDemandMisses
         return delta
     }
 
