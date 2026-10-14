@@ -1,8 +1,8 @@
 name: Sandbox image
 
-# Builds the web sandbox image from Sandbox/ and publishes it to the GitHub
-# Container Registry, so TUFF can pull it with `container image pull` and check
-# its digest. It runs only when someone with write access starts it by hand, or
+# Builds the sandbox image (one image for the web and the file sandbox) from
+# Sandbox/ and publishes it to the GitHub Container Registry, so TUFF can pull
+# it with `container image pull` and check its digest. It runs only when someone with write access starts it by hand, or
 # pushes a tag named sandbox-v<version>, so publishing stays with the owner. It
 # never runs for a pull request. The image is Linux/arm64, because Apple
 # `container` runs arm64 Linux VMs on Apple Silicon.
