@@ -68,6 +68,9 @@ public enum AppHTTPError: Error, Equatable, Sendable, CustomStringConvertible {
     /// curl failures before an HTTP request can be sent. Safe to try another checked address.
     case connectionFailed(code: Int32)
     case network(String)
+    /// The web sandbox refused or could not carry the request. The text is
+    /// written for the person and is shown as it is.
+    case sandbox(String)
 
     public var description: String {
         switch self {
@@ -85,6 +88,7 @@ public enum AppHTTPError: Error, Equatable, Sendable, CustomStringConvertible {
                 ? "The secure connection failed during the TLS handshake (code 35). The site or network may be refusing the connection. Try again on another network."
                 : "The connection to the site could not be established (code \(code)). Check your connection and try again."
         case .network(let message): "The request failed: \(message)"
+        case .sandbox(let message): message
         }
     }
 

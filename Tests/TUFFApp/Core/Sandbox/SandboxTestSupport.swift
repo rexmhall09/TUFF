@@ -355,12 +355,25 @@ final class FakeIdleClock: @unchecked Sendable {
     }
 }
 
+/// The controller's clock for "how long since the sandbox last proved itself".
+/// It stands still until a test moves it.
+final class FakeProofClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private let start = ContinuousClock.now
+    private var offset = Duration.zero
+
+    var now: ContinuousClock.Instant { lock.withLock { start + offset } }
+
+    func advance(by duration: Duration) { lock.withLock { offset += duration } }
+}
+
 /// A controller wired to the fakes, with its own temporary state folder.
 @MainActor
 struct SandboxHarness {
     let world: FakeContainerWorld
     let probe: FakeHealthProbe
     let clock: FakeIdleClock
+    let proofClock: FakeProofClock
     let stateDirectory: URL
     let controller: SandboxController
     let blockedCount: BlockedCount
@@ -390,6 +403,7 @@ struct SandboxHarness {
         let directory = stateDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("tuff-sandbox-test-\(UUID().uuidString)", isDirectory: true)
         let clock = FakeIdleClock()
+        let proofClock = FakeProofClock()
         let blockedCount = BlockedCount()
         let probe = FakeHealthProbe.healthy(blocked: { [world] in
             blockedCount.value(default: world.lastRunBlockedAddresses.count)
@@ -409,8 +423,10 @@ struct SandboxHarness {
             idleTimeout: .seconds(600),
             healthAttempts: healthAttempts,
             healthInterval: .milliseconds(500),
-            quitRetryDelay: 0)
-        return SandboxHarness(world: world, probe: probe, clock: clock, stateDirectory: directory,
+            quitRetryDelay: 0,
+            clock: { proofClock.now })
+        return SandboxHarness(world: world, probe: probe, clock: clock, proofClock: proofClock,
+                              stateDirectory: directory,
                               controller: SandboxController(dependencies: dependencies),
                               blockedCount: blockedCount)
     }

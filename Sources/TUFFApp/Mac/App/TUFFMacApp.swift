@@ -18,6 +18,7 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
             // waiting to be written when the app is asked to quit.
             Self.model?.flushPendingSettings()
             Self.model?.releaseAllAttachments()
+            Self.model?.stopSandboxWhenQuitting()
         }
     }
 
@@ -95,6 +96,7 @@ struct TUFFMacApp: App {
                 // from disk in init, and loadModelAtLaunchIfEnabled ignores a
                 // model that is missing or already busy.
                 .task {
+                    model.prepareSandboxAtLaunch()
                     if loadModelRequested {
                         model.loadModel()
                     } else {

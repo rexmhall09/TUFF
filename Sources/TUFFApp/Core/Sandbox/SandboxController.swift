@@ -30,12 +30,17 @@ struct SandboxDependencies: Sendable {
     var healthInterval: Duration
     /// Seconds between the looks at a container when quitting during a start.
     var quitRetryDelay: TimeInterval = 1
+    /// How long a signed answer from the sandbox (or the start's health check)
+    /// counts as proof that the port is still the sandbox's. A request after
+    /// a longer quiet time is preceded by a signed health check.
+    var proofValidity: Duration = .seconds(5)
+    var clock: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
 
     static func live() -> SandboxDependencies {
         SandboxDependencies(
             tool: ContainerTool(requiredTeamIdentifier: ContainerTool.appleTeamIdentifier),
             probe: SandboxHealthProbe(),
-            pin: .release,
+            pin: SandboxImagePin.fromEnvironment() ?? .release,
             stateDirectory: SandboxLocations.defaultStateDirectory(),
             addresses: { HostAddresses.current() },
             freePort: { try LoopbackPort.findFree() },
@@ -85,8 +90,10 @@ struct SandboxLaunch: Equatable, Sendable {
 /// Starts, checks and stops the web sandbox, a small Linux VM made by Apple's
 /// `container` tool that fetches web pages and search results for TUFF.
 ///
-/// Nothing calls this yet: the setting that turns it on arrives with the
-/// change that sends web requests through it. It never switches itself on.
+/// The app owns one (`AppModel.sandbox`). It is started when the person turns
+/// on "Run web search and page reads in a sandbox", at app launch if that is
+/// on, and before an answer that uses the web if it is on and the sandbox is
+/// not running. It never switches itself on.
 ///
 /// A start does these steps in order, and stops at the first that fails
 /// (there is no fallback and nothing is left running):
@@ -126,6 +133,9 @@ public final class SandboxController {
     public private(set) var generation = 0
     /// Leases taken and not yet released.
     public private(set) var requestsInFlight = 0
+    /// When the sandbox of the current generation last proved, with a signed
+    /// answer, that it is the one holding its port.
+    @ObservationIgnored private var lastProof: ContinuousClock.Instant?
 
     @ObservationIgnored private let dependencies: SandboxDependencies
     @ObservationIgnored private var startTask: Task<Void, Never>?
@@ -230,12 +240,15 @@ public final class SandboxController {
             try ensureCurrent(mine)
 
             let health = try await waitUntilHealthy(port: port, key: made.key, name: name, generation: mine)
+            // The signed health answer is the proof; the checks below take time.
+            let provedAt = dependencies.clock()
             try ensureCurrent(mine)
             try await SandboxProtection.verify(tool: tool, container: name, blocked: blocked, health: health)
             try ensureCurrent(mine)
 
             activePort = port
             activeKey = made.key
+            lastProof = provedAt
             state = .ready
             scheduleIdleStop()
         } catch {
@@ -473,17 +486,47 @@ public final class SandboxController {
     /// throws.
     public func confirmRunning() async throws {
         guard state == .ready else { throw SandboxError.notReady }
-        let mine = generation
-        let port = activePort
-        let key = activeKey
+        try await probeRunning(port: activePort, key: activeKey, generation: generation)
+    }
+
+    /// The same check for the sandbox a lease belongs to: it throws
+    /// `notReady` if that sandbox has been stopped since, and asks the
+    /// lease's own port with the lease's own key.
+    public func confirmRunning(_ lease: SandboxLease) async throws {
+        guard isCurrent(lease) else { throw SandboxError.notReady }
+        try await probeRunning(port: lease.port, key: lease.key, generation: lease.generation)
+    }
+
+    /// Whether the sandbox has not proved itself for longer than
+    /// `proofValidity`: after that, something else may hold its port, so the
+    /// next request is preceded by a signed health check.
+    public func needsProof(_ lease: SandboxLease) -> Bool {
+        guard isCurrent(lease), let proof = lastProof else { return true }
+        return dependencies.clock() - proof > dependencies.proofValidity
+    }
+
+    /// Records that the sandbox of the lease has just given a signed answer.
+    public func noteAnswered(_ lease: SandboxLease) {
+        guard isCurrent(lease) else { return }
+        lastProof = dependencies.clock()
+    }
+
+    /// Whether the lease belongs to the sandbox that is ready right now.
+    public func isCurrent(_ lease: SandboxLease) -> Bool {
+        state == .ready && lease.generation == generation
+    }
+
+    private func probeRunning(port: Int, key: Data, generation mine: Int) async throws {
         do {
             do {
                 _ = try await dependencies.probe.health(port: port, key: key)
+                if generation == mine, state == .ready { lastProof = dependencies.clock() }
             } catch {
                 // One busy moment is not a dead sandbox: ask once more.
                 try Task.checkCancellation()
                 try? await dependencies.sleep(.milliseconds(500))
                 _ = try await dependencies.probe.health(port: port, key: key)
+                if generation == mine, state == .ready { lastProof = dependencies.clock() }
             }
         } catch {
             if error is CancellationError || Task.isCancelled { throw CancellationError() }

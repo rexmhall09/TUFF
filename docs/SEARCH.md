@@ -19,6 +19,11 @@ What leaves your Mac: the search query, sent to the provider you picked, and
 requests for the pages the model reads. Pages are limited to 2 MB and five
 redirects, and local or private network addresses are refused.
 
+On macOS 26 and newer with Apple's `container` tool installed, **Settings >
+Search** can run web search and page reads in a sandbox, a small virtual
+machine, so a page never reaches TUFF as anything but finished text. It is off
+until you turn it on. See [Web sandbox](WEB_SANDBOX.md).
+
 Once a chat includes your own files, images or folder results, web searches
 can only use words you typed in your current message. That keeps private
 material out of search queries.

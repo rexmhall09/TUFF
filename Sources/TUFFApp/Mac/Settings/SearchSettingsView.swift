@@ -12,6 +12,9 @@ struct SearchSettingsView: View {
     var body: some View {
         Form {
             Section("Web search") {
+                if model.isSandboxSupported || model.runWebInSandbox {
+                    sandboxRows
+                }
                 Toggle("Automatically pause web search while offline", isOn: $model.pauseWebSearchWhenOffline)
                 Text("When your connection returns, web search resumes only if you left Web on. A connection does not guarantee that the search provider is available.")
                     .appFont(.caption)
@@ -28,6 +31,12 @@ struct SearchSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if model.searchProvider.requiresKey {
                     keyRow(model.searchProvider)
+                    if model.runWebInSandbox {
+                        Text("With the sandbox on, the key goes from TUFF to the sandbox and from there only to \(model.searchProvider.displayName).")
+                            .appFont(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Text("Web search sends only the model's search query. The contents of your files are never sent to a search provider, and a query that copies text from them is refused.")
                     .appFont(.caption)
@@ -66,6 +75,48 @@ struct SearchSettingsView: View {
             }
         } message: {
             Text("Your files are not touched. TUFF stops reading the folders and deletes its index of them.")
+        }
+    }
+
+    @ViewBuilder private var sandboxRows: some View {
+        Toggle("Run web search and page reads in a sandbox", isOn: $model.runWebInSandbox)
+        if model.runWebInSandbox || sandboxFailed {
+            let status = sandboxStatus(model.sandbox.state)
+            HStack(spacing: 6) {
+                if status.busy { ProgressView().controlSize(.small) }
+                Text(status.text)
+                    .appFont(.caption)
+                    .foregroundStyle(status.isProblem ? Color.red : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if status.needsContainer, let releases = URL(string: "https://github.com/apple/container/releases") {
+                Link("Apple container releases", destination: releases)
+                    .appFont(.caption)
+            }
+        }
+        Text("The sandbox is a small virtual machine run by Apple's container tool. Web searches are sent from inside it, and the pages the model reads are fetched and turned into text inside it, so a harmful page or file never reaches TUFF directly. TUFF starts it when you turn this on or open the app, and stops it when it has been idle or when TUFF quits. If it is not ready, web search fails; it never falls back to a direct request. It does not apply to file search. Off by default; needs macOS 26 and Apple container.")
+            .appFont(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var sandboxFailed: Bool {
+        if case .failed = model.sandbox.state { return true }
+        return false
+    }
+
+    private func sandboxStatus(_ state: SandboxController.State)
+        -> (text: String, busy: Bool, isProblem: Bool, needsContainer: Bool) {
+        switch state {
+        case .off:
+            ("Stopped. It starts again when you send a message that uses the web.", false, false, false)
+        case .preparing(let step): ("\(step)…", true, false, false)
+        case .starting: ("Starting the sandbox…", true, false, false)
+        case .ready: ("Ready", false, false, false)
+        case .stopping: ("Stopping…", true, false, false)
+        case .failed(let message):
+            (message, false, true, message.hasPrefix(SandboxError.containerNotInstalled.description)
+                || message.hasPrefix(SandboxError.containerNotTrusted.description))
         }
     }
 

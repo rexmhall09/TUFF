@@ -62,6 +62,11 @@ public final class AppToolStore {
     @ObservationIgnored let keyStore: any AppSearchKeyStore
     @ObservationIgnored let indexURL: URL
     @ObservationIgnored let transport: any AppHTTPTransport
+    #if os(macOS)
+    /// The sandbox web requests go through when an answer runs with the
+    /// sandbox setting on. Set by the model; nothing else owns one.
+    @ObservationIgnored var sandboxWeb: SandboxWebAccess?
+    #endif
     @ObservationIgnored let indexLimits: AppLocalIndexLimits
     @ObservationIgnored private var index: AppLocalSearchIndex?
     @ObservationIgnored private var indexTask: Task<Void, Never>?
@@ -268,10 +273,35 @@ public final class AppToolStore {
 
     /// The tools one answer runs with. The provider key is read here, in
     /// this process, and kept in the closure only for the answer's duration.
+    /// With `webInSandbox` every web request goes through the sandbox
+    /// (searches to its `/v1/http`, pages to its `/v1/page`); if there is no
+    /// sandbox to use, web requests fail and nothing is sent directly.
     public func makeToolbox(provider kind: AppSearchProviderKind,
-                            limits: AppToolLimits = .standard) -> AppToolbox {
-        let transport = transport
+                            limits: AppToolLimits = .standard,
+                            webInSandbox: Bool = false) -> AppToolbox {
         let timeout = limits.requestTimeoutSeconds
+        let transport: any AppHTTPTransport
+        let readPage: @Sendable (URL) async throws -> AppWebPage
+        if webInSandbox {
+            // Never the direct path: with no sandbox to use, requests fail.
+            var sandboxTransport: any AppHTTPTransport = Self.unavailableTransport
+            var sandboxPages: @Sendable (URL) async throws -> AppWebPage = { _ in
+                throw AppWebPageError.transport(Self.sandboxUnavailable)
+            }
+            #if os(macOS)
+            if let access = sandboxWeb {
+                let pageReader = SandboxPageReader(access: access, timeoutSeconds: timeout)
+                sandboxTransport = SandboxHTTPTransport(access: access)
+                sandboxPages = { url in try await pageReader.read(url) }
+            }
+            #endif
+            transport = sandboxTransport
+            readPage = sandboxPages
+        } else {
+            transport = self.transport
+            let reader = AppWebPageReader(transport: self.transport, timeoutSeconds: timeout)
+            readPage = { url in try await reader.read(url) }
+        }
         let provider: any AppWebSearchProvider = switch kind {
         case .duckDuckGo:
             DuckDuckGoSearchProvider(transport: transport, timeoutSeconds: timeout)
@@ -282,12 +312,11 @@ public final class AppToolStore {
             TavilySearchProvider(transport: transport, key: keyStore.key(for: .tavily) ?? "",
                                  timeoutSeconds: timeout)
         }
-        let reader = AppWebPageReader(transport: transport, timeoutSeconds: timeout)
         let folders = folders
         let index = try? openIndex()
         return AppToolbox(
             webSearch: { query, count in try await provider.search(query, count: count) },
-            readWebpage: { url in try await reader.read(url) },
+            readWebpage: readPage,
             searchFiles: { query, count in
                 guard let index else {
                     throw AppLocalSearchError.index("The local search index could not be opened.")
@@ -295,4 +324,16 @@ public final class AppToolStore {
                 return try await index.search(query, folders: folders, limit: count)
             })
     }
+
+    nonisolated private static let sandboxUnavailable = AppHTTPError.sandbox("The web sandbox is not available.")
+
+    /// What a sandbox-mode answer uses when no sandbox was given to the
+    /// store: every request fails, none is made.
+    nonisolated private static let unavailableTransport: any AppHTTPTransport = FailingHTTPTransport(
+        error: sandboxUnavailable)
+}
+
+private struct FailingHTTPTransport: AppHTTPTransport {
+    let error: AppHTTPError
+    func perform(_ request: AppHTTPRequest) async throws -> AppHTTPResponse { throw error }
 }

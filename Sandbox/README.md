@@ -2,11 +2,13 @@
 
 The code that runs inside TUFF's web sandbox: a small Linux VM started with
 Apple's [`container`](https://github.com/apple/container) tool. When the
-sandbox setting is on (it is not part of the app yet), web search, page reads
+sandbox setting is on (Settings > Search; see
+[`docs/WEB_SANDBOX.md`](../docs/WEB_SANDBOX.md)), web search, page reads
 and PDF reading go through this server instead of TUFF's own process. It is
 the `web` profile; the folder search profile follows with its first caller.
 
-This folder holds only the VM's side. It has no app change.
+This folder holds the VM's side. The app's side is in
+`Sources/TUFFApp/Core/Sandbox/`.
 
 | File | What it is |
 | --- | --- |
@@ -16,7 +18,7 @@ This folder holds only the VM's side. It has no app change.
 | `default_gateway.py` | Reads the VM's default gateway for the inbound rule. |
 | `server.py` | The API: `GET /health`, `POST /v1/page`, `POST /v1/http`, with signing both ways. Its docstring is the specification. |
 | `sandbox_client.py` | A small client that signs a request and checks the answer. Used by the self-test and the tests. |
-| `test-vectors/signing.json` | Fixed signature examples. The server, this client and (from the app change on) the Swift code must all reproduce them. |
+| `test-vectors/signing.json` | Fixed signature examples. The server, this client and the Swift code must all reproduce them. |
 | `requirements.in`, `requirements.txt` | Direct packages, and every package pinned with hashes. |
 | `test_server.py`, `test_signing.py`, `test_infra.py` | Python tests. |
 | `selftest_pdf_bomb.py` | Run inside the VM by the self-test: a decompression-bomb PDF must end only its child process. |
@@ -39,6 +41,10 @@ On a Mac with Apple `container` 1.5 or newer, `Scripts/sandbox_selftest.sh all`
 builds the image, starts it, checks the firewall, the missing privileges, the
 blocked Mac addresses and every endpoint, and stops it again. Set
 `TUFF_SANDBOX_IMAGE` to check a pulled image instead of building one.
+
+To change the image (a new Python package, a newer base image) and ship it, see
+[`docs/SANDBOX_IMAGE.md`](../docs/SANDBOX_IMAGE.md): rebuild, publish, pin the
+new digest in the app.
 
 ## What the server promises
 

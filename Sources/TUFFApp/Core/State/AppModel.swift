@@ -98,6 +98,12 @@ public final class AppModel {
     public let networkStatus: AppNetworkStatus
     /// Folders, the local index, provider keys and the tools built from them.
     public let toolStore: AppToolStore
+    #if os(macOS)
+    /// The web sandbox: started and stopped here, used only through the
+    /// tool store's sandbox access.
+    @ObservationIgnored public private(set) var sandbox: SandboxController
+    @ObservationIgnored private var sandboxTask: Task<Void, Never>?
+    #endif
     public let deviceCapabilities: TUFFDeviceCapabilities
     private var runsAfterCurrentLoad = false
     private var autoObservationStart: AppAutoObservationWindow?
@@ -485,7 +491,15 @@ public final class AppModel {
         // properties as accesses to self even though each store already has a
         // default value.
         self.conversationStore = conversationStore
-        self.toolStore = toolStore ?? .inMemory()
+        let tools = toolStore ?? .inMemory()
+        self.toolStore = tools
+        #if os(macOS)
+        let sandbox = SandboxController()
+        self.sandbox = sandbox
+        let liveSettings = self.settingsStore
+        tools.sandboxWeb = SandboxWebAccess(
+            controller: sandbox, mayRestart: { await liveSettings.runWebInSandbox })
+        #endif
         self.networkStatus = networkStatus ?? AppNetworkStatus(monitorsConnectivity: settingsPersistenceEnabled)
         self.deviceCapabilities = deviceCapabilities
         self.client = client
@@ -539,6 +553,7 @@ public final class AppModel {
         self.settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
         self.settingsStore.webSearchEnabled = settings.webSearchEnabled
         self.settingsStore.pauseWebSearchWhenOffline = settings.pauseWebSearchWhenOffline
+        self.settingsStore.runWebInSandbox = settings.runWebInSandbox
         self.settingsStore.fileSearchEnabled = settings.fileSearchEnabled
         self.settingsStore.searchProvider = settings.searchProvider
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
@@ -2578,6 +2593,7 @@ public final class AppModel {
             settingsStore.bypassModelRestrictions = settings.bypassModelRestrictions
             settingsStore.webSearchEnabled = settings.webSearchEnabled
             settingsStore.pauseWebSearchWhenOffline = settings.pauseWebSearchWhenOffline
+            settingsStore.runWebInSandbox = settings.runWebInSandbox
             settingsStore.fileSearchEnabled = settings.fileSearchEnabled
             settingsStore.searchProvider = settings.searchProvider
         }
@@ -2716,6 +2732,7 @@ public final class AppModel {
         settings.bypassModelRestrictions = bypassModelRestrictions
         settings.webSearchEnabled = settingsStore.webSearchEnabled
         settings.pauseWebSearchWhenOffline = settingsStore.pauseWebSearchWhenOffline
+        settings.runWebInSandbox = settingsStore.runWebInSandbox
         settings.fileSearchEnabled = settingsStore.fileSearchEnabled
         settings.searchProvider = settingsStore.searchProvider
         if (try? MacAppSettingsFileStore.save(
@@ -3033,9 +3050,17 @@ public final class AppModel {
 
         let cancellation = AppAnswerCancellation()
         answerCancellation = cancellation
+        let webInSandbox = settingsStore.runWebInSandbox
+        #if os(macOS)
+        // After an idle stop or a failed start the sandbox is started again
+        // here, before any tool runs; a web request that finds it still
+        // starting waits for it. Nothing else starts it.
+        if webInSandbox, capabilities.web { startSandbox() }
+        #endif
         let runner = AppAnswerRunner(
             client: client,
-            toolbox: toolStore.makeToolbox(provider: settingsStore.searchProvider))
+            toolbox: toolStore.makeToolbox(provider: settingsStore.searchProvider,
+                                       webInSandbox: webInSandbox))
         let activity = toolStore.inferenceActivity
         activity.set(true)
         autoObservationStart = .begin()
@@ -3502,6 +3527,81 @@ public final class AppModel {
             persistSettings()
         }
     }
+
+    /// Web searches and page reads go through the sandbox, a small virtual
+    /// machine that holds the web code. Off by default; turning it on starts
+    /// the sandbox, turning it off stops it.
+    public var runWebInSandbox: Bool {
+        get { settingsStore.runWebInSandbox }
+        set {
+            guard settingsStore.runWebInSandbox != newValue else { return }
+            settingsStore.runWebInSandbox = newValue
+            persistSettings()
+            #if os(macOS)
+            sandboxTask = Task { [weak self] in await self?.applySandboxSetting() }
+            #endif
+        }
+    }
+
+    #if os(macOS)
+    /// The sandbox needs macOS 26 or newer; the setting is hidden below it.
+    public var isSandboxSupported: Bool { deviceCapabilities.macOSMajorVersion >= 26 }
+
+    /// Makes the sandbox match the setting. The latest choice wins if the
+    /// switch is flipped quickly: a start that was cut short by an earlier
+    /// "off" is made again while the setting is on.
+    private func applySandboxSetting() async {
+        for _ in 0..<3 {
+            guard !Task.isCancelled else { return }
+            if !settingsStore.runWebInSandbox {
+                await sandbox.stop()
+                // A start that was waiting behind an earlier stop may have
+                // brought the sandbox back meanwhile: look again.
+                if !settingsStore.runWebInSandbox, sandbox.state == .off { return }
+                continue
+            }
+            await sandbox.start()
+            if settingsStore.runWebInSandbox, sandbox.state != .off { return }
+        }
+    }
+
+    private func startSandbox() {
+        sandboxTask = Task { [weak self] in await self?.sandbox.start() }
+    }
+
+    /// At app launch: removes a container an earlier run left behind (only
+    /// when the sandbox has been used on this Mac) and starts the sandbox if
+    /// the setting is on.
+    public func prepareSandboxAtLaunch() {
+        let used = FileManager.default.fileExists(
+            atPath: SandboxLocations.defaultStateDirectory().path)
+        guard settingsStore.runWebInSandbox || used else { return }
+        sandboxTask = Task { [weak self] in
+            guard let self else { return }
+            await self.sandbox.cleanUpLeftovers()
+            if self.settingsStore.runWebInSandbox { await self.sandbox.start() }
+        }
+    }
+
+    /// When the app quits: stops the sandbox, waiting a few seconds.
+    public func stopSandboxWhenQuitting() {
+        sandboxTask?.cancel()
+        sandbox.stopWhenQuitting()
+    }
+
+    func finishSandboxWork() async { await sandboxTask?.value }
+
+    /// Tests give the model a sandbox with a fake `container`.
+    func installSandbox(_ controller: SandboxController,
+                        makeClient: (@Sendable (SandboxLease) -> SandboxClient)? = nil) {
+        sandbox = controller
+        let settings = settingsStore
+        var access = SandboxWebAccess(
+            controller: controller, mayRestart: { await settings.runWebInSandbox })
+        if let makeClient { access.makeClient = makeClient }
+        toolStore.sandboxWeb = access
+    }
+    #endif
 
     public var webSearchEnabled: Bool {
         get { settingsStore.webSearchEnabled }

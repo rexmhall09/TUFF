@@ -484,6 +484,7 @@ public final class AppSettingsStore {
     public var zoomLevel: AppZoomLevel = .default
     public var webSearchEnabled = false
     public var pauseWebSearchWhenOffline = false
+    public var runWebInSandbox = false
     public var fileSearchEnabled = false
     public var searchProvider: AppSearchProviderKind = .duckDuckGo
     /// App-wide escape hatch from the hardware and memory gates.

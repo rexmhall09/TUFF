@@ -39,6 +39,21 @@ struct SandboxImagePin: Equatable, Sendable {
     /// the sandbox says that no image has been published.
     static let release = SandboxImagePin(
         reference: "ghcr.io/rexmhall09/tuff-sandbox", digest: placeholderDigest, source: .registry)
+
+    /// For developers and tests before an image is published: when both
+    /// `TUFF_SANDBOX_DEV_IMAGE` (a name in the local image store, such as the
+    /// `tuff-sandbox:dev` that `Scripts/sandbox_selftest.sh build` makes) and
+    /// `TUFF_SANDBOX_DEV_DIGEST` (its `sha256:` index digest) are set, that
+    /// local image is run instead. The image must still have exactly that
+    /// digest, and it is never pulled. A person who can set these can already
+    /// run anything as this user, so they widen nothing; they are not in the
+    /// settings and the app never sets them.
+    static func fromEnvironment(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> SandboxImagePin? {
+        guard let reference = environment["TUFF_SANDBOX_DEV_IMAGE"], !reference.isEmpty,
+              let digest = environment["TUFF_SANDBOX_DEV_DIGEST"], isWellFormed(digest),
+              !reference.contains("@") else { return nil }
+        return SandboxImagePin(reference: reference, digest: digest, source: .local)
+    }
 }
 
 /// Makes sure the pinned image is in the local image store.
