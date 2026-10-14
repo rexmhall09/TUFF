@@ -94,6 +94,7 @@ import re
 import resource
 import signal
 import socket
+import socketserver
 import ssl
 import stat
 import sys
@@ -1607,6 +1608,16 @@ class BoundedServer(ThreadingHTTPServer):
     def __init__(self, address, handler, max_connections: int = MAX_CONNECTIONS):
         super().__init__(address, handler)
         self._slots = threading.BoundedSemaphore(max_connections)
+
+    def server_bind(self):
+        # HTTPServer.server_bind also asks for the host's fully qualified name
+        # (socket.getfqdn), a reverse DNS lookup that can stall for a minute on
+        # a machine whose resolver is slow, and nothing here uses the name.
+        # Bind as TCPServer does and record the address as it is.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):

@@ -1550,6 +1550,19 @@ class MainProcessTests(unittest.TestCase):
         self.addCleanup(cleanup)
         return process
 
+    def announced_port(self, process):
+        """The port the child announced on its first line. If it announced
+        nothing (it died, or the watchdog killed it), the test fails with what
+        the child wrote to standard error."""
+        line = process.stdout.readline()
+        parts = line.split()
+        if len(parts) < 2 or parts[0] != "PORT":
+            process.kill()
+            process.wait()
+            self.fail(f"the server process announced no port (first line {line!r}); "
+                      f"its standard error: {process.stderr.read()[:2000]!r}")
+        return int(parts[1])
+
     def run_to_exit(self, **env):
         process = self.spawn(**env)
         stdout, stderr = process.communicate(timeout=60)
@@ -1559,7 +1572,7 @@ class MainProcessTests(unittest.TestCase):
         blocked = "93.184.216.34, 192.168.1.5,fe80::1,::ffff:93.184.216.34,,"
         process = self.spawn(SANDBOX_SECRET_FILE=self.secret_file,
                              SANDBOX_BLOCKED_ADDRESSES=blocked)
-        port = int(process.stdout.readline().split()[1])
+        port = self.announced_port(process)
         self.assertIn("listening", process.stderr.readline())
         status, body, signed = sandbox_client.call(port, self.secret, "GET", "/health", timeout=10)
         self.assertEqual((status, signed), (200, True))
@@ -1579,7 +1592,7 @@ class MainProcessTests(unittest.TestCase):
 
     def test_no_blocklist_means_zero_blocked_addresses(self):
         process = self.spawn(SANDBOX_SECRET_FILE=self.secret_file)
-        port = int(process.stdout.readline().split()[1])
+        port = self.announced_port(process)
         status, body, signed = sandbox_client.call(port, self.secret, "GET", "/health", timeout=10)
         self.assertEqual((status, signed, json.loads(body)["blocked_addresses"]), (200, True, 0))
         process.send_signal(signal.SIGTERM)
@@ -1720,6 +1733,36 @@ class MainUnitTests(unittest.TestCase):
             self.assertIn("shorter", str(self.run_main()))
         self.assertEqual(self.events, [])
         self.assertEqual(os.environ[server.BLOCKED_ENV], "10.0.0.1")
+
+
+class BindTests(unittest.TestCase):
+    def test_binding_does_no_reverse_dns_lookup(self):
+        # HTTPServer.server_bind calls socket.getfqdn, which can stall on a
+        # slow resolver; BoundedServer must not.
+        def fail(*args, **kwargs):
+            raise AssertionError("socket.getfqdn must not be called")
+
+        with mock.patch.object(socket, "getfqdn", fail), \
+                mock.patch.object(socket, "gethostbyaddr", fail):
+            httpd = server.BoundedServer(("127.0.0.1", 0), server.Handler)
+        self.addCleanup(httpd.server_close)
+        port = httpd.server_address[1]
+        self.assertNotEqual(port, 0)
+        self.assertEqual((httpd.server_name, httpd.server_port), ("127.0.0.1", port))
+
+    def test_a_server_bound_this_way_serves(self):
+        httpd = server.BoundedServer(("127.0.0.1", 0), server.Handler)
+        self.addCleanup(httpd.server_close)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(httpd.shutdown)
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=10)
+        self.addCleanup(connection.close)
+        connection.request("GET", "/health")
+        # No secret is set on this handler, so the sandbox answers 500 and signs nothing;
+        # the point is that the bound socket accepts and answers.
+        self.assertIn(connection.getresponse().status, (401, 500))
 
 
 class DropPrivilegesTests(unittest.TestCase):
