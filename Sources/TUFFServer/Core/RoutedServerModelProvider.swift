@@ -34,9 +34,73 @@ public struct ServerInstalledModels: Sendable {
             && architecture.variant.rawValue == descriptor.architecture.id.rawValue
     }
 
-    /// Installed models this Mac meets the requirements for, in catalog order.
+    /// Installed models this Mac meets the requirements for, in catalog
+    /// order, then custom checkpoints in the order they were added.
     public func available() -> [TUFFModelDescriptor] {
-        TUFFModelCatalog.all.filter { isInstalled($0) && isEligible($0) }
+        (TUFFModelCatalog.all + customModels().map(\.descriptor))
+            .filter { isInstalled($0) && isEligible($0) }
+    }
+
+    /// A custom checkpoint as the server offers it: the template's
+    /// architecture, memory profile and defaults under the checkpoint's own
+    /// name and identity. Text only, as in the app.
+    public struct CustomModel: Sendable {
+        public let checkpoint: AppCustomCheckpoint
+        public let descriptor: TUFFModelDescriptor
+    }
+
+    /// Registered custom checkpoints whose folders are still in place.
+    public func customModels() -> [CustomModel] {
+        let checkpoints = AppCustomCheckpointRegistry.checkpoints(modelsRoot: modelsRoot)
+        let names = AppCustomCheckpointRegistry.apiNames(for: checkpoints)
+        return checkpoints.compactMap { checkpoint in
+            guard let name = names[checkpoint.id],
+                  let template = TUFFModelCatalog.model(id: checkpoint.templateID) else { return nil }
+            let folder = checkpoint.descriptor.installDirectoryName
+            struct Identity: Decodable { let modelID: String }
+            guard let data = try? Data(contentsOf: modelsRoot
+                    .appendingPathComponent(folder).appendingPathComponent("manifest.json")),
+                  let identity = try? JSONDecoder().decode(Identity.self, from: data) else { return nil }
+            return CustomModel(checkpoint: checkpoint, descriptor: TUFFModelDescriptor(
+                id: template.id, selector: name, apiModelID: name,
+                displayName: checkpoint.name, shortName: checkpoint.name,
+                summary: "Custom checkpoint using the \(template.displayName) architecture.",
+                family: template.family, architecture: template.architecture,
+                installDirectoryName: folder,
+                source: TUFFModelSource(repoID: "local/\(checkpoint.id)",
+                    revision: checkpoint.manifestSHA256,
+                    sourceIndexSHA256: checkpoint.sourceIndexSHA256,
+                    manifestModelID: identity.modelID, approximateDownloadBytes: 0,
+                    installedBytes: checkpoint.installedBytes, reserveBytes: 0),
+                hardware: template.hardware, memory: template.memory,
+                qualification: template.qualification, runtimeDefaults: template.runtimeDefaults,
+                capabilities: template.capabilities.subtracting([.imageInput]),
+                reasoningControl: template.reasoningControl,
+                maintenanceStatus: template.maintenanceStatus))
+        }
+    }
+
+    /// Any name a client might send: catalog models first, then custom
+    /// checkpoints by their API name.
+    public func descriptor(named name: String) -> TUFFModelDescriptor? {
+        Self.descriptor(named: name)
+            ?? customModels().first { $0.descriptor.apiModelID == name }?.descriptor
+    }
+
+    /// What Auto plans with. A custom checkpoint plans as its template does,
+    /// which is how the app treats it too.
+    public func planningDescriptor(for descriptor: TUFFModelDescriptor) -> AppModelInstallDescriptor {
+        customModels().first { $0.descriptor.apiModelID == descriptor.apiModelID }?.checkpoint.descriptor
+            ?? AppModelInstallDescriptor(catalog: descriptor)
+    }
+
+    /// The model name the engine reports once it has loaded this model. A
+    /// custom checkpoint is reported as the catalog model of its architecture.
+    public func engineReportedModelID(for descriptor: TUFFModelDescriptor) -> String {
+        guard Self.descriptor(named: descriptor.apiModelID) == nil else { return descriptor.apiModelID }
+        return TUFFModelCatalog.all.first {
+            $0.architecture.id.rawValue == descriptor.architecture.id.rawValue
+        }?.apiModelID ?? descriptor.apiModelID
     }
 
     public func isEligible(_ descriptor: TUFFModelDescriptor) -> Bool {
@@ -123,10 +187,48 @@ public struct ServerInstalledModels: Sendable {
         return (context, slots)
     }
 
+    /// The model directory puts the plan on the same records the app keeps
+    /// for this model, volume and engine, so the server uses what the app has
+    /// learned, and its own runs add to it.
     public func automaticPlan(for descriptor: TUFFModelDescriptor) -> AppAutomaticMemoryPlan? {
         guard let summary = AppAutomaticMemoryPlanner.layoutSummary(at: directory(for: descriptor)) else { return nil }
-        return AppAutomaticMemoryPlanner.plan(for: AppModelInstallDescriptor(catalog: descriptor),
-            on: device, profile: .balanced, layoutSummary: summary)
+        return AppAutomaticMemoryPlanner.plan(for: planningDescriptor(for: descriptor),
+            on: device, profile: .balanced, layoutSummary: summary,
+            modelDirectory: directory(for: descriptor))
+    }
+
+    /// Adds a finished request to Auto's history under the settings the
+    /// server loaded the model with. Nil when Auto did not choose them.
+    public func autoRecorder(for descriptor: TUFFModelDescriptor) -> (@Sendable (ServerCompletion) -> Void)? {
+        let directory = directory(for: descriptor)
+        guard let summary = AppAutomaticMemoryPlanner.layoutSummary(at: directory),
+              let plan = ServerLoadedPlans.plan(for: directory),
+              let layers = AppAutoPerformanceRecords.residentDenseLayers(
+                plan.denseResidencyPolicy, summary: summary) else { return nil }
+        let candidate = AppAutoPerformanceRecords.candidateID(
+            contextTokens: plan.contextTokens, expertCacheSlots: plan.expertCacheSlots,
+            residentDenseLayers: layers, prefillChunkTokens: plan.prefillChunkTokens)
+        let device = device
+        let window = AppAutoObservationWindow.begin()
+        let started = ContinuousClock.now
+        return { completion in
+            let elapsed = started.duration(to: .now)
+            let seconds = Double(elapsed.components.seconds)
+                + Double(elapsed.components.attoseconds) / 1e18
+            let firstToken = completion.timingSeconds["generation_to_first_event"] ?? 0
+            AppAutoPerformanceRecords.record(
+                identity: AppAutoPerformanceRecords.identity(
+                    summary: summary, device: device, modelDirectory: directory),
+                observation: window.observation(
+                    candidateID: candidate,
+                    workloadKey: AppAutoPerformanceRecords.workloadKey(
+                        promptTokens: completion.usage.promptTokens,
+                        reusedPrefix: completion.usage.promptTokensDetails.cachedTokens > 0,
+                        imageInput: false),
+                    decodeTokens: completion.usage.completionTokens,
+                    decodeSeconds: max(0, seconds - firstToken),
+                    timeToFirstTokenSeconds: firstToken))
+        }
     }
 
     /// The same settings `tuff serve` chooses for a model on this Mac.
@@ -156,6 +258,18 @@ public struct ServerInstalledModels: Sendable {
         case .gptOss: .harmony
         case .minimaxM2: .minimax
         }
+    }
+}
+
+/// The plan each model was loaded with. Recording the plan a model would get
+/// now would be wrong once the server's own records change Auto's choice.
+enum ServerLoadedPlans {
+    private static let plans = Mutex<[String: AppAutomaticMemoryPlan]>([:])
+    static func set(_ plan: AppAutomaticMemoryPlan, for directory: URL) {
+        plans.withLock { $0[directory.standardizedFileURL.path] = plan }
+    }
+    static func plan(for directory: URL) -> AppAutomaticMemoryPlan? {
+        plans.withLock { $0[directory.standardizedFileURL.path] }
     }
 }
 
@@ -218,7 +332,7 @@ public final class RoutedServerModelProvider: ServerModelProvider {
             queueLimit: settings.current.queueLimit,
             unloadDelaySeconds: { settings.current.unloadDelay.seconds },
             loader: { apiID in
-                guard let descriptor = ServerInstalledModels.descriptor(named: apiID),
+                guard let descriptor = installed.descriptor(named: apiID),
                       installed.isInstalled(descriptor) else {
                     throw ServerRequestError.unknownModel
                 }
@@ -232,7 +346,8 @@ public final class RoutedServerModelProvider: ServerModelProvider {
                             budgetBytes: installed.device.safeAppMemoryBudgetBytes)
                     } catch let busy as TUFFResidencyRegistry.MemoryBusy {
                         throw ServerRequestError.modelMemoryBusy(
-                            Self.memoryBusyMessage(model: descriptor, holders: busy.holders))
+                            Self.memoryBusyMessage(model: descriptor, holders: busy.holders,
+                                                   installed: installed))
                     }
                 }
                 let backend = try await loader(descriptor, installed.directory(for: descriptor))
@@ -247,9 +362,11 @@ public final class RoutedServerModelProvider: ServerModelProvider {
     }
 
     static func memoryBusyMessage(model: TUFFModelDescriptor,
-                                  holders: [TUFFResidencyRecord]) -> String {
+                                  holders: [TUFFResidencyRecord],
+                                  installed: ServerInstalledModels? = nil) -> String {
         let names = holders.map { record -> String in
-            let name = ServerInstalledModels.descriptor(named: record.modelID)?.displayName
+            let name = (installed?.descriptor(named: record.modelID)
+                ?? ServerInstalledModels.descriptor(named: record.modelID))?.displayName
                 ?? record.modelID
             return record.owner == .app ? "the TUFF app (\(name))" : name
         }
@@ -279,7 +396,7 @@ public final class RoutedServerModelProvider: ServerModelProvider {
             mode: "router", vision: parserVisionCapability,
             // The name a client would send, not the catalog's internal one.
             loadedModel: activity.residentModel.map {
-                ServerInstalledModels.descriptor(named: $0)?.apiModelID ?? $0
+                installed.descriptor(named: $0)?.apiModelID ?? $0
             },
             activeRequests: activity.activeRequests,
             queuedRequests: activity.queuedRequests)
@@ -288,7 +405,7 @@ public final class RoutedServerModelProvider: ServerModelProvider {
     public func route(_ requestedModel: String) throws -> ServerRoutedModel {
         let name = requestedModel == Self.defaultModelAlias
             ? settings.current.defaultModel : requestedModel
-        guard let descriptor = ServerInstalledModels.descriptor(named: name) else {
+        guard let descriptor = installed.descriptor(named: name) else {
             throw ServerRequestError.unknownModel
         }
         guard installed.isInstalled(descriptor) else {
@@ -321,6 +438,11 @@ public final class RoutedServerModelProvider: ServerModelProvider {
 
     public var queuedCount: Int { get async { await scheduler.queuedCount } }
     public var isActive: Bool { get async { await scheduler.isActive } }
+
+    public func completionRecorder(for model: ServerRoutedModel) -> (@Sendable (ServerCompletion) -> Void)? {
+        guard let descriptor = installed.descriptor(named: model.id) else { return nil }
+        return installed.autoRecorder(for: descriptor)
+    }
 
     public func shutdown() async {
         await scheduler.shutdown()

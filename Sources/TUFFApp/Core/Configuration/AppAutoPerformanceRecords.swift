@@ -5,6 +5,7 @@ import TUFFInferenceTypes
 import TUFFModelCatalog
 import TUFFModelMetadata
 import TUFFRuntimeManagement
+import TUFFRuntimeDescriptions
 
 /// Stores timings and allocation choices only; prompts and responses never
 /// enter tuning records. A source, engine, device, OS or schema change gives a
@@ -69,6 +70,13 @@ public enum AppAutoPerformanceRecords {
     public static func record(identity: String, observation: InferencePlanObservation) {
         guard accepts(observation), identity.count == 64 else { return }
         lock.withLock { _ in
+            // The app, `tuff prompt` and `tuff serve` all add records, so the
+            // read-modify-write is also held against other processes.
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            let lockFD = open(url.path + ".lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            if lockFD >= 0 { flock(lockFD, LOCK_EX) }
+            defer { if lockFD >= 0 { flock(lockFD, LOCK_UN); close(lockFD) } }
             // A corrupt/unknown record remains untouched; Auto safely falls
             // back to calculated allocation until the person resets it.
             guard var records = try? read() else { return }
@@ -81,6 +89,23 @@ public enum AppAutoPerformanceRecords {
                 try data.write(to: url, options: .atomic)
                 _ = chmod(url.path, 0o600)
             } catch {}
+        }
+    }
+
+    /// The settings a run used, in the form the planner names its candidates.
+    public static func candidateID(contextTokens: Int, expertCacheSlots: Int,
+                                   residentDenseLayers: Int, prefillChunkTokens: Int) -> String {
+        "c\(contextTokens)-e\(expertCacheSlots)-d\(residentDenseLayers)-p\(prefillChunkTokens)"
+    }
+
+    /// Resident dense layers for a policy, or nil when Auto has not resolved
+    /// one, in which case the run is not attributable to a candidate.
+    public static func residentDenseLayers(_ policy: DenseResidencyPolicy,
+                                           summary: ModelWeightLayoutSummary) -> Int? {
+        switch policy {
+        case .resident: summary.layout.denseGroupBytes.count
+        case .bounded(let layers): layers.count
+        case .automatic: nil
         }
     }
 
@@ -168,5 +193,40 @@ public final class AppAutoMemoryPressureMonitor: @unchecked Sendable {
                             startWritten: UInt64, endWritten: UInt64) -> UInt64 {
         max(endUsed > startUsed ? endUsed - startUsed : 0,
             endWritten > startWritten ? endWritten - startWritten : 0)
+    }
+}
+
+/// Memory pressure and paging across one run, measured the same way by the
+/// app, `tuff prompt` and `tuff serve` so their records are comparable.
+public struct AppAutoObservationWindow: Sendable {
+    let swapUsed: UInt64
+    let swapWritten: UInt64
+    let warnings: UInt64
+
+    public static func begin() -> Self {
+        Self(swapUsed: AppAutoMemoryPressureMonitor.swapBytes(),
+             swapWritten: AppAutoMemoryPressureMonitor.swapWrittenBytes(),
+             warnings: AppAutoMemoryPressureMonitor.shared.snapshot.warnings)
+    }
+
+    /// Pressure seen during the run: a warning raised meanwhile counts even
+    /// if it has since cleared.
+    public func pressure() -> InferenceMemoryPressure {
+        let now = AppAutoMemoryPressureMonitor.shared.snapshot
+        return now.warnings > warnings ? .warning : now.pressure
+    }
+
+    public func pagingBytes() -> UInt64 {
+        AppAutoMemoryPressureMonitor.pagingBytes(
+            startUsed: swapUsed, endUsed: AppAutoMemoryPressureMonitor.swapBytes(),
+            startWritten: swapWritten, endWritten: AppAutoMemoryPressureMonitor.swapWrittenBytes())
+    }
+
+    public func observation(candidateID: String, workloadKey: String, decodeTokens: Int,
+                            decodeSeconds: Double, timeToFirstTokenSeconds: Double) -> InferencePlanObservation {
+        InferencePlanObservation(candidateID: candidateID, workloadKey: workloadKey,
+            decodeTokens: decodeTokens, decodeSeconds: decodeSeconds,
+            timeToFirstTokenSeconds: timeToFirstTokenSeconds,
+            pressure: pressure(), swapGrowthBytes: pagingBytes())
     }
 }

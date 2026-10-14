@@ -23,8 +23,10 @@ From a clone: `swift run -c release TUFFServer --models-root scratch`.
 Point your client at `http://127.0.0.1:8080/v1`. `GET /v1/models` lists the
 installed models and their context and output limits. A request for
 `default` uses the default model; a model ID loads that one. The short names
-`tuff prompt` takes, such as `gemma4` or `qwen36`, work too. Requests run one
-at a time, and a full queue answers 429 with `Retry-After`.
+`tuff prompt` takes, such as `gemma4` or `qwen36`, work too. Custom
+checkpoints you imported in Settings are listed under a name made from their
+own, so "My Tune" is `my-tune`. Requests run one at a time, and a full queue
+answers 429 with `Retry-After`.
 
 Chat and the API share one memory budget. If Chat has a model with image
 support loaded, the API answers 503 instead of loading a second model.

@@ -430,12 +430,16 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     }
                 }
                 let started = ContinuousClock.now
+                let recorder = Mutex<(@Sendable (ServerCompletion) -> Void)?>(nil)
                 ServerLog.accepted(id: responseID, streaming: request.stream)
                 do {
                     var completion = try await self.provider.run(
                         target,
                         onQueued: onQueued,
                         prepare: { backend in
+                            // The model is loaded by now, so its load is not
+                            // counted as part of the run.
+                            recorder.withLock { $0 = self.provider.completionRecorder(for: target) }
                             if self.provider is RoutedServerModelProvider,
                                !request.imageFiles.isEmpty, backend.visionCapability != "ready" {
                                 throw ServerRequestError.invalid(
@@ -505,6 +509,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     ServerLog.completed(id: responseID,
                                         duration: started.duration(to: .now),
                                         completion: completion)
+                    recorder.withLock { $0 }?(completion)
                     if request.stream {
                         streamState.stop()
                         if let adapter {

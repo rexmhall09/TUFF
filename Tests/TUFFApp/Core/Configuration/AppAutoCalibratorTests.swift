@@ -19,6 +19,13 @@ import TUFFInferenceTypes
         #expect(!AppAutoPerformanceRecords.accepts(.init(candidateID: "invalid", workloadKey: "cold-short",
             decodeTokens: -1, decodeSeconds: 0, timeToFirstTokenSeconds: 0, swapGrowthBytes: 4096)))
     }
+    /// The app, `tuff prompt` and `tuff serve` name a run's settings the same
+    /// way, in the form records written before 9.1.2 already use.
+    @Test func candidateNamesMatchTheRecordedForm() {
+        #expect(AppAutoPerformanceRecords.candidateID(contextTokens: 16_384, expertCacheSlots: 16,
+            residentDenseLayers: 30, prefillChunkTokens: 512) == "c16384-e16-d30-p512")
+    }
+
     @Test func pagingWritesCountEvenWhenNetSwapOccupancyFalls() {
         #expect(AppAutoMemoryPressureMonitor.pagingBytes(startUsed: 1_000, endUsed: 900,
             startWritten: 2_000, endWritten: 2_500) == 500)

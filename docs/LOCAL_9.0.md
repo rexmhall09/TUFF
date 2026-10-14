@@ -72,6 +72,12 @@ prefix once, rather than writing generated-token state continuously. Set
 their scoped data root. SSD health or lifetime cannot be guaranteed by these
 software checks, and the operating system controls swapping and thermal limits.
 
+Chats use the same cache so a chat reopened after a restart doesn't read its
+whole history again. A chat of 1,024 tokens or more is saved where its newest
+message begins, then saved again only once it has grown by a quarter. Its
+state is deleted with the chat, or when you edit an earlier message. Set
+`TUFF_SAVED_CHATS=off` to keep chat state in memory only.
+
 Raising macOS's GPU wired-memory limit is not a default TUFF setup step.
 TUFF runs its own Metal helpers, rather than MLX's allocator. A larger system
 allowance does not add physical RAM or make disk-bound streaming faster.
@@ -85,9 +91,9 @@ and [MLX wired-limit documentation](https://ml-explore.github.io/mlx/build/html/
 
 Catalog `tuff prompt` commands use calculated Auto by default. The packaged
 `TUFFCLI` supports `--memory-auto`; explicit cache/residency controls remain
-manual. CLI and API Auto currently use calculated layout/device planning rather than
-the app's engine-and-volume-specific observation history. They do not yet record
-ordinary requests into that history. SIGINT, SIGTERM and
+manual. CLI and API Auto use the same engine-and-volume-specific history as the
+app, and record their own completed runs into it, so what one learns the others
+use. SIGINT, SIGTERM and
 SIGHUP cancel the CLI request and interrupt its child helper.
 
 The canonical serial gate is `bash Scripts/test.sh`. `TUFF_LOCAL_BUILD=1 Scripts/check.sh --source-only`
@@ -130,8 +136,9 @@ receipt binding, tokenizer format and token ID bounds before adding the entry.
 The same signed family engine is acquired and shared.
 
 This first version imports text checkpoints only. It does not convert loose
-safetensors/GGUF files, add new engines, import custom image packs, or register
-custom HTTP model names. Repack the source using the CLI first and run
+safetensors/GGUF files, add new engines or import custom image packs. The local
+API offers each custom checkpoint under a name made from its own, such as
+`my-tune` for "My Tune". Repack the source using the CLI first and run
 `TUFFRepack verify-install` to produce its receipt. Keep the chosen folder in
 place. A changed manifest requires removing and importing the entry again.
 Removing the entry removes TUFF's link and registration, leaving the source

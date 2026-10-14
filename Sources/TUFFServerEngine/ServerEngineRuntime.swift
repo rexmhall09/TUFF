@@ -27,7 +27,7 @@ public enum ServerEngineRuntime {
                 retainedConversationBytes: installed.retainedConversationBytes(for: descriptor),
                 runtimeConfiguration: installed.runtimeConfiguration(for: descriptor),
                 context: try shared.get(), integrityPolicy: .sizeCheckTrustedReceipt)
-            guard session.defaultModelID == descriptor.apiModelID,
+            guard session.defaultModelID == installed.engineReportedModelID(for: descriptor),
                   session.modelVariant.rawValue == descriptor.architecture.id.rawValue else {
                 throw ServerRequestError.modelUnavailable("The installed pack does not match the requested model.")
             }

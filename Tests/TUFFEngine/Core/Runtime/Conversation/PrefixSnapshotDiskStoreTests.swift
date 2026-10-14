@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import Metal
 @testable import TUFFEngine
+import TUFFModelCatalog
 
 /// Shared-prefix snapshots on disk: loaded only for exactly the same model,
 /// settings, build and tokens, and never trusted when damaged.
@@ -41,6 +42,88 @@ import Metal
             owner: ObjectIdentifier(owner), storage: buffer,
             segments: [.init(label: "kv.K.0", sourceOffset: 0, snapshotOffset: 0, length: bytes)],
             host: .init(position: tokens.count, ngramContext: [3, 4], ropeDelta: 0))
+    }
+
+    /// A chat's state resumes a later prompt that starts with its tokens and
+    /// adds something; anything else loads nothing.
+    @Test func aSavedChatResumesOnlyAPromptItBegins() throws {
+        let (store, directory) = store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = Owner()
+        let tokens: [Int32] = Array(1...300)
+        #expect(store.savedChatTokenCount(conversationKey: "chat") == nil)
+        store.saveChat(snapshot(tokens: tokens, owner: owner), tokens: tokens,
+                       domain: Self.domain, conversationKey: "chat")
+        store.flush()
+        #expect(store.savedChatTokenCount(conversationKey: "chat") == 300)
+
+        let longer = tokens + [7, 8, 9]
+        let loaded = try #require(store.loadChat(conversationKey: "chat", prompt: longer,
+                                                 domain: Self.domain, runner: owner, device: device))
+        #expect(loaded.position == 300)
+        // Nothing left to read, a different history, another chat, another model.
+        #expect(store.loadChat(conversationKey: "chat", prompt: tokens, domain: Self.domain,
+                               runner: owner, device: device) == nil)
+        var edited = longer
+        edited[10] = 9_999
+        #expect(store.loadChat(conversationKey: "chat", prompt: edited, domain: Self.domain,
+                               runner: owner, device: device) == nil)
+        #expect(store.loadChat(conversationKey: "other", prompt: longer, domain: Self.domain,
+                               runner: owner, device: device) == nil)
+        let otherModel = ConversationCacheDomain(
+            modelID: "gpt-oss-120b", sourceSnapshotHash: "s", runtimeProfileHash: "r",
+            maximumContext: 4_096, kvStorage: "fp16", fp16RingEnabled: true, templateSHA256: "t")
+        #expect(store.loadChat(conversationKey: "chat", prompt: longer, domain: otherModel,
+                               runner: owner, device: device) == nil)
+        // A mismatch leaves the file for the next save to replace, and a
+        // stale state does not count as saved for that prompt.
+        #expect(store.savedChatTokenCount(conversationKey: "chat") == 300)
+        #expect(store.savedChatTokenCount(conversationKey: "chat", prompt: longer) == 300)
+        #expect(store.savedChatTokenCount(conversationKey: "chat", prompt: edited) == nil)
+    }
+
+    /// One file per chat: a later reply replaces the earlier state.
+    @Test func aLaterReplyReplacesTheChatsState() throws {
+        let (store, directory) = store()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = Owner()
+        for count in [200, 400] {
+            let tokens: [Int32] = Array(1...Int32(count))
+            store.saveChat(snapshot(tokens: tokens, owner: owner), tokens: tokens,
+                           domain: Self.domain, conversationKey: "chat")
+        }
+        store.flush()
+        #expect(store.savedChatTokenCount(conversationKey: "chat") == 400)
+        let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        #expect(files.filter { $0.hasPrefix("chat-") }.count == 1)
+    }
+
+    /// Deleting a chat removes its state from every model and build, and
+    /// nothing else.
+    @Test func removingAChatTakesItsStateFromEveryModel() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-remove-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let environment = ["TUFF_APPLICATION_SUPPORT_ROOT": root.path]
+        let owner = Owner()
+        let tokens: [Int32] = Array(1...64)
+        var stores: [PrefixSnapshotDiskStore] = []
+        for model in ["gemma", "qwen"] {
+            let store = try #require(PrefixSnapshotDiskStore.standard(
+                modelID: model, buildIdentity: "9.1.1", environment: environment))
+            store.saveChat(snapshot(tokens: tokens, owner: owner), tokens: tokens,
+                           domain: Self.domain, conversationKey: "gone")
+            store.saveChat(snapshot(tokens: tokens, owner: owner), tokens: tokens,
+                           domain: Self.domain, conversationKey: "kept")
+            store.save(snapshot(tokens: tokens, owner: owner), tokens: tokens, domain: Self.domain)
+            store.flush()
+            stores.append(store)
+        }
+        TUFFPrefixSnapshotLocation.removeChatSnapshots(conversationKey: "gone", environment: environment)
+        for store in stores {
+            #expect(store.savedChatTokenCount(conversationKey: "gone") == nil)
+            #expect(store.savedChatTokenCount(conversationKey: "kept") == 64)
+            #expect(store.contains(tokens: tokens, domain: Self.domain))
+        }
     }
 
     @Test func aSavedSnapshotLoadsBackExactly() throws {

@@ -38,6 +38,10 @@ public struct Args: Codable, Equatable, Sendable {
     /// Resolved by the lightweight host before sending explicit options.
     /// Optional so older JSON argument payloads continue to decode.
     public var automaticMemory: Bool? = nil
+    /// Set by the host when Auto chose the settings: the engine writes a
+    /// `CLIRunReport` here so the host can record the run in Auto's history.
+    /// Optional, so an engine that predates it simply writes nothing.
+    public var runReportPath: String? = nil
 
     public init(model: String,
                 prompt: String? = nil,

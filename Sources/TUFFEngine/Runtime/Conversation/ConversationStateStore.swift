@@ -47,6 +47,8 @@ public final class ConversationStateStore {
         case active
         case retained
         case cold
+        /// Restored from a chat saved on disk by an earlier process.
+        case saved
     }
 
     public struct Plan: Sendable, Equatable {

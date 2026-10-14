@@ -100,7 +100,7 @@ public final class AppModel {
     public let toolStore: AppToolStore
     public let deviceCapabilities: TUFFDeviceCapabilities
     private var runsAfterCurrentLoad = false
-    private var autoObservationStart: (swap: UInt64, swapWritten: UInt64, warnings: UInt64)?
+    private var autoObservationStart: AppAutoObservationWindow?
     private var autoWorkloadKey = "text-cold-short-t0"
 
 
@@ -3038,8 +3038,7 @@ public final class AppModel {
             toolbox: toolStore.makeToolbox(provider: settingsStore.searchProvider))
         let activity = toolStore.inferenceActivity
         activity.set(true)
-        autoObservationStart = (AppAutoMemoryPressureMonitor.swapBytes(),
-            AppAutoMemoryPressureMonitor.swapWrittenBytes(), AppAutoMemoryPressureMonitor.shared.snapshot.warnings)
+        autoObservationStart = .begin()
         let answerRequest = request
         runTask = Task.detached { [weak self, runner, answerRequest] in
             let model = self
@@ -3383,28 +3382,24 @@ public final class AppModel {
     private func recordAutoPerformance(_ diagnostics: AppDiagnostics, completed: Bool = true) {
         guard automaticMemory, settingsPersistenceEnabled, diagnostics.toolRounds == 0,
               let summary = AppAutomaticMemoryPlanner.layoutSummary(at: URL(fileURLWithPath: modelPathText)) else { return }
-        let layers: Int
-        switch diagnostics.runtimeOptions.denseResidencyPolicy {
-        case .resident: layers = summary.layout.denseGroupBytes.count
-        case .bounded(let resident): layers = resident.count
-        case .automatic: return
-        }
+        guard let layers = AppAutoPerformanceRecords.residentDenseLayers(
+            diagnostics.runtimeOptions.denseResidencyPolicy, summary: summary) else { return }
         let key = AppAutoPerformanceRecords.workloadKey(promptTokens: diagnostics.promptTokenCount ?? 0,
             reusedPrefix: (diagnostics.cachedPromptTokens ?? 0) > 0, imageInput: !outputImageAttachments.isEmpty,
             sampled: loadedRuntimeKey?.forceLogitsHead ?? currentForceLogitsHead)
         autoWorkloadKey = key
-        let pressure = AppAutoMemoryPressureMonitor.shared.snapshot
-        let swap = AppAutoMemoryPressureMonitor.swapBytes()
         let start = autoObservationStart
-        let observedPressure = start.map { pressure.warnings > $0.warnings ? InferenceMemoryPressure.warning : pressure.pressure } ?? pressure.pressure
-        let paging = start.map { AppAutoMemoryPressureMonitor.pagingBytes(
-            startUsed: $0.swap, endUsed: swap, startWritten: $0.swapWritten,
-            endWritten: AppAutoMemoryPressureMonitor.swapWrittenBytes()) } ?? 0
+        let observedPressure = start?.pressure() ?? AppAutoMemoryPressureMonitor.shared.snapshot.pressure
+        let paging = start?.pagingBytes() ?? 0
         guard completed || observedPressure != .normal || paging > 0 else { return }
         AppAutoPerformanceRecords.record(identity: AppAutoPerformanceRecords.identity(summary: summary, device: deviceCapabilities,
             engineIdentity: (client as? any AppInferenceEngineReporting)?.currentEngineIdentity,
             modelDirectory: URL(fileURLWithPath: modelPathText)),
-            observation: InferencePlanObservation(candidateID: "c\(effectiveMaxContextTokens)-e\(diagnostics.runtimeOptions.expertCacheSlots)-d\(layers)-p\(diagnostics.runtimeOptions.prefillChunkTokens)",
+            observation: InferencePlanObservation(candidateID: AppAutoPerformanceRecords.candidateID(
+                    contextTokens: effectiveMaxContextTokens,
+                    expertCacheSlots: diagnostics.runtimeOptions.expertCacheSlots,
+                    residentDenseLayers: layers,
+                    prefillChunkTokens: diagnostics.runtimeOptions.prefillChunkTokens),
                 workloadKey: key, decodeTokens: diagnostics.generatedTokens, decodeSeconds: diagnostics.decodeSeconds,
                 timeToFirstTokenSeconds: diagnostics.requestStartTimeToFirstTokenSeconds ?? diagnostics.timeToFirstTokenSeconds ?? 0,
                 pressure: observedPressure, swapGrowthBytes: paging))

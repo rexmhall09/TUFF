@@ -27,9 +27,11 @@ public enum ServerBackendLoaderRegistry {
                 throw ServerRequestError.modelUnavailable("No safe automatic allocation is available for this model on this Mac.")
             }
             let densePolicy = automatic.denseResidencyPolicy
+            ServerLoadedPlans.set(automatic, for: directory)
             return try await ProcessBackedServerModelSession.load(
                 executableURL: installation.executableURL, engineLockFileURL: installation.lockFileURL,
-                architectureID: descriptor.architecture.id.rawValue, expectedModelID: descriptor.apiModelID,
+                architectureID: descriptor.architecture.id.rawValue,
+                expectedModelID: installed.engineReportedModelID(for: descriptor),
                 request: ServerEngineLoadRequest(modelPath: directory.path,
                     maxContextTokens: automatic.contextTokens,
                     retainedConversationBytes: automatic.retainedConversationBytes ?? 0,

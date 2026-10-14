@@ -111,6 +111,57 @@ private actor RoutedHTTPBackend: ServerInferenceBackend {
             settings: .init(url: nil, fallback: .init(defaultModel: "gemma4-e2b")),
             residency: registry, loader: { _, _ in backend })
     }
+    /// An imported checkpoint is offered under a name made from its own,
+    /// planned as its template, and loaded under the template's identity.
+    @Test func customCheckpointsAreServedByName() async throws {
+        let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+        try install(TUFFModelCatalog.gemma4_E2B, root: root)
+        let id = "custom-" + UUID().uuidString.lowercased()
+        let template = TUFFModelCatalog.gemma4_E2B
+        let custom = TUFFModelDescriptor(id: template.id, selector: "x", apiModelID: "x",
+            displayName: "x", shortName: "x", summary: "", family: template.family,
+            architecture: template.architecture, installDirectoryName: "\(id).gturbo",
+            source: TUFFModelSource(repoID: "local/\(id)", revision: "r", sourceIndexSHA256: "s",
+                manifestModelID: "local/my-tune", approximateDownloadBytes: 0,
+                installedBytes: 1, reserveBytes: 0),
+            hardware: template.hardware, memory: template.memory,
+            capabilities: template.capabilities, reasoningControl: template.reasoningControl)
+        try install(custom, root: root)
+        let registry: [String: Any] = ["schemaVersion": 1, "checkpoints": [[
+            "id": id, "name": "My Gemma Tune!", "sourcePath": "/tmp/source.gturbo",
+            "templateID": template.id.rawValue,
+            "sourceIndexSHA256": String(repeating: "a", count: 64),
+            "manifestSHA256": String(repeating: "b", count: 64), "installedBytes": 1]]]
+        try JSONSerialization.data(withJSONObject: registry)
+            .write(to: root.appendingPathComponent("custom-checkpoints.json"))
+
+        let p = provider(root)
+        #expect(p.modelList().data.map(\.id) == [template.apiModelID, "my-gemma-tune"])
+        let routed = try p.route("my-gemma-tune")
+        #expect(routed.id == "my-gemma-tune")
+        let descriptor = try #require(p.installed.descriptor(named: "my-gemma-tune"))
+        #expect(descriptor.displayName == "My Gemma Tune!")
+        #expect(!descriptor.capabilities.contains(.imageInput))
+        #expect(p.installed.engineReportedModelID(for: descriptor) == template.apiModelID)
+        #expect(p.installed.engineReportedModelID(for: template) == template.apiModelID)
+        #expect(p.installed.planningDescriptor(for: descriptor).isCustomCheckpoint)
+        #expect(p.installed.directory(for: descriptor).lastPathComponent == "\(id).gturbo")
+    }
+
+    @Test func customCheckpointNamesAreStableAndNeverShadowCatalogModels() throws {
+        func checkpoint(_ name: String) -> AppCustomCheckpoint {
+            AppCustomCheckpoint(id: "custom-" + UUID().uuidString.lowercased(), name: name,
+                sourcePath: "/x", templateID: .gemma4_E2B,
+                sourceIndexSHA256: String(repeating: "a", count: 64),
+                manifestSHA256: String(repeating: "b", count: 64), installedBytes: 1)
+        }
+        let list = [checkpoint("Tuned Model"), checkpoint("tuned model"), checkpoint("gemma4"),
+                    checkpoint("!!!"), checkpoint("default")]
+        let names = AppCustomCheckpointRegistry.apiNames(for: list)
+        #expect(list.map { names[$0.id] } == ["tuned-model", "tuned-model-2", "gemma4-custom",
+                                               "custom", "default-custom"])
+    }
+
     @Test func mismatchedPackCannotMasqueradeAsCatalogModel() throws {
         let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
         try install(TUFFModelCatalog.gemma4_E4B, root: root)

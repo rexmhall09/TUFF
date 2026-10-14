@@ -137,6 +137,9 @@ actor RealInferenceSession {
     /// the session, so nothing outlives the model it was computed by.
     private var conversations = ConversationStateStore(budgetBytes: 0)
     private var conversationDomain: ConversationCacheDomain?
+    /// Chats saved on disk, so one reopened after a restart resumes instead
+    /// of reading its whole history again. Nil when conversation state is off.
+    private var savedChats: PrefixSnapshotDiskStore?
 
     /// Bytes of image tower held mapped right now, published outside the actor
     /// so a reader does not have to await it mid-decode.
@@ -159,6 +162,8 @@ actor RealInferenceSession {
 
         conversations = ConversationStateStore(budgetBytes: 0)
         conversationDomain = nil
+        savedChats?.flush()
+        savedChats = nil
         runner = nil
         scratch = nil
         model = nil
@@ -256,6 +261,9 @@ actor RealInferenceSession {
                     imagePackInstalled: loadedVisionRuntime != nil))
             conversationDomain = Self.conversationDomain(
                 model: loadedModel, key: key, runtime: runtimeConfiguration)
+            savedChats = conversations.budgetBytes > 0 && Self.savesChats()
+                ? .standard(modelID: loadedModel.modelID, buildIdentity: TUFFVersion.current)
+                : nil
             visionRuntime = loadedVisionRuntime
             visionRuntimeError = loadedVisionRuntimeError
             context.logLoadStatistics(key.directory.lastPathComponent)
@@ -510,6 +518,25 @@ actor RealInferenceSession {
             && !request.preserveThinking && request.reasoningEffort == nil
     }
 
+    /// Below this a chat is read again faster than its state is written.
+    static let minimumSavedChatTokens = 1_024
+
+    /// A snapshot holds the whole state, hundreds of megabytes for a long
+    /// chat on a large model, so it is rewritten only once the chat has
+    /// grown by a quarter (and at least 512 tokens). A long chat is saved a
+    /// handful of times rather than after every reply, and a restart reads
+    /// at most that quarter again.
+    static func shouldSaveChat(at position: Int, saved: Int?) -> Bool {
+        guard position >= minimumSavedChatTokens else { return false }
+        guard let saved, saved < position else { return saved == nil }
+        return position - saved >= max(512, saved / 4)
+    }
+
+    /// `TUFF_SAVED_CHATS=off` keeps chat state in memory only.
+    static func savesChats(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        environment["TUFF_SAVED_CHATS"] != "off"
+    }
+
     static func retainedConversationBudget(model: Model, key: SessionLoadKey,
                                            imagePackInstalled: Bool) -> Int {
         if let bytes = key.options.retainedConversationBytes {
@@ -551,6 +578,10 @@ actor RealInferenceSession {
     }
 
     func unload() {
+        // Unload is also the helper's way out when the app quits, so a chat
+        // still being written finishes first instead of being lost.
+        savedChats?.flush()
+        savedChats = nil
         conversations = ConversationStateStore(budgetBytes: 0)
         conversationDomain = nil
         visionRuntime = nil
@@ -641,6 +672,24 @@ actor RealInferenceSession {
                 promptIds = renderedText.tokens
                 multimodalInput = nil
                 conversationTrim = renderedText.trim
+                // Nothing in memory matched: this chat may have been saved by
+                // an earlier process. Restoring replaces the runner's state,
+                // so the active entry no longer describes it.
+                if renderedText.trim.droppedTurns == 0, let key = request.conversationKey,
+                   let savedChats, runner.supportsPrefixCheckpoints,
+                   let snapshot = savedChats.loadChat(
+                    conversationKey: key, prompt: renderedText.tokens,
+                    domain: conversationDomain, runner: runner, device: ctx.device) {
+                    conversations.invalidateActive()
+                    do {
+                        try runner.restoreState(snapshot)
+                        completionStart = .resume(cachedPromptTokens: snapshot.position)
+                        cacheSource = .saved
+                    } catch {
+                        // The runner reset itself; read the prompt from scratch.
+                        completionStart = .reset
+                    }
+                }
             } else {
                 guard let visionRuntime else {
                     throw AppInferenceError.invalidRequest(
@@ -732,6 +781,21 @@ actor RealInferenceSession {
                 && !Self.allowsTextBridge(request)
                 && request.assistantPrefix.isEmpty
                 && transcript.messages.last?.role == .user
+            let turnPosition = multimodalInput == nil && request.assistantPrefix.isEmpty
+                && transcript.messages.last?.role == .user
+                ? Self.turnCheckpointPosition(
+                    request: request, promptIDs: promptIds, tokenizer: tokenizer,
+                    modelVariant: variant, harmonyDate: harmonyDate)
+                : nil
+            // The chat is saved where this user turn begins: the next turn's
+            // prompt starts with exactly those tokens whatever the template
+            // does to finished turns.
+            let chatSavePosition = turnPosition.flatMap { position -> Int? in
+                guard let key = request.conversationKey, let savedChats,
+                      Self.shouldSaveChat(at: position, saved: savedChats.savedChatTokenCount(
+                        conversationKey: key, prompt: promptIds)) else { return nil }
+                return position
+            }
 
             completionStarted = true
             let result = try await runRawCompletion(
@@ -739,11 +803,10 @@ actor RealInferenceSession {
                 multimodalInput: multimodalInput,
                 config: config, context: ctx, scratch: scratch,
                 prefillConfig: prefillConfig, start: completionStart,
-                prefixCheckpointPositions: capturesTurnCheckpoint
-                    ? [Self.turnCheckpointPosition(
-                        request: request, promptIDs: promptIds, tokenizer: tokenizer,
-                        modelVariant: variant, harmonyDate: harmonyDate)].compactMap { $0 }
+                prefixCheckpointPositions: capturesTurnCheckpoint || chatSavePosition != nil
+                    ? [turnPosition].compactMap { $0 }
                     : [],
+                stateSnapshotPosition: chatSavePosition,
                 checkpointBudgetBytes: max(0, conversations.budgetBytes
                     - conversations.retainedBytes - conversations.activeCheckpointBytes)) { @Sendable event in
                 switch event {
@@ -823,6 +886,11 @@ actor RealInferenceSession {
                                 tokenIDs: Array(promptIds.prefix($0.position)), snapshot: $0)
                         } + (plannedEntry?.prefixCheckpoints ?? []))
                     : nil)
+            }
+            if let snapshot = result.stateSnapshot, let key = request.conversationKey,
+               let savedChats, conversationTrim.droppedTurns == 0 {
+                savedChats.saveChat(snapshot, tokens: Array(promptIds.prefix(snapshot.position)),
+                                    domain: conversationDomain, conversationKey: key)
             }
             progress.cachedPromptTokens = result.cachedPromptTokens
             progress.cacheSource = result.cachedPromptTokens > 0 ? cacheSource : .cold

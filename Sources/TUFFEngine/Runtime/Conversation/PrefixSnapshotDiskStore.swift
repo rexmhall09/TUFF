@@ -97,9 +97,76 @@ public final class PrefixSnapshotDiskStore: @unchecked Sendable {
     /// exactly `tokens`; a failed write leaves nothing behind.
     public func save(_ snapshot: RunnerStateSnapshot, tokens: [Int32],
                      domain: ConversationCacheDomain) {
+        write(snapshot, tokens: tokens, domain: domain,
+              to: fileURL(tokens: tokens, domain: domain))
+    }
+
+    /// Writes a chat's state, replacing the one saved after its previous
+    /// reply. One file per chat, so a long chat costs one snapshot, not one
+    /// per turn.
+    public func saveChat(_ snapshot: RunnerStateSnapshot, tokens: [Int32],
+                         domain: ConversationCacheDomain, conversationKey: String) {
+        write(snapshot, tokens: tokens, domain: domain,
+              to: chatFileURL(conversationKey: conversationKey))
+    }
+
+    /// The token count a chat's saved state covers, without reading its
+    /// payload. With `prompt`, only a state that still begins that prompt
+    /// counts: a stale one is as good as none and the next save replaces it.
+    public func savedChatTokenCount(conversationKey: String, prompt: [Int32]? = nil) -> Int? {
+        guard let header = try? readHeader(chatFileURL(conversationKey: conversationKey))
+        else { return nil }
+        if let prompt, !prompt.starts(with: header.tokens) { return nil }
+        return header.tokens.count
+    }
+
+    /// A chat's saved state when its tokens begin `prompt` and leave
+    /// something to read, rebuilt for `runner`, or nil. A damaged file is
+    /// removed; one that no longer matches the conversation is left for the
+    /// next save to replace.
+    public func loadChat(conversationKey: String, prompt: [Int32],
+                         domain: ConversationCacheDomain,
+                         runner: any StateSnapshottingRunner,
+                         device: MTLDevice) -> RunnerStateSnapshot? {
+        let url = chatFileURL(conversationKey: conversationKey)
+        guard let header = try? readHeader(url),
+              header.identity == identity(domain),
+              header.tokens.count < prompt.count,
+              prompt.starts(with: header.tokens),
+              let file = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+        guard let snapshot = decode(file, tokens: header.tokens, identity: identity(domain),
+                                    owner: runner.snapshotOwner, device: device) else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+        return snapshot
+    }
+
+    private func chatFileURL(conversationKey: String) -> URL {
+        directory.appendingPathComponent(
+            TUFFPrefixSnapshotLocation.chatSnapshotFileName(conversationKey: conversationKey))
+    }
+
+    /// Reads only the header, so a check never maps a whole snapshot.
+    private func readHeader(_ url: URL) throws -> Header? {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let magic = Self.magic
+        guard let prefix = try handle.read(upToCount: magic.count + 4),
+              prefix.count == magic.count + 4, prefix.prefix(magic.count) == magic else { return nil }
+        let length = prefix.suffix(4).withUnsafeBytes {
+            Int(UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)))
+        }
+        guard length > 0, length <= 64 << 20,
+              let data = try handle.read(upToCount: length), data.count == length else { return nil }
+        return try? JSONDecoder().decode(Header.self, from: data)
+    }
+
+    private func write(_ snapshot: RunnerStateSnapshot, tokens: [Int32],
+                       domain: ConversationCacheDomain, to url: URL) {
         guard snapshot.position == tokens.count, budgetBytes > 0,
               let length = snapshot.storage?.length, length <= budgetBytes else { return }
-        let url = fileURL(tokens: tokens, domain: domain)
         let identity = identity(domain)
         writes.async { [self] in
             guard let storage = snapshot.storage else { return }

@@ -3,6 +3,7 @@ import Observation
 import TUFFInferenceTypes
 import TUFFRuntimeDescriptions
 import TUFFModelMetadata
+import TUFFModelCatalog
 
 public enum AppRunState: Equatable, Sendable {
     case idle
@@ -154,6 +155,8 @@ public final class AppConversationStore {
         let removed = conversations[index].turns[turnIndex]
         conversations[index].turns.removeSubrange(turnIndex...)
         conversations[index].updatedAt = Date()
+        // The saved state still holds the removed turns.
+        removeSavedState(conversationID: selectedConversationID)
         // The attachment files stay: an image is shared by every turn that
         // carries it forward, and this chat may still hold earlier ones. The
         // directory goes when the chat does.
@@ -199,7 +202,18 @@ public final class AppConversationStore {
         } catch {
             persistenceError = String(describing: error)
         }
+        removeSavedState(conversationID: id)
         persistArchive()
+    }
+
+    /// The engine saves a chat's computed state so it can resume after a
+    /// restart. That state is the conversation in another form, so it goes
+    /// when the conversation does.
+    private func removeSavedState(conversationID: UUID) {
+        let key = conversationID.uuidString
+        Task.detached(priority: .utility) {
+            TUFFPrefixSnapshotLocation.removeChatSnapshots(conversationKey: key)
+        }
     }
 
     /// The turn that has been sent but not yet answered, and the chat it went

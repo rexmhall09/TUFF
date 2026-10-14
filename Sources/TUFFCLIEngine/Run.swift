@@ -482,6 +482,13 @@ public func run(args: Args,
             }
             stderr.write(Data(lines.utf8))
         }
+        if let path = args.runReportPath,
+           let data = try? JSONEncoder().encode(CLIRunReport(
+            prefillTokens: stats.prefillTokens, newTokens: stats.newTokens,
+            prefillSeconds: stats.prefillSeconds, decodeSeconds: stats.decodeSeconds)) {
+            // Best effort: a missing report only means the run isn't learned from.
+            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        }
         if !args.quiet {
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds

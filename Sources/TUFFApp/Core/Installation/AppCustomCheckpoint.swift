@@ -14,6 +14,17 @@ public struct AppCustomCheckpoint: Codable, Equatable, Sendable, Identifiable {
     public let manifestSHA256: String
     public let installedBytes: UInt64
 
+    public init(id: String, name: String, sourcePath: String, templateID: TUFFModelID,
+                sourceIndexSHA256: String, manifestSHA256: String, installedBytes: UInt64) {
+        self.id = id
+        self.name = name
+        self.sourcePath = sourcePath
+        self.templateID = templateID
+        self.sourceIndexSHA256 = sourceIndexSHA256
+        self.manifestSHA256 = manifestSHA256
+        self.installedBytes = installedBytes
+    }
+
     public var descriptor: AppModelInstallDescriptor {
         AppModelInstallDescriptor(displayName: name, repoID: "local/\(id)", revision: manifestSHA256,
             sourceIndexSHA256: sourceIndexSHA256, approximateDownloadBytes: 0,
@@ -84,6 +95,57 @@ public struct AppCustomCheckpoint: Codable, Equatable, Sendable, Identifiable {
     public struct ImportError: LocalizedError {
         public let errorDescription: String?
         public init(_ message: String) { errorDescription = message }
+    }
+}
+
+/// Custom checkpoints as other processes see them, such as `tuff serve`,
+/// which offers each one under a name a client can type.
+public enum AppCustomCheckpointRegistry {
+    /// The registered checkpoints beside `modelsRoot`'s models. An unreadable
+    /// registry offers none rather than failing whoever asked.
+    public static func checkpoints(modelsRoot: URL) -> [AppCustomCheckpoint] {
+        (try? AppCustomCheckpointStore.load(
+            at: modelsRoot.appendingPathComponent("custom-checkpoints.json"))) ?? []
+    }
+
+    /// One API name per checkpoint, from its display name: lowercase letters,
+    /// digits and hyphens. A name a catalog model already answers to gets
+    /// `-custom`; a repeat gets `-2`, `-3`, in registry order, so names stay
+    /// put while the registry does.
+    public static func apiNames(for checkpoints: [AppCustomCheckpoint]) -> [String: String] {
+        let reserved = Set(TUFFModelCatalog.all.flatMap {
+            [$0.apiModelID, $0.selector, $0.id.rawValue] + $0.aliases
+        } + ["default"])
+        var taken = reserved
+        var names: [String: String] = [:]
+        for checkpoint in checkpoints {
+            var base = slug(checkpoint.name)
+            if base.isEmpty { base = "custom" }
+            if reserved.contains(base) { base += "-custom" }
+            var name = base
+            var suffix = 2
+            while taken.contains(name) {
+                name = "\(base)-\(suffix)"
+                suffix += 1
+            }
+            taken.insert(name)
+            names[checkpoint.id] = name
+        }
+        return names
+    }
+
+    static func slug(_ text: String) -> String {
+        var result = ""
+        for scalar in text.lowercased().unicodeScalars {
+            if ("a"..."z").contains(scalar) || ("0"..."9").contains(scalar) {
+                result.unicodeScalars.append(scalar)
+            } else if !result.isEmpty, !result.hasSuffix("-") {
+                result += "-"
+            }
+        }
+        result = String(result.prefix(64))
+        while result.hasSuffix("-") { result.removeLast() }
+        return result
     }
 }
 

@@ -112,7 +112,7 @@ let package = Package(
         ),
         .target(
             name: "TUFFCLICore",
-            dependencies: ["TUFFModelCatalog", "TUFFCLIArguments", "TUFFDecodeProtocol", "TUFFRuntimeManagement", "TUFFAppCore"],
+            dependencies: ["TUFFModelCatalog", "TUFFCLIArguments", "TUFFDecodeProtocol", "TUFFRuntimeManagement", "TUFFAppCore", "TUFFModelMetadata"],
             path: "Sources/TUFFCLI",
             exclude: ["Command"]
         ),
